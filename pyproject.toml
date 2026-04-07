@@ -1,0 +1,55 @@
+[build-system]
+build-backend = "hatchling.build"
+
+requires = [ "hatchling" ]
+
+[project]
+name = "mtor"
+version = "0.5.0"
+description = "Agent-first coding task dispatcher for Temporal workflows"
+readme = "README.md"
+keywords = [
+  "agent",
+  "cli",
+  "ribosome",
+  "temporal",
+  "translation",
+  "workflow",
+]
+license = "MIT"
+requires-python = ">=3.11"
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "cyclopts",
+  "porin",
+  "temporalio>=1.7",
+]
+
+urls.Homepage = "https://github.com/terry-li-hm/mtor"
+urls.Issues = "https://github.com/terry-li-hm/mtor/issues"
+urls.Repository = "https://github.com/terry-li-hm/mtor"
+scripts.mtor = "mtor.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [ "mtor" ]
+
+[tool.pytest.ini_options]
+testpaths = [ "assays" ]
+
+[tool.pyright]
+include = [ "mtor" ]
+executionEnvironments = [
+  { root = "assays", reportMissingImports = "none", reportAttributeAccessIssue = "none" },
+]
