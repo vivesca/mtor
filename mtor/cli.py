@@ -455,25 +455,33 @@ def logs(workflow_id: str) -> None:
         except Exception:
             pass
 
-    # Step 2: If no output_path from result, fall back to ls + grep
+    # Step 2: If no output_path from result, fall back to local glob then SSH ls
     if not log_path:
-        try:
-            find_result = subprocess.run(
-                ["ssh", WORKER_HOST, f"ls -t {OUTPUTS_DIR}/*.txt 2>/dev/null | head -20"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if find_result.returncode == 0:
-                # Extract the hex suffix from workflow_id (e.g. ribosome-zhipu-af3c43d1 -> af3c43d1)
-                wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
-                for line in find_result.stdout.strip().splitlines():
-                    fname = line.strip().rsplit("/", 1)[-1]
-                    if wf_suffix in fname:
-                        log_path = line.strip()
-                        break
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+        wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+        # Try local directory first
+        outputs_path = Path(OUTPUTS_DIR)
+        if outputs_path.exists():
+            for txt_file in sorted(outputs_path.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+                if wf_suffix in txt_file.name:
+                    log_path = str(txt_file)
+                    break
+        # Fall back to SSH
+        if not log_path:
+            try:
+                find_result = subprocess.run(
+                    ["ssh", WORKER_HOST, f"ls -t {OUTPUTS_DIR}/*.txt 2>/dev/null | head -20"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if find_result.returncode == 0:
+                    for line in find_result.stdout.strip().splitlines():
+                        fname = line.strip().rsplit("/", 1)[-1]
+                        if wf_suffix in fname:
+                            log_path = line.strip()
+                            break
+            except (subprocess.TimeoutExpired, OSError):
+                pass
 
     if not log_path:
         sys.exit(
@@ -487,6 +495,37 @@ def logs(workflow_id: str) -> None:
             )
         )
 
+    # Try local file first (avoids SSH round-trip); fetch + cache if missing
+    local_path = Path(log_path)
+    if not local_path.is_absolute():
+        local_path = Path.home() / log_path.lstrip("~/")
+    if not local_path.exists():
+        # Fetch single file from worker host into local mirror
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["scp", f"{WORKER_HOST}:{log_path}", str(local_path)],
+                capture_output=True,
+                timeout=15,
+            )
+    if local_path.exists():
+        lines = local_path.read_text().splitlines()[-LOG_TAIL_LINES:]
+        _ok(
+            cmd,
+            {
+                "lines": lines,
+                "log_path": str(local_path),
+                "truncated": len(lines) == LOG_TAIL_LINES,
+            },
+            [
+                _action(f"mtor status {workflow_id}", "Check workflow status"),
+                _action(f"mtor cancel {workflow_id}", "Cancel if still running"),
+            ],
+            version=VERSION,
+        )
+        return
+
+    # Fall back to SSH
     try:
         result = subprocess.run(
             ["ssh", WORKER_HOST, f"tail -{LOG_TAIL_LINES} {log_path}"],
