@@ -45,6 +45,7 @@ from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
 from mtor.spec import scaffold_spec, update_spec_status
+from mtor.watch import run_watch
 
 
 # ---------------------------------------------------------------------------
@@ -1344,6 +1345,40 @@ def plan_done(
     update_spec_status(spec_file, "done")
 
     _ok(cmd, {"name": name, "status": "done"}, version=VERSION)
+
+
+@app.command
+def watch(
+    *,
+    interval: Annotated[int, Parameter(name=["-i", "--interval"])] = 60,
+    once: Annotated[bool, Parameter(name=["--once"])] = False,
+    max_cycles: Annotated[int | None, Parameter(name=["--max-cycles"])] = None,
+) -> None:
+    """Poll ganglion remote and auto-sync new commits."""
+    import sys as _sys
+
+    cmd = "mtor watch"
+
+    def _on_cycle(cycle):
+        if cycle.fetched > 0:
+            status = "merged" if cycle.merged else f"error: {cycle.error}"
+            print(f"[watch] cycle {cycle.cycle}: fetched {cycle.fetched} commits, {status}", file=_sys.stderr)
+        else:
+            print(f"[watch] cycle {cycle.cycle}: up to date", file=_sys.stderr)
+
+    stats = run_watch(
+        REPO_DIR,
+        interval=interval,
+        max_cycles=max_cycles,
+        once=once,
+        on_cycle=_on_cycle,
+    )
+
+    result = stats.to_dict()
+    next_actions = [
+        _action("mtor list", "Check synced workflows"),
+    ]
+    _ok(cmd, result, next_actions, version=VERSION)
 
 
 @app.command(name="dispatch-all")
