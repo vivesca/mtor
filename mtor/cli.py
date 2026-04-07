@@ -56,8 +56,12 @@ def default_handler(
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
     experiment: Annotated[bool, Parameter(name=["-x", "--experiment"])] = False,
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
+    then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
 ) -> None:
-    """Bare invocation returns command tree; with a prompt, dispatches to Temporal."""
+    """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
+
+    --then: follow-up prompts dispatched after this task completes with approved verdict.
+    """
     if prompt is None:
         if sys.stdout.isatty():
             app.help_print()
@@ -65,7 +69,13 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
-        _dispatch_prompt(prompt, provider=provider, experiment=experiment, skip_sha_check=skip_sha_check)
+        _dispatch_prompt(
+            prompt,
+            provider=provider,
+            experiment=experiment,
+            skip_sha_check=skip_sha_check,
+            chain=then,
+        )
 
 
 @app.command(name="list")
@@ -510,6 +520,32 @@ def research(
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
     _dispatch_prompt(prompt, provider=provider, mode="research", skip_sha_check=skip_sha_check)
+
+
+@app.command
+def auto(
+    *,
+    provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
+    skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
+) -> None:
+    """Self-improvement: scan mtor codebase for issues, dispatch a fix task."""
+    findings = _run_checks()
+    if not findings:
+        _ok("mtor auto", {"action": "none", "reason": "No issues found"}, version=VERSION)
+        return
+
+    # Build a prompt from the top findings
+    finding_lines = "\n".join(f"- {f['file']}:{f.get('line','')} {f['issue']}" for f in findings[:5])
+    auto_prompt = (
+        f"Fix the following issues in ~/code/mtor:\n{finding_lines}\n\n"
+        "Make assays/test_auto_fixes.py pass if you add new tests."
+    )
+    _dispatch_prompt(
+        auto_prompt,
+        provider=provider,
+        mode="build",
+        skip_sha_check=skip_sha_check,
+    )
 
 
 @app.command

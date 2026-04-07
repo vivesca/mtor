@@ -210,6 +210,7 @@ def _dispatch_prompt(
     experiment: bool = False,
     mode: str | None = None,
     skip_sha_check: bool = False,
+    chain: list[str] | None = None,
 ) -> None:
     """Core dispatch logic."""
     # If prompt is a file path, read it as the spec
@@ -308,6 +309,8 @@ def _dispatch_prompt(
         }
         if spec_mode == "experiment":
             spec["experiment"] = True
+        if chain:
+            spec["chain"] = chain
 
         async def _start():
             from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -333,6 +336,9 @@ def _dispatch_prompt(
             result_envelope["experiment"] = True
         if spec_mode == "scout":
             result_envelope["scout"] = True
+        if chain:
+            result_envelope["chain"] = chain
+            result_envelope["chain_length"] = len(chain)
 
         next_actions = [
             _action(f"mtor status {started_id}", "Poll workflow status"),
