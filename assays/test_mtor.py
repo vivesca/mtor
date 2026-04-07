@@ -106,6 +106,7 @@ def _patch_client(mock_client):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(mock_client, None)))
+    stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
     return stack
 
 
@@ -114,6 +115,7 @@ def _patch_client_error(error_msg="Connection refused"):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(None, error_msg)))
+    stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
     return stack
 
 
