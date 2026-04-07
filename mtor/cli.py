@@ -1402,36 +1402,184 @@ def plan_done(
 
 @app.command
 def watch(
+    action: Literal["start", "query", "stop"] = "start",
+    workflow_id: Annotated[str | None, Parameter(name=["--workflow-id", "-w"])] = None,
     *,
     interval: Annotated[int, Parameter(name=["-i", "--interval"])] = 60,
     once: Annotated[bool, Parameter(name=["--once"])] = False,
     max_cycles: Annotated[int | None, Parameter(name=["--max-cycles"])] = None,
+    max_concurrent: Annotated[int, Parameter(name=["--max-concurrent"])] = 3,
+    plan_dir: Annotated[str, Parameter(name=["--plan-dir"])] = "",
+    provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
 ) -> None:
-    """Poll ganglion remote and auto-sync new commits."""
-    import sys as _sys
+    """Poll ganglion remote, auto-sync, and dispatch ready specs.
 
-    cmd = "mtor watch"
+    Actions:
+      start  – start WatchWorkflow on Temporal (default)
+      query  – query status of a running WatchWorkflow (needs -w ID)
+      stop   – stop a running WatchWorkflow (needs -w ID)
+    """
+    cmd = f"mtor watch {action}"
 
-    def _on_cycle(cycle):
-        if cycle.fetched > 0:
-            status = "merged" if cycle.merged else f"error: {cycle.error}"
-            print(f"[watch] cycle {cycle.cycle}: fetched {cycle.fetched} commits, {status}", file=_sys.stderr)
-        else:
-            print(f"[watch] cycle {cycle.cycle}: up to date", file=_sys.stderr)
+    if action == "stop":
+        _stop_watch_workflow(cmd, workflow_id)
+        return
 
-    stats = run_watch(
-        REPO_DIR,
-        interval=interval,
-        max_cycles=max_cycles,
-        once=once,
-        on_cycle=_on_cycle,
+    if action == "query":
+        _query_watch_workflow(cmd, workflow_id)
+        return
+
+    # action == "start"
+    # --once: use local run_watch (backward compat)
+    if once:
+        import sys as _sys
+
+        def _on_cycle(cycle):
+            if cycle.fetched > 0:
+                status = "merged" if cycle.merged else f"error: {cycle.error}"
+                print(f"[watch] cycle {cycle.cycle}: fetched {cycle.fetched} commits, {status}", file=_sys.stderr)
+            else:
+                print(f"[watch] cycle {cycle.cycle}: up to date", file=_sys.stderr)
+
+        stats = run_watch(
+            REPO_DIR,
+            interval=interval,
+            max_cycles=max_cycles,
+            once=once,
+            on_cycle=_on_cycle,
+        )
+        _ok(cmd, stats.to_dict(), [_action("mtor list", "Check synced workflows")], version=VERSION)
+        return
+
+    # Start Temporal-native WatchWorkflow
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
+                "TEMPORAL_UNREACHABLE",
+                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                [_action("mtor doctor", "Run health check")],
+                exit_code=3,
+            )
+        )
+
+    from datetime import UTC, datetime
+
+    from mtor.worker.workflow import WatchWorkflow
+
+    wf_id = f"watch-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
+    params = {
+        "repo_path": REPO_DIR,
+        "plan_dir": plan_dir,
+        "interval": interval,
+        "max_concurrent": max_concurrent,
+        "max_cycles": max_cycles or 100,
+        "provider": provider,
+    }
+
+    async def _start():
+        handle = await client.start_workflow(
+            WatchWorkflow.run,
+            args=[params],
+            id=wf_id,
+            task_queue=TASK_QUEUE,
+        )
+        return handle.id
+
+    started_id = asyncio.run(_start())
+    _ok(
+        cmd,
+        {"workflow_id": started_id, "status": "started", "params": params},
+        [
+            _action(f"mtor watch query -w {started_id}", "Query watch status"),
+            _action(f"mtor watch stop -w {started_id}", "Stop watch workflow"),
+        ],
+        version=VERSION,
     )
 
-    result = stats.to_dict()
-    next_actions = [
-        _action("mtor list", "Check synced workflows"),
-    ]
-    _ok(cmd, result, next_actions, version=VERSION)
+
+def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
+    """Stop a running WatchWorkflow via signal or termination."""
+    if not workflow_id:
+        # Try to find running watch workflows
+        client, err = _get_client()
+        if err:
+            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+
+        async def _find_and_stop():
+            stopped = []
+            async for ex in client.list_workflows(query="ExecutionStatus = 'Running'"):
+                if "watch-" in ex.id:
+                    handle = client.get_workflow_handle(ex.id)
+                    try:
+                        await handle.signal("stop")
+                        stopped.append(ex.id)
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            await handle.terminate(reason="Stopped via mtor watch stop")
+                        stopped.append(ex.id)
+            return stopped
+
+        stopped = asyncio.run(_find_and_stop())
+        if stopped:
+            _ok(cmd, {"stopped": stopped, "count": len(stopped)}, version=VERSION)
+        else:
+            _ok(cmd, {"stopped": [], "count": 0, "message": "No running watch workflows found"}, version=VERSION)
+        return
+
+    client, err = _get_client()
+    if err:
+        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+
+    async def _stop():
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            await handle.signal("stop")
+            return "signaled"
+        except Exception:
+            await handle.terminate(reason="Stopped via mtor watch stop")
+            return "terminated"
+
+    method = asyncio.run(_stop())
+    _ok(cmd, {"workflow_id": workflow_id, "status": method}, version=VERSION)
+
+
+def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
+    """Query the status of a running WatchWorkflow."""
+    if not workflow_id:
+        sys.exit(
+            _err(
+                cmd,
+                "Missing workflow_id",
+                "MISSING_ARGS",
+                "Provide -w/--workflow-id or omit query to list watch workflows",
+                exit_code=2,
+            )
+        )
+
+    client, err = _get_client()
+    if err:
+        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+
+    async def _query():
+        handle = client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
+        result = None
+        status_name = desc.status.name if desc.status else "UNKNOWN"
+        if status_name == "COMPLETED":
+            with contextlib.suppress(Exception):
+                result = await handle.result()
+        return {
+            "workflow_id": workflow_id,
+            "status": status_name,
+            "start_time": desc.start_time.isoformat() if desc.start_time else None,
+            "result": result,
+        }
+
+    result = asyncio.run(_query())
+    _ok(cmd, result, version=VERSION)
 
 
 @app.command
@@ -1602,3 +1750,49 @@ def dispatch_all(
         result["dry_run"] = True
 
     _ok(cmd, result, version=VERSION)
+
+
+# ---------------------------------------------------------------------------
+# Infra subcommand group
+# ---------------------------------------------------------------------------
+
+infra_app = App(name="infra", help_flags=[], version_flags=[])
+app.command(infra_app)
+
+
+@infra_app.command
+def check() -> None:
+    """Infrastructure health check — worker SSH, repo, git, disk."""
+    cmd = "mtor infra check"
+    report = _check_health()
+    result = report.to_dict()
+    next_actions = []
+    if not report.ok:
+        next_actions.append(_action("mtor doctor", "Full health check"))
+        next_actions.append(_action("mtor infra deploy", "Redeploy to fix issues"))
+    _ok(cmd, result, next_actions, version=VERSION)
+
+
+@infra_app.command
+def deploy() -> None:
+    """Sync code to worker, restart services, verify health."""
+    cmd = "mtor infra deploy"
+    result = _deploy()
+    payload = result.to_dict()
+    next_actions = []
+    if result.healthy:
+        next_actions.append(_action("mtor infra check", "Verify health after deploy"))
+    else:
+        next_actions.append(_action("mtor doctor", "Full health check"))
+    _ok(cmd, payload, next_actions, version=VERSION)
+
+
+@infra_app.command
+def clean(
+    *,
+    older_than_days: Annotated[int, Parameter(name=["--older-than-days"])] = 7,
+) -> None:
+    """Remove old output and checkpoint files."""
+    cmd = "mtor infra clean"
+    result = _clean(older_than_days=older_than_days)
+    _ok(cmd, result.to_dict(), version=VERSION)

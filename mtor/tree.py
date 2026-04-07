@@ -522,3 +522,45 @@ tree.add_command(
     },
     annotations={"readonly": True},
 )
+tree.add_command(
+    "infra check",
+    "Infrastructure health check — worker SSH, repo, git, disk",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "checks": "array of {name, ok, detail}",
+    },
+    annotations={"readonly": True},
+)
+tree.add_command(
+    "infra deploy",
+    "Sync code to worker, restart services, verify health",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "steps": "array of {step, ok}",
+        "healthy": "boolean",
+        "error": "string or null",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
+    "infra clean",
+    "Remove old output and checkpoint files",
+    params=[
+        {
+            "name": "--older-than-days",
+            "type": "integer",
+            "required": False,
+            "default": 7,
+            "description": "Remove files older than N days",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "outputs_removed": "integer",
+        "checkpoints_removed": "integer",
+        "errors": "array of strings",
+    },
+    annotations={"readonly": False, "destructive": True},
+)
