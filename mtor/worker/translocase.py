@@ -1054,6 +1054,10 @@ async def chaperone(result: dict) -> dict:
     if any("test" in f.lower() for f in post_stat_text.splitlines()):
         score += 5  # includes test files
 
+    # Fallback diff bonus: main..HEAD was empty but base_sha..HEAD captured work
+    if isinstance(post_diff, dict) and post_diff.get("fallback") and post_stat_text.strip():
+        score += 10
+
     score = max(0, min(100, score))
 
     requeue_prompt = ""
