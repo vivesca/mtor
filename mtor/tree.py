@@ -399,3 +399,32 @@ tree.add_command(
     ],
     annotations={"readonly": False},
 )
+tree.add_command(
+    "plan",
+    "Display spec DAG — status, dependencies, and dispatchability",
+    params=[
+        {
+            "name": "--dir",
+            "type": "string",
+            "required": False,
+            "default": "~/epigenome/chromatin/loci/plans/",
+            "description": "Directory containing spec .md files",
+        },
+        {
+            "name": "--pending",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Show only dispatchable (ready) specs",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "result": {
+            "specs": "object (buckets) or empty array",
+            "counts": "object (per-bucket integer counts)",
+            "directory": "string",
+        },
+    },
+    annotations={"readonly": True},
+)
