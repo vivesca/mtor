@@ -122,6 +122,55 @@ class RejectionTracker:
 
 
 # ---------------------------------------------------------------------------
+# Circadian dispatch curve — time-based dispatch modulation
+# ---------------------------------------------------------------------------
+
+# Rate schedule (UTC hours):
+#   22–05  Overnight peak  →  1.0
+#   06–07  Morning taper   →  linear 1.0 → 0.2
+#   08–17  Daytime low     →  0.2
+#   18–21  Evening ramp    →  linear 0.2 → 1.0
+
+_TAPER_START = 6     # hour when taper begins
+_TAPER_END = 8       # hour when daytime floor is reached
+_RAMP_START = 18     # hour when evening ramp begins
+_RAMP_END = 22       # hour when overnight peak resumes
+
+_DAYTIME_RATE = 0.2
+_PEAK_RATE = 1.0
+
+
+def circadian_dispatch_rate(hour: int | None = None) -> float:
+    """Return the dispatch rate (0.0–1.0) for the given hour (UTC).
+
+    Overnight hours peak at 1.0.  The rate tapers before morning, stays low
+    during daytime, then ramps back up in the evening.
+
+    Args:
+        hour: Hour of day (0–23).  ``None`` uses the current UTC hour.
+    """
+    if hour is None:
+        hour = datetime.now(UTC).hour
+
+    # Overnight peak: 22–05
+    if hour >= _RAMP_END or hour < _TAPER_START:
+        return _PEAK_RATE
+
+    # Morning taper: 06–07  (linear from 1.0 → 0.2)
+    if _TAPER_START <= hour < _TAPER_END:
+        fraction = (hour - _TAPER_START) / (_TAPER_END - _TAPER_START)
+        return round(_PEAK_RATE - (_PEAK_RATE - _DAYTIME_RATE) * fraction, 2)
+
+    # Evening ramp: 18–21  (linear from 0.2 → 1.0)
+    if _RAMP_START <= hour < _RAMP_END:
+        fraction = (hour - _RAMP_START) / (_RAMP_END - _RAMP_START)
+        return round(_DAYTIME_RATE + (_PEAK_RATE - _DAYTIME_RATE) * fraction, 2)
+
+    # Daytime low: 08–17
+    return _DAYTIME_RATE
+
+
+# ---------------------------------------------------------------------------
 # AMPK sensing — ganglion load monitoring
 # ---------------------------------------------------------------------------
 
