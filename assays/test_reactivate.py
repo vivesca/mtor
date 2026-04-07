@@ -1,6 +1,6 @@
-"""Tests for mtor nudge — send reactivation signal to dormant workflows.
+"""Tests for mtor reactivate — send reactivation signal to dormant workflows.
 
-Runs via: cd ~/code/mtor && uv run pytest assays/test_nudge.py -x -v
+Runs via: cd ~/code/mtor && uv run pytest assays/test_reactivate.py -x -v
 """
 
 from __future__ import annotations
@@ -57,11 +57,11 @@ def make_mock_client():
 
 
 def test_test_nudge_sends_signal():
-    """nudge <workflow_id> sends 'nudge' signal and returns ok envelope."""
+    """reactivate <workflow_id> sends 'nudge' signal and returns ok envelope."""
     mock_client, mock_handle = make_mock_client()
 
     with patch("mtor.cli._get_client", return_value=(mock_client, None)):
-        exit_code, data = invoke(["nudge", "ribosome-test1234"])
+        exit_code, data = invoke(["reactivate", "ribosome-test1234"])
 
     assert exit_code == 0, f"Expected exit 0, got {exit_code}: {data}"
     assert data["ok"] is True
@@ -73,12 +73,12 @@ def test_test_nudge_sends_signal():
 
 
 def test_test_nudge_nonexistent_workflow():
-    """nudge <workflow_id> returns error when workflow not found."""
+    """reactivate <workflow_id> returns error when workflow not found."""
     mock_client, mock_handle = make_mock_client()
     mock_handle.signal = AsyncMock(side_effect=Exception("workflow not found: nope"))
 
     with patch("mtor.cli._get_client", return_value=(mock_client, None)):
-        exit_code, data = invoke(["nudge", "nonexistent-wf-9999"])
+        exit_code, data = invoke(["reactivate", "nonexistent-wf-9999"])
 
     assert exit_code == 4, f"Expected exit 4 (WORKFLOW_NOT_FOUND), got {exit_code}: {data}"
     assert data["ok"] is False

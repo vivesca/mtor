@@ -1,6 +1,6 @@
-"""Tests for mtor deptor freeze/thaw — deep lock blocking dispatch and sync.
+"""Tests for mtor deptor/dedeptor — deep lock blocking dispatch and sync.
 
-Runs via: cd ~/code/mtor && uv run pytest assays/test_freeze.py -x -v
+Runs via: cd ~/code/mtor && uv run pytest assays/test_deptor.py -x -v
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from mtor.cli import app
 
 
 # ---------------------------------------------------------------------------
-# Helpers (mirrored from test_pause.py)
+# Helpers (mirrored from test_rapa.py)
 # ---------------------------------------------------------------------------
 
 
@@ -126,7 +126,7 @@ def test_test_freeze_blocks_dispatch_and_sync(tmp_path, monkeypatch):
     assert exit_code == 1
     assert data["ok"] is False
     assert data["error"]["code"] == "FROZEN"
-    assert "thaw" in data["fix"].lower()
+    assert "dedeptor" in data["fix"].lower()
 
     # 2. Watch sync is blocked (skips cycle with "frozen" error)
     _init_git_repo(tmp_path)

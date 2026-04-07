@@ -1,6 +1,6 @@
-"""Tests for mtor pause/resume — file-based dispatch blocker.
+"""Tests for mtor rapa/derapa — file-based dispatch blocker.
 
-Runs via: cd ~/code/mtor && uv run pytest assays/test_pause.py -x -v
+Runs via: cd ~/code/mtor && uv run pytest assays/test_rapa.py -x -v
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def test_test_pause_blocks_dispatch(tmp_path, monkeypatch):
     assert exit_code == 1
     assert data["ok"] is False
     assert data["error"]["code"] == "PAUSED"
-    assert "resume" in data["fix"].lower()
+    assert "derapa" in data["fix"].lower()
 
     # Cleanup
     from mtor.watch import resume as _resume
@@ -183,29 +183,29 @@ class TestPauseCLI:
 
     def test_pause_cmd_returns_paused(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mtor, "REPO_DIR", str(tmp_path))
-        exit_code, data = invoke(["pause"])
+        exit_code, data = invoke(["rapa"])
         assert exit_code == 0
         assert data["ok"] is True
         assert data["result"]["status"] == "paused"
 
     def test_pause_cmd_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mtor, "REPO_DIR", str(tmp_path))
-        invoke(["pause"])
-        exit_code, data = invoke(["pause"])
+        invoke(["rapa"])
+        exit_code, data = invoke(["rapa"])
         assert exit_code == 0
         assert data["result"]["status"] == "already_paused"
 
     def test_resume_cmd_returns_resumed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mtor, "REPO_DIR", str(tmp_path))
-        invoke(["pause"])
-        exit_code, data = invoke(["resume"])
+        invoke(["rapa"])
+        exit_code, data = invoke(["derapa"])
         assert exit_code == 0
         assert data["ok"] is True
         assert data["result"]["status"] == "resumed"
 
     def test_resume_cmd_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mtor, "REPO_DIR", str(tmp_path))
-        exit_code, data = invoke(["resume"])
+        exit_code, data = invoke(["derapa"])
         assert exit_code == 0
         assert data["result"]["status"] == "already_running"
 

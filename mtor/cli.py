@@ -209,10 +209,10 @@ def default_handler(
             sys.exit(
                 _err(
                     cmd,
-                    "Dispatching is frozen. Use 'mtor thaw' to unfreeze.",
+                    "Dispatching is frozen. Use 'mtor dedeptor' to unfreeze.",
                     "FROZEN",
-                    "Run: mtor thaw",
-                    [_action("mtor thaw", "Unfreeze dispatching")],
+                    "Run: mtor dedeptor",
+                    [_action("mtor dedeptor", "Unfreeze dispatching")],
                     exit_code=1,
                 )
             )
@@ -222,10 +222,10 @@ def default_handler(
             sys.exit(
                 _err(
                     cmd,
-                    "Dispatching is paused. Use 'mtor resume' to resume.",
+                    "Dispatching is paused. Use 'mtor derapa' to resume.",
                     "PAUSED",
-                    "Run: mtor resume",
-                    [_action("mtor resume", "Resume dispatching")],
+                    "Run: mtor derapa",
+                    [_action("mtor derapa", "Resume dispatching")],
                     exit_code=1,
                 )
             )
@@ -933,10 +933,10 @@ def deny(workflow_id: str) -> None:
     _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
 
 
-@app.command
-def nudge(workflow_id: str) -> None:
+@app.command(name="reactivate")
+def reactivate(workflow_id: str) -> None:
     """Send reactivation signal to a dormant workflow."""
-    cmd = f"mtor nudge {workflow_id}"
+    cmd = f"mtor reactivate {workflow_id}"
 
     client, err = _get_client()
     if err:
@@ -980,7 +980,7 @@ def nudge(workflow_id: str) -> None:
             _err(
                 cmd,
                 exc_str,
-                "NUDGE_ERROR",
+                "REACTIVATE_ERROR",
                 "Check Temporal server health with: mtor doctor",
                 [_action("mtor doctor", "Run health check")],
             )
@@ -1654,10 +1654,10 @@ def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
     _ok(cmd, result, version=VERSION)
 
 
-@app.command
-def pause() -> None:
-    """Pause dispatching — blocks new tasks and watch sync cycles."""
-    cmd = "mtor pause"
+@app.command(name="rapa")
+def rapa() -> None:
+    """Pause dispatching — blocks new tasks and watch sync cycles (rapamycin)."""
+    cmd = "mtor rapa"
     if _is_paused():
         _ok(cmd, {"status": "already_paused"}, version=VERSION)
         return
@@ -1665,15 +1665,15 @@ def pause() -> None:
     _ok(
         cmd,
         {"status": "paused", "pause_file": str(path)},
-        [_action("mtor resume", "Resume dispatching")],
+        [_action("mtor derapa", "Resume dispatching")],
         version=VERSION,
     )
 
 
-@app.command
-def resume() -> None:
+@app.command(name="derapa")
+def derapa() -> None:
     """Resume dispatching — removes pause marker."""
-    cmd = "mtor resume"
+    cmd = "mtor derapa"
     if not _is_paused():
         _ok(cmd, {"status": "already_running"}, version=VERSION)
         return
@@ -1681,15 +1681,15 @@ def resume() -> None:
     _ok(
         cmd,
         {"status": "resumed", "was_paused": was_paused},
-        [_action("mtor pause", "Pause again if needed")],
+        [_action("mtor rapa", "Pause again if needed")],
         version=VERSION,
     )
 
 
-@app.command
-def freeze() -> None:
+@app.command(name="deptor")
+def deptor() -> None:
     """Freeze all activity — blocks dispatch and watch sync (deptor lock)."""
-    cmd = "mtor freeze"
+    cmd = "mtor deptor"
     if _is_frozen():
         _ok(cmd, {"status": "already_frozen"}, version=VERSION)
         return
@@ -1697,15 +1697,15 @@ def freeze() -> None:
     _ok(
         cmd,
         {"status": "frozen", "freeze_file": str(path)},
-        [_action("mtor thaw", "Unfreeze dispatching")],
+        [_action("mtor dedeptor", "Unfreeze dispatching")],
         version=VERSION,
     )
 
 
-@app.command
-def thaw() -> None:
-    """Thaw (unfreeze) — resumes all dispatch and sync activity."""
-    cmd = "mtor thaw"
+@app.command(name="dedeptor")
+def dedeptor() -> None:
+    """Unfreeze — resumes all dispatch and sync activity."""
+    cmd = "mtor dedeptor"
     if not _is_frozen():
         _ok(cmd, {"status": "not_frozen"}, version=VERSION)
         return
@@ -1713,7 +1713,7 @@ def thaw() -> None:
     _ok(
         cmd,
         {"status": "thawed", "was_frozen": was_frozen},
-        [_action("mtor freeze", "Freeze again if needed")],
+        [_action("mtor deptor", "Freeze again if needed")],
         version=VERSION,
     )
 
@@ -1857,46 +1857,46 @@ def dispatch_all(
 
 
 # ---------------------------------------------------------------------------
-# Infra subcommand group
+# Rictor subcommand group (formerly infra)
 # ---------------------------------------------------------------------------
 
-infra_app = App(name="infra", help_flags=[], version_flags=[])
-app.command(infra_app)
+rictor_app = App(name="rictor", help_flags=[], version_flags=[])
+app.command(rictor_app)
 
 
-@infra_app.command
+@rictor_app.command
 def check() -> None:
     """Infrastructure health check — worker SSH, repo, git, disk."""
-    cmd = "mtor infra check"
+    cmd = "mtor rictor check"
     report = _check_health()
     result = report.to_dict()
     next_actions = []
     if not report.ok:
         next_actions.append(_action("mtor doctor", "Full health check"))
-        next_actions.append(_action("mtor infra deploy", "Redeploy to fix issues"))
+        next_actions.append(_action("mtor rictor deploy", "Redeploy to fix issues"))
     _ok(cmd, result, next_actions, version=VERSION)
 
 
-@infra_app.command
+@rictor_app.command
 def deploy() -> None:
     """Sync code to worker, restart services, verify health."""
-    cmd = "mtor infra deploy"
+    cmd = "mtor rictor deploy"
     result = _deploy()
     payload = result.to_dict()
     next_actions = []
     if result.healthy:
-        next_actions.append(_action("mtor infra check", "Verify health after deploy"))
+        next_actions.append(_action("mtor rictor check", "Verify health after deploy"))
     else:
         next_actions.append(_action("mtor doctor", "Full health check"))
     _ok(cmd, payload, next_actions, version=VERSION)
 
 
-@infra_app.command
+@rictor_app.command
 def clean(
     *,
     older_than_days: Annotated[int, Parameter(name=["--older-than-days"])] = 7,
 ) -> None:
     """Remove old output and checkpoint files."""
-    cmd = "mtor infra clean"
+    cmd = "mtor rictor clean"
     result = _clean(older_than_days=older_than_days)
     _ok(cmd, result.to_dict(), version=VERSION)

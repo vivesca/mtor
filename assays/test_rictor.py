@@ -1,4 +1,4 @@
-"""Tests for mtor.infra — check_health, deploy, clean."""
+"""Tests for mtor.infra (rictor CLI) — check_health, deploy, clean."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class TestCheckHealth:
                 ok=True,
                 checks=[{"name": "test", "ok": True, "detail": "all good"}],
             )
-            exit_code, data = invoke(["infra", "check"])
+            exit_code, data = invoke(["rictor", "check"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "checks" in data["result"]
@@ -165,7 +165,7 @@ class TestDeploy:
                 steps=[{"step": "push", "ok": True}],
                 healthy=True,
             )
-            exit_code, data = invoke(["infra", "deploy"])
+            exit_code, data = invoke(["rictor", "deploy"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "steps" in data["result"]
@@ -292,7 +292,7 @@ class TestClean:
             mock_clean.return_value = CleanResult(
                 outputs_removed=3, checkpoints_removed=1
             )
-            exit_code, data = invoke(["infra", "clean"])
+            exit_code, data = invoke(["rictor", "clean"])
         assert exit_code == 0
         assert data["ok"] is True
         assert data["result"]["outputs_removed"] == 3

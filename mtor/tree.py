@@ -193,7 +193,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "nudge <workflow_id>",
+    "reactivate <workflow_id>",
     "Send reactivation signal to a dormant workflow",
     params=[
         {
@@ -357,8 +357,8 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "pause",
-    "Pause dispatching — blocks new tasks and watch sync cycles.",
+    "rapa",
+    "Pause dispatching — blocks new tasks and watch sync cycles (rapamycin).",
     params=[],
     returns={
         "ok": "boolean",
@@ -368,7 +368,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "resume",
+    "derapa",
     "Resume dispatching — removes pause marker.",
     params=[],
     returns={
@@ -379,7 +379,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "freeze",
+    "deptor",
     "Freeze all activity — blocks dispatch and watch sync (deptor lock).",
     params=[],
     returns={
@@ -390,8 +390,8 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "thaw",
-    "Thaw (unfreeze) — resumes all dispatch and sync activity.",
+    "dedeptor",
+    "Unfreeze — resumes all dispatch and sync activity.",
     params=[],
     returns={
         "ok": "boolean",
@@ -572,7 +572,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "infra check",
+    "rictor check",
     "Infrastructure health check — worker SSH, repo, git, disk",
     params=[],
     returns={
@@ -582,7 +582,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "infra deploy",
+    "rictor deploy",
     "Sync code to worker, restart services, verify health",
     params=[],
     returns={
@@ -594,7 +594,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "infra clean",
+    "rictor clean",
     "Remove old output and checkpoint files",
     params=[
         {
