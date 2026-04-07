@@ -329,6 +329,132 @@ def _detect_prior_commits(
         return []
 
 
+async def _heartbeat_stall_check(
+    proc, work_dir: str, provider: str, task: str, *, skip_stall: bool = False
+) -> None:
+    """Progress-based stall detection instead of dumb turn/time limits.
+
+    Every 30s, hash the git diff in the worktree. If the hash is unchanged
+    for 3 consecutive checks (frozen) or alternates between 2 values
+    (edit/revert oscillation), the agent is stalled.
+
+    Graduated response: first stall detection logs a warning; second kills.
+    Empty-diff blindness: if diff stays empty for 20+ ticks (~10min), warn;
+    at 30+ ticks (~15min), kill.
+    """
+    import hashlib
+
+    stall_frozen_threshold = 5  # consecutive identical hashes (~2.5 min)
+    stall_oscillation_threshold = 6  # alternating between 2 hashes
+    recent_hashes: list[str] = []
+    warnings_sent = 0
+    empty_ticks = 0
+    empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
+
+    tick = 0
+    while True:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL)
+        tick += 1
+
+        # Check if activity was cancelled — kill subprocess immediately
+        if activity.is_cancelled():
+            print(
+                f"[stall-detect] activity cancelled at tick {tick}, "
+                f"killing process (pid={proc.pid})",
+                file=sys.stderr,
+            )
+            proc.kill()
+            return
+
+        # Compute diff content hash
+        diff_hash = "unknown"
+        try:
+            diff_result = await asyncio.to_thread(
+                lambda: _subprocess.run(
+                    ["git", "diff", "main..HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=work_dir,
+                )
+            )
+            diff_hash = hashlib.sha256(diff_result.stdout.encode()).hexdigest()[:12]
+        except Exception:
+            pass
+
+        recent_hashes.append(diff_hash)
+        if len(recent_hashes) > stall_oscillation_threshold + 1:
+            recent_hashes.pop(0)
+
+        with contextlib.suppress(Exception):
+            activity.heartbeat(f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash}")
+
+        # Skip stall checks for scout/research modes
+        if skip_stall:
+            continue
+
+        # Skip stall checks for first 2 minutes (4 ticks) — let agent ramp up
+        if tick < 4:
+            continue
+
+        # Track empty diff ticks — agent may be stuck in read-only exploration
+        if diff_hash == empty_diff_hash:
+            empty_ticks += 1
+            if empty_ticks >= 30:
+                print(
+                    f"[stall-detect] empty diff timeout at tick {tick} "
+                    f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
+                    f"killing process (pid={proc.pid})",
+                    file=sys.stderr,
+                )
+                proc.kill()
+                return
+            if empty_ticks >= 20:
+                print(
+                    f"[stall-detect] empty diff warning at tick {tick} "
+                    f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",
+                    file=sys.stderr,
+                )
+                warnings_sent += 1
+            continue
+
+        # Non-empty diff — reset empty counter
+        empty_ticks = 0
+
+        # Detect frozen: last N hashes identical
+        is_frozen = (
+            len(recent_hashes) >= stall_frozen_threshold
+            and len(set(recent_hashes[-stall_frozen_threshold:])) == 1
+        )
+
+        # Detect oscillation: alternating between exactly 2 hashes
+        is_oscillating = False
+        if len(recent_hashes) >= stall_oscillation_threshold:
+            tail = recent_hashes[-stall_oscillation_threshold:]
+            unique = set(tail)
+            if len(unique) == 2:
+                # Check if it's truly alternating (ABAB pattern)
+                is_oscillating = all(
+                    tail[idx] != tail[idx + 1] for idx in range(len(tail) - 1)
+                )
+
+        if is_frozen or is_oscillating:
+            stall_type = "frozen" if is_frozen else "oscillating"
+            warnings_sent += 1
+            print(
+                f"[stall-detect] {stall_type} at tick {tick} "
+                f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
+                file=sys.stderr,
+            )
+            if warnings_sent >= 2:
+                print(
+                    f"[stall-detect] killing stalled process (pid={proc.pid})",
+                    file=sys.stderr,
+                )
+                proc.kill()
+                return
+
+
 @activity.defn
 async def translate(task: str, provider: str, mode: str = "build") -> dict:
     """Execute a single ribosome task as a subprocess."""
@@ -457,95 +583,13 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
         )
 
-        async def _heartbeat_with_stall_detection():
-            """Progress-based stall detection instead of dumb turn/time limits.
-
-            Every 30s, hash the git diff in the worktree. If the hash is unchanged
-            for 3 consecutive checks (frozen) or alternates between 2 values
-            (edit/revert oscillation), the agent is stalled.
-
-            Graduated response: first stall detection logs a warning; second kills.
-            """
-            import hashlib
-
-            stall_frozen_threshold = 5  # consecutive identical hashes (~2.5 min)
-            stall_oscillation_threshold = 6  # alternating between 2 hashes
-            recent_hashes: list[str] = []
-            warnings_sent = 0
-            empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
-
-            tick = 0
-            while True:
-                await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                tick += 1
-
-                # Compute diff content hash
-                diff_hash = "unknown"
-                try:
-                    diff_result = await asyncio.to_thread(
-                        lambda: _subprocess.run(
-                            ["git", "diff", "main..HEAD"],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            cwd=work_dir,
-                        )
-                    )
-                    diff_hash = hashlib.sha256(diff_result.stdout.encode()).hexdigest()[:12]
-                except Exception:
-                    pass
-
-                recent_hashes.append(diff_hash)
-                if len(recent_hashes) > stall_oscillation_threshold + 1:
-                    recent_hashes.pop(0)
-
-                with contextlib.suppress(Exception):
-                    activity.heartbeat(f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash}")
-
-                # Skip stall checks for first 2 minutes (4 ticks) — let agent ramp up
-                if tick < 4:
-                    continue
-
-                # Skip stall checks when diff is empty — agent hasn't started writing
-                # yet (CC startup, dep install, web fetch, or explore mode which is
-                # read-only). Only detect stalls once the agent has made changes.
-                if diff_hash == empty_diff_hash:
-                    continue
-
-                # Detect frozen: last N hashes identical
-                is_frozen = (
-                    len(recent_hashes) >= stall_frozen_threshold
-                    and len(set(recent_hashes[-stall_frozen_threshold:])) == 1
-                )
-
-                # Detect oscillation: alternating between exactly 2 hashes
-                is_oscillating = False
-                if len(recent_hashes) >= stall_oscillation_threshold:
-                    tail = recent_hashes[-stall_oscillation_threshold:]
-                    unique = set(tail)
-                    if len(unique) == 2:
-                        # Check if it's truly alternating (ABAB pattern)
-                        is_oscillating = all(
-                            tail[idx] != tail[idx + 1] for idx in range(len(tail) - 1)
-                        )
-
-                if is_frozen or is_oscillating:
-                    stall_type = "frozen" if is_frozen else "oscillating"
-                    warnings_sent += 1
-                    print(
-                        f"[stall-detect] {stall_type} at tick {tick} "
-                        f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
-                        file=sys.stderr,
-                    )
-                    if warnings_sent >= 2:
-                        print(
-                            f"[stall-detect] killing stalled process (pid={proc.pid})",
-                            file=sys.stderr,
-                        )
-                        proc.kill()
-                        return
-
-        hb_task = asyncio.create_task(_heartbeat_with_stall_detection())
+        _skip_stall = mode in ("scout", "research")
+        hb_task = asyncio.create_task(
+            _heartbeat_stall_check(
+                proc, work_dir, provider, task,
+                skip_stall=_skip_stall,
+            )
+        )
         try:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
