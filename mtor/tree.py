@@ -291,6 +291,45 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
+    "watch",
+    "Poll ganglion remote and auto-sync new commits.",
+    params=[
+        {
+            "name": "--interval",
+            "type": "integer",
+            "required": False,
+            "default": 60,
+            "description": "Seconds between sync attempts",
+        },
+        {
+            "name": "--once",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Run exactly one sync cycle",
+        },
+        {
+            "name": "--max-cycles",
+            "type": "integer",
+            "required": False,
+            "default": None,
+            "description": "Stop after N cycles (default: unlimited)",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "cycles": "integer",
+            "total_fetched": "integer",
+            "total_merged": "integer",
+            "total_errors": "integer",
+        },
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "auto",
     "Scan for improvement opportunities and dispatch self-targeted tasks.",
     params=[
