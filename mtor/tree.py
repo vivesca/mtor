@@ -330,6 +330,28 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
+    "pause",
+    "Pause dispatching — blocks new tasks and watch sync cycles.",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "result": {"status": "string", "pause_file": "string"},
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
+    "resume",
+    "Resume dispatching — removes pause marker.",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "result": {"status": "string", "was_paused": "boolean"},
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "auto",
     "Scan for improvement opportunities and dispatch self-targeted tasks.",
     params=[

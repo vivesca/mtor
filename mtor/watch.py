@@ -8,10 +8,47 @@ from __future__ import annotations
 
 import signal
 import time
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Callable
 
 from mtor.sync import sync_from_ganglion
+
+
+# ---------------------------------------------------------------------------
+# Pause / resume mechanism
+# ---------------------------------------------------------------------------
+
+
+def pause_file_path(repo_path: str | None = None) -> Path:
+    """Return the path to the pause marker file."""
+    from mtor import REPO_DIR
+
+    return Path(repo_path or REPO_DIR) / ".mtor-pause"
+
+
+def is_paused(repo_path: str | None = None) -> bool:
+    """Check if dispatching is paused."""
+    return pause_file_path(repo_path).exists()
+
+
+def pause(repo_path: str | None = None) -> Path:
+    """Create pause marker file. Returns path to the pause file."""
+    path = pause_file_path(repo_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"paused_at: {datetime.now(UTC).isoformat()}\n")
+    return path
+
+
+def resume(repo_path: str | None = None) -> bool:
+    """Remove pause marker file. Returns True if was paused, False if not."""
+    path = pause_file_path(repo_path)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
 @dataclass
@@ -53,6 +90,36 @@ class WatchStats:
         }
 
 
+@dataclass
+class RejectionTracker:
+    """Tracks dispatch rejection rate over a sliding window for negative feedback.
+
+    When the rejection rate exceeds *threshold*, the caller should throttle
+    dispatch.  Outcomes older than *window_size* are automatically evicted
+    so the rate reflects only recent history.
+    """
+
+    window_size: int = 20
+    threshold: float = 0.5
+    _outcomes: deque = field(default_factory=deque, init=False, repr=False)
+
+    def record(self, rejected: bool) -> None:
+        """Record a single dispatch outcome (rejected=True or accepted=False)."""
+        self._outcomes.append(rejected)
+        while len(self._outcomes) > self.window_size:
+            self._outcomes.popleft()
+
+    def rejection_rate(self) -> float:
+        """Return the fraction of rejected outcomes in the current window."""
+        if not self._outcomes:
+            return 0.0
+        return sum(self._outcomes) / len(self._outcomes)
+
+    def should_throttle(self) -> bool:
+        """Return True when the rejection rate meets or exceeds the threshold."""
+        return self.rejection_rate() >= self.threshold
+
+
 def run_watch(
     repo_path: str,
     *,
@@ -86,6 +153,33 @@ def run_watch(
     try:
         while not stopped:
             cycle_num = stats.cycles + 1
+
+            # Skip sync cycle when paused
+            if is_paused(repo_path):
+                cycle = WatchCycle(
+                    cycle=cycle_num,
+                    fetched=0,
+                    merged=False,
+                    error="paused",
+                    elapsed_s=0.0,
+                )
+                stats.record(cycle)
+
+                if on_cycle is not None:
+                    on_cycle(cycle)
+
+                if once:
+                    break
+
+                if max_cycles is not None and stats.cycles >= max_cycles:
+                    break
+
+                try:
+                    time.sleep(interval)
+                except KeyboardInterrupt:
+                    stopped = True
+                continue
+
             t0 = time.monotonic()
             result = sync_from_ganglion(repo_path)
             elapsed = time.monotonic() - t0

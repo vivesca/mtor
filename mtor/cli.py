@@ -46,7 +46,8 @@ from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
 from mtor.spec import scaffold_spec, update_spec_status
-from mtor.watch import run_watch
+from mtor.infra import check_health as _check_health, clean as _clean, deploy as _deploy
+from mtor.watch import is_paused as _is_paused, pause as _create_pause, resume as _remove_pause, run_watch
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,19 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
+        # Pause check — block dispatch when paused
+        if _is_paused():
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Dispatching is paused. Use 'mtor resume' to resume.",
+                    "PAUSED",
+                    "Run: mtor resume",
+                    [_action("mtor resume", "Resume dispatching")],
+                    exit_code=1,
+                )
+            )
         # Dedup check — block identical dispatches within 5-minute window
         # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
         dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
@@ -1418,6 +1432,38 @@ def watch(
         _action("mtor list", "Check synced workflows"),
     ]
     _ok(cmd, result, next_actions, version=VERSION)
+
+
+@app.command
+def pause() -> None:
+    """Pause dispatching — blocks new tasks and watch sync cycles."""
+    cmd = "mtor pause"
+    if _is_paused():
+        _ok(cmd, {"status": "already_paused"}, version=VERSION)
+        return
+    path = _create_pause()
+    _ok(
+        cmd,
+        {"status": "paused", "pause_file": str(path)},
+        [_action("mtor resume", "Resume dispatching")],
+        version=VERSION,
+    )
+
+
+@app.command
+def resume() -> None:
+    """Resume dispatching — removes pause marker."""
+    cmd = "mtor resume"
+    if not _is_paused():
+        _ok(cmd, {"status": "already_running"}, version=VERSION)
+        return
+    was_paused = _remove_pause()
+    _ok(
+        cmd,
+        {"status": "resumed", "was_paused": was_paused},
+        [_action("mtor pause", "Pause again if needed")],
+        version=VERSION,
+    )
 
 
 @app.command
