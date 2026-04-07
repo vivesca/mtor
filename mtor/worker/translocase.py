@@ -71,48 +71,68 @@ def _detect_repo(task: str, default: str) -> str:
     return default
 
 
-def _git_snapshot(cwd: str | None = None) -> dict:
-    """Capture git diff stat + numstat + commit list + full patch for review."""
+def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dict:
+    """Capture git diff stat + numstat + commit list + full patch for review.
+
+    When ``base_sha`` is provided and ``main..HEAD`` yields nothing (worktree
+    creation failed, ribosome committed directly on main), falls back to
+    ``{base_sha}..HEAD`` so the actual work is still captured.
+    """
     work_dir = cwd or str(Path.home() / "germline")
+    empty_result = {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""}
     try:
+        diff_range = "main..HEAD"
+        fallback = False
+
         stat = _subprocess.run(
-            ["git", "diff", "--stat", "main..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=work_dir,
-        )
-        numstat = _subprocess.run(
-            ["git", "diff", "--numstat", "main..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=work_dir,
+            ["git", "diff", "--stat", diff_range],
+            capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
         commits_r = _subprocess.run(
-            ["git", "log", "--oneline", "main..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=work_dir,
+            ["git", "log", "--oneline", diff_range],
+            capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
         commit_lines = [ln.strip() for ln in commits_r.stdout.strip().splitlines() if ln.strip()]
-        patch_r = _subprocess.run(
-            ["git", "diff", "main..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=work_dir,
+
+        # Fallback: main..HEAD is empty but base_sha was recorded before execution
+        if not commit_lines and not stat.stdout.strip() and base_sha:
+            fb_range = f"{base_sha}..HEAD"
+            fb_stat = _subprocess.run(
+                ["git", "diff", "--stat", fb_range],
+                capture_output=True, text=True, timeout=10, cwd=work_dir,
+            )
+            fb_commits = _subprocess.run(
+                ["git", "log", "--oneline", fb_range],
+                capture_output=True, text=True, timeout=10, cwd=work_dir,
+            )
+            fb_lines = [ln.strip() for ln in fb_commits.stdout.strip().splitlines() if ln.strip()]
+            if fb_lines or fb_stat.stdout.strip():
+                diff_range = fb_range
+                stat = fb_stat
+                commits_r = fb_commits
+                commit_lines = fb_lines
+                fallback = True
+
+        numstat = _subprocess.run(
+            ["git", "diff", "--numstat", diff_range],
+            capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
-        return {
+        patch_r = _subprocess.run(
+            ["git", "diff", diff_range],
+            capture_output=True, text=True, timeout=10, cwd=work_dir,
+        )
+        result = {
             "stat": stat.stdout[:2000],
             "numstat": numstat.stdout[:2000],
             "commits": commit_lines,
             "commit_count": len(commit_lines),
             "patch": patch_r.stdout[:5000],
         }
+        if fallback:
+            result["fallback"] = True
+        return result
     except Exception:
-        return {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""}
+        return empty_result
 
 
 def _git_pull_ff_only(repo_root: str) -> None:
@@ -535,6 +555,14 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         effective_task = prefix + task
 
     await asyncio.to_thread(_git_pull_ff_only, work_dir)
+    # Record HEAD before ribosome runs — used as fallback range if main..HEAD is empty
+    try:
+        pre_sha_r = _subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, cwd=work_dir
+        )
+        pre_sha = pre_sha_r.stdout.strip() if pre_sha_r.returncode == 0 else None
+    except Exception:
+        pre_sha = None
     pre_diff = await asyncio.to_thread(_git_snapshot, work_dir)
 
     # SRP: detect [supervised] marker in task string
@@ -666,7 +694,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "merged": False,
                 }
 
-    post_diff = await asyncio.to_thread(_git_snapshot, work_dir)
+    post_diff = await asyncio.to_thread(_git_snapshot, work_dir, base_sha=pre_sha)
     commit_count = post_diff.get("commit_count", 0)
 
     # Incomplete: non-zero exit but commits exist — preserve branch for re-dispatch
