@@ -21,7 +21,7 @@ from temporalio.common import RetryPolicy, SearchAttributeKey
 with workflow.unsafe.imports_passed_through():
     from pathlib import Path
 
-    from mtor.worker.translocase import chaperone, merge_approved, translate
+    from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle
 
 # #6: Search attributes (registered on server)
 SA_PROVIDER = SearchAttributeKey.for_keyword("TranslationProvider")
@@ -239,4 +239,137 @@ class TranslationWorkflow:
                 }
                 for r in all_results
             ],
+        }
+
+
+@workflow.defn
+class WatchWorkflow:
+    """Temporal-native watch: polls for ready specs and dispatches as child workflows.
+
+    Each cycle:
+      1. Calls watch_cycle activity (sync from ganglion + scan specs)
+      2. Dispatches ready specs as child TranslationWorkflows (batched by max_concurrent)
+      3. Waits for interval seconds
+      4. Continue-As-New when cycle count reaches max_cycles (preserves state via params)
+
+    Supports a ``stop`` signal for graceful termination and ``stop_after_empty``
+    param for auto-stop when no specs are found for N consecutive cycles.
+    """
+
+    def __init__(self) -> None:
+        self._stop_requested = False
+
+    @workflow.signal
+    async def stop(self) -> None:
+        """Signal to gracefully stop the watch loop."""
+        self._stop_requested = True
+
+    async def _dispatch_spec(self, spec: dict, provider: str, cycle: int, task_queue: str) -> dict:
+        """Dispatch a single spec as a child TranslationWorkflow."""
+        name = spec.get("name", "unnamed")
+        child_input = [{
+            "task": spec.get("body", "") or spec.get("name", ""),
+            "provider": spec.get("provider", provider),
+            "mode": spec.get("mode", "raw"),
+        }]
+
+        result = await workflow.execute_child_workflow(
+            TranslationWorkflow.run,
+            args=[child_input],
+            id=f"watch-{name}-c{cycle}",
+            task_queue=task_queue,
+        )
+        return result
+
+    @workflow.run
+    async def run(self, params: dict) -> dict:
+        """Execute watch loop: sync, scan, dispatch, repeat.
+
+        Params keys:
+          repo_path       – git repo to sync (str)
+          plan_dir        – directory of .md spec files (str)
+          interval        – seconds between cycles (int, default 60)
+          max_concurrent  – max child workflows per batch (int, default 3)
+          max_cycles      – cycles before Continue-As-New (int, default 100)
+          provider        – default provider for child workflows (str, default "zhipu")
+          stop_after_empty – stop after N consecutive empty cycles (int, 0=disabled)
+          task_queue      – Temporal task queue for child workflows (str)
+          _start_cycle    – internal: cycle counter from previous run (int)
+          _continued      – internal: True if this is a continued run
+        """
+        repo_path = params.get("repo_path", "")
+        plan_dir = params.get("plan_dir", "")
+        interval_seconds = params.get("interval", 60)
+        max_concurrent = params.get("max_concurrent", 3)
+        max_cycles = params.get("max_cycles", 100)
+        provider = params.get("provider", "zhipu")
+        stop_after_empty = params.get("stop_after_empty", 0)
+        task_queue = params.get("task_queue", "translation-queue")
+
+        total_dispatched = 0
+        total_synced = 0
+        empty_streak = 0
+        cycle = params.get("_start_cycle", 0)
+        continued = params.get("_continued", False)
+        run_start_cycle = cycle  # track cycles-per-run for CAN threshold
+
+        while not self._stop_requested:
+            cycle += 1
+
+            # --- activity: sync + scan ---
+            try:
+                cycle_result = await workflow.execute_activity(
+                    watch_cycle,
+                    args=[repo_path, plan_dir],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception:
+                cycle_result = {"synced": False, "fetched": 0, "ready_specs": []}
+
+            if cycle_result.get("synced"):
+                total_synced += 1
+
+            ready_specs = cycle_result.get("ready_specs", [])
+
+            # --- dispatch ready specs in batches ---
+            if ready_specs:
+                empty_streak = 0
+                for batch_start in range(0, len(ready_specs), max_concurrent):
+                    if self._stop_requested:
+                        break
+                    batch = ready_specs[batch_start:batch_start + max_concurrent]
+                    results = await asyncio.gather(
+                        *[self._dispatch_spec(s, provider, cycle, task_queue) for s in batch],
+                    )
+                    total_dispatched += len(results)
+            else:
+                empty_streak += 1
+
+            if self._stop_requested:
+                break
+
+            # --- Continue-As-New when this run has done max_cycles ---
+            cycles_in_run = cycle - run_start_cycle
+            if cycles_in_run >= max_cycles:
+                workflow.continue_as_new(
+                    args=[{
+                        **params,
+                        "_start_cycle": cycle,
+                        "_continued": True,
+                    }],
+                )
+
+            # --- auto-stop after N empty cycles ---
+            if stop_after_empty and empty_streak >= stop_after_empty:
+                break
+
+            # --- sleep until next cycle ---
+            await asyncio.sleep(interval_seconds)
+
+        return {
+            "cycles": cycle,
+            "total_dispatched": total_dispatched,
+            "total_synced": total_synced,
+            "continued": continued,
         }
