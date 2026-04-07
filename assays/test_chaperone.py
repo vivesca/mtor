@@ -219,6 +219,26 @@ class TestSatisfaction:
         review = _run(chaperone(result))
         assert review["satisfaction"] <= 70
 
+    def test_test_satisfaction_bonus_for_fallback_diff(self):
+        """Fallback diff should receive a satisfaction bonus.
+
+        Without fallback bonus: 100 - 15 (thin_output) + 10 (committed) = 95.
+        With fallback bonus: 100 - 15 + 10 + 10 = 105 -> capped at 100.
+        """
+        result = _make_result(
+            task="Implement the full authentication module with OAuth2 support and refresh tokens and PKCE flow for the application server backend",
+            stdout="ok",  # 1 word -> thin_output fires
+            post_diff={
+                "stat": " foo.py | 10 ++++\n",
+                "numstat": "10\t0\tfoo.py",
+                "commits": ["abc1234 feat: add foo"],
+                "commit_count": 1,
+                "fallback": True,
+            },
+        )
+        review = _run(chaperone(result))
+        assert review["satisfaction"] >= 100
+
 
 class TestRequeuePrompt:
     """Requeue suggestions for specific failure types."""
@@ -291,3 +311,37 @@ class TestScoutMode:
         result = self._make_scout_result(exit_code=1)
         review = _run(chaperone(result))
         assert review["approved"] is False
+
+
+class TestFailureReason:
+    """Test that cli.py failure_reason surfaces chaperone flags."""
+
+    def test_test_failure_reason_includes_flags(self):
+        """failure_reason includes chaperone flags from review."""
+        from mtor.cli import _build_failure_reason
+
+        task_result = {
+            "error": "Process exited with code 1",
+            "review": {
+                "flags": ["exit_code=1", "destruction: rm -rf"],
+                "verdict": "rejected",
+            },
+        }
+        reason = _build_failure_reason(task_result)
+        assert "flags:" in reason
+        assert "exit_code=1" in reason
+        assert "destruction: rm -rf" in reason
+
+    def test_test_failure_reason_includes_no_commit_flag(self):
+        """failure_reason surfaces no_commit_on_success flag."""
+        from mtor.cli import _build_failure_reason
+
+        task_result = {
+            "stderr": "Task completed",
+            "review": {
+                "flags": ["no_commit_on_success"],
+                "verdict": "rejected",
+            },
+        }
+        reason = _build_failure_reason(task_result)
+        assert "no_commit_on_success" in reason
