@@ -398,6 +398,39 @@ tree.add_command(
     annotations={"readonly": False},
 )
 tree.add_command(
+    "autophagy",
+    "Salvage new commits from ganglion, cherry-pick, and run tests.",
+    params=[
+        {
+            "name": "--repo",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Repository path (defaults to REPO_DIR)",
+        },
+        {
+            "name": "--no-test",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Skip test run after cherry-pick",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "fetched": "integer",
+            "cherry_picked": "array of strings (commit SHAs)",
+            "skipped": "array of strings (already-merged SHAs)",
+            "tests_passed": "boolean",
+            "error": "string or null",
+        },
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "init <name>",
     "Scaffold a new spec file with YAML frontmatter.",
     params=[

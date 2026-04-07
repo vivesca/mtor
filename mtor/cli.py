@@ -1420,6 +1420,40 @@ def watch(
     _ok(cmd, result, next_actions, version=VERSION)
 
 
+@app.command
+def autophagy(
+    *,
+    repo: Annotated[str | None, Parameter(name=["--repo"])] = None,
+    no_test: Annotated[bool, Parameter(name=["--no-test"])] = False,
+) -> None:
+    """Salvage new commits from ganglion, cherry-pick, and run tests."""
+    from mtor.autophagy import salvage
+
+    cmd = "mtor autophagy"
+    repo_path = repo or REPO_DIR
+
+    result = salvage(repo_path, run_tests=not no_test)
+
+    next_actions = []
+    if result.cherry_picked:
+        next_actions.append(_action("mtor list", "Check synced workflows"))
+    if result.error:
+        next_actions.append(_action("mtor doctor", "Diagnose connectivity"))
+
+    _ok(
+        cmd,
+        {
+            "fetched": result.fetched,
+            "cherry_picked": result.cherry_picked,
+            "skipped": result.skipped,
+            "tests_passed": result.tests_passed,
+            "error": result.error,
+        },
+        next_actions,
+        version=VERSION,
+    )
+
+
 @app.command(name="dispatch-all")
 def dispatch_all(
     *,
