@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 
 [project]
 name = "mtor"
-version = "0.5.0"
+version = "0.6.0"
 description = "Agent-first coding task dispatcher for Temporal workflows"
 readme = "README.md"
 keywords = [
