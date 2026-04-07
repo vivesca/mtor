@@ -193,6 +193,33 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
+    "nudge <workflow_id>",
+    "Send reactivation signal to a dormant workflow",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": True,
+            "description": "Temporal workflow ID",
+        }
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {"workflow_id": "string", "nudged": "boolean"},
+        "next_actions": "array",
+    },
+    errors=[
+        {"code": "WORKFLOW_NOT_FOUND", "exit_code": 4, "message": "No workflow with that ID"},
+        {
+            "code": "TEMPORAL_UNREACHABLE",
+            "exit_code": 3,
+            "message": "Cannot connect to Temporal server",
+        },
+    ],
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "doctor",
     "Health check: Temporal server reachability, worker liveness, provider info",
     params=[],

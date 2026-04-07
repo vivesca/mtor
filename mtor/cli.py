@@ -916,6 +916,60 @@ def deny(workflow_id: str) -> None:
 
 
 @app.command
+def nudge(workflow_id: str) -> None:
+    """Send reactivation signal to a dormant workflow."""
+    cmd = f"mtor nudge {workflow_id}"
+
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "Check Temporal connectivity",
+                exit_code=3,
+            )
+        )
+
+    try:
+
+        async def _signal():
+            handle = client.get_workflow_handle(workflow_id)
+            await handle.signal("nudge")
+
+        asyncio.run(_signal())
+        _ok(
+            cmd,
+            {"workflow_id": workflow_id, "nudged": True},
+            [_action(f"mtor status {workflow_id}", "Check workflow status")],
+            version=VERSION,
+        )
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor list",
+                    [_action("mtor list", "List all recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                cmd,
+                exc_str,
+                "NUDGE_ERROR",
+                "Check Temporal server health with: mtor doctor",
+                [_action("mtor doctor", "Run health check")],
+            )
+        )
+
+
+@app.command
 def publish(
     *,
     bump: Annotated[Literal["patch", "minor", "major"], Parameter(name=["-b", "--bump"])] = "patch",
