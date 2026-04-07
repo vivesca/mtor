@@ -37,6 +37,7 @@ from mtor import (
     WORKER_HOST,
 )
 from mtor.client import _get_client
+from mtor.dedup import check_and_record as _check_dedup
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
@@ -106,6 +107,19 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
         pass
 
     return ""
+
+
+def _build_failure_reason(task_result: dict) -> str:
+    """Build a human-readable failure reason from task result + chaperone flags."""
+    parts: list[str] = []
+    err_msg = task_result.get("error") or task_result.get("stderr", "")
+    if err_msg:
+        parts.append(str(err_msg).splitlines()[-1])
+    review = task_result.get("review", {})
+    flags = review.get("flags", [])
+    if flags:
+        parts.append(f"flags: {', '.join(flags[:5])}")
+    return "; ".join(parts) if parts else "No diagnostic information available"
 
 
 def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
@@ -180,6 +194,20 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
+        # Dedup check — block identical dispatches within 5-minute window
+        dup_key = _check_dedup(prompt, spec_path=spec)
+        if dup_key is not None:
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Duplicate dispatch blocked (key={dup_key}). Same prompt dispatched within the last 5 minutes.",
+                    "DEDUP_BLOCKED",
+                    "Wait a few minutes or change the prompt/spec to dispatch again.",
+                    [_action("mtor list", "View running workflows")],
+                    exit_code=1,
+                )
+            )
         _dispatch_prompt(
             prompt,
             provider=provider,
@@ -395,9 +423,7 @@ def status(workflow_id: str) -> None:
             if wf_result and isinstance(wf_result, dict):
                 task_result = _extract_first_result(wf_result)
                 if task_result:
-                    err_msg = task_result.get("error") or task_result.get("stderr", "")
-                    if err_msg:
-                        failure_reason = str(err_msg).splitlines()[-1]
+                    failure_reason = _build_failure_reason(task_result)
             result_payload["failure_reason"] = failure_reason
 
         _ok(
