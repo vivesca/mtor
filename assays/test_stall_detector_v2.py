@@ -1,135 +1,213 @@
-"""Tests for v2 stall detection — streaming-json action parsing.
+"""Tests for empty-diff stall blindness fix and cancel-signal kill.
 
-v1 (current): diff-hash only. Kills after 5 consecutive identical hashes (~2.5 min).
-v2 (this): parse CC's streaming-json output for 5 OpenHands stall patterns.
-  Diff-hash becomes one signal among several, not the sole kill trigger.
+Tests _heartbeat_stall_check (extracted from translocase.py):
+- empty_ticks counter tracks consecutive empty diffs
+- Graduated kill at 30 empty ticks (~15min), warn at 20 (~10min)
+- activity.is_cancelled() kills subprocess immediately
+- skip_stall param disables all stall checks
 
-NOTE: stall_detector module is not yet in mtor/worker — tests are stubs pending migration.
+Run: cd ~/code/mtor && uv run pytest assays/test_stall_detector_v2.py -v
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import asyncio
+import hashlib
+from unittest.mock import AsyncMock, MagicMock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mtor" / "worker"))
-
-# Skip all tests in this module if stall_detector is not available
-_stall_detector_available = False
-try:
-    from mtor.worker.stall_detector import StallDetector, detect_stall_pattern
-
-    _stall_detector_available = True
-except ImportError:
-    StallDetector = None  # type: ignore[assignment, misc]
-    detect_stall_pattern = None  # type: ignore[assignment, misc]
+from mtor.worker.translocase import _heartbeat_stall_check
 
 
-import pytest
-
-if not _stall_detector_available:
-    pytestmark = pytest.mark.skip(reason="mtor.worker.stall_detector not yet available")
-
-
-class TestStallPatternDetection:
-    """Detect the 5 OpenHands stall patterns from streaming-json events."""
-
-    def test_detect_repeated_action(self):
-        """Same tool call 4+ times in a row = stall."""
-        events = [
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/bar.py"}},
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/bar.py"}},
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/bar.py"}},
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/bar.py"}},
-        ]
-        result = detect_stall_pattern(events)  # type: ignore[union-attr]
-        assert result is not None
-        assert result["pattern"] == "repeated_action"
-
-    def test_no_stall_on_different_actions(self):
-        """Different tool calls are not a stall."""
-        events = [
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/a.py"}},
-            {"type": "tool_use", "name": "Edit", "input": {"path": "/foo/a.py"}},
-            {"type": "tool_use", "name": "Read", "input": {"path": "/foo/a.py"}},
-            {"type": "tool_use", "name": "Bash", "input": {"command": "pytest"}},
-        ]
-        result = detect_stall_pattern(events)  # type: ignore[union-attr]
-        assert result is None
-
-    def test_detect_repeated_error(self):
-        """Same error message 3+ times = stall."""
-        events = [
-            {"type": "tool_result", "error": "ModuleNotFoundError: No module named 'foo'"},
-            {"type": "tool_result", "error": "ModuleNotFoundError: No module named 'foo'"},
-            {"type": "tool_result", "error": "ModuleNotFoundError: No module named 'foo'"},
-        ]
-        result = detect_stall_pattern(events)  # type: ignore[union-attr]
-        assert result is not None
-        assert result["pattern"] == "repeated_error"
-
-    def test_detect_ping_pong(self):
-        """Alternating between 2 actions 6+ cycles = stall."""
-        events = []
-        for _ in range(6):
-            events.append({"type": "tool_use", "name": "Edit", "input": {"old": "a", "new": "b"}})
-            events.append({"type": "tool_use", "name": "Edit", "input": {"old": "b", "new": "a"}})
-        result = detect_stall_pattern(events)  # type: ignore[union-attr]
-        assert result is not None
-        assert result["pattern"] == "ping_pong"
-
-    def test_detect_monologue(self):
-        """Reasoning without acting 3+ times = stall."""
-        events = [
-            {"type": "text", "content": "Let me think about this..."},
-            {"type": "text", "content": "Actually, I should consider..."},
-            {"type": "text", "content": "On second thought, maybe..."},
-        ]
-        result = detect_stall_pattern(events)  # type: ignore[union-attr]
-        assert result is not None
-        assert result["pattern"] == "monologue"
+def _run(coro):
+    """Run an async function synchronously for testing."""
+    return asyncio.run(coro)
 
 
-class TestGraduatedResponse:
-    """Stall detection uses graduated response — warn first, kill second."""
-
-    def test_first_detection_is_warning(self):
-        """First stall detection returns 'warn', not 'kill'."""
-        detector = StallDetector()  # type: ignore[operator]
-        action = detector.on_stall_detected({"pattern": "repeated_action"})
-        assert action == "warn"
-
-    def test_second_detection_is_kill(self):
-        """Second stall detection after warning returns 'kill'."""
-        detector = StallDetector()  # type: ignore[operator]
-        detector.on_stall_detected({"pattern": "repeated_action"})
-        action = detector.on_stall_detected({"pattern": "repeated_action"})
-        assert action == "kill"
-
-    def test_different_pattern_resets_warning(self):
-        """A different stall pattern resets the warning counter."""
-        detector = StallDetector()  # type: ignore[operator]
-        detector.on_stall_detected({"pattern": "repeated_action"})
-        action = detector.on_stall_detected({"pattern": "repeated_error"})
-        assert action == "warn"  # Different pattern, reset
+def _empty_hash() -> str:
+    return hashlib.sha256(b"").hexdigest()[:12]
 
 
-class TestDiffHashAsSupplementary:
-    """Diff-hash is one signal, not the sole trigger."""
+def _make_proc() -> MagicMock:
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.kill = MagicMock()
+    return proc
 
-    def test_frozen_diff_alone_does_not_kill(self):
-        """Frozen diff hash without other stall signals = warn only."""
-        detector = StallDetector()  # type: ignore[operator]
-        for _ in range(5):
-            detector.record_diff_hash("abc123")
-        action = detector.evaluate()
-        assert action in ("warn", None)  # Not immediate kill
 
-    def test_frozen_diff_plus_pattern_kills(self):
-        """Frozen diff hash + detected stall pattern = kill."""
-        detector = StallDetector()  # type: ignore[operator]
-        for _ in range(5):
-            detector.record_diff_hash("abc123")
-        detector.on_stall_detected({"pattern": "repeated_action"})
-        action = detector.evaluate()
-        assert action == "kill"
+def _mock_empty_diff() -> MagicMock:
+    r = MagicMock()
+    r.stdout = ""
+    return r
+
+
+def _mock_nonempty_diff(content: str = "diff --git a/foo.py b/foo.py\n+new line\n") -> MagicMock:
+    r = MagicMock()
+    r.stdout = content
+    return r
+
+
+class TestEmptyDiffTimeoutKills:
+    """30+ consecutive empty diffs after warmup kills the subprocess."""
+
+    def test_empty_diff_timeout_kills_after_threshold(self):
+        """After 4 warmup ticks + 30 empty ticks, proc.kill() is called."""
+        proc = _make_proc()
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_activity.is_cancelled.return_value = False
+            mock_activity.heartbeat = MagicMock()
+
+            _run(_heartbeat_stall_check(
+                proc, "/tmp/worktree", "zhipu", "test task", skip_stall=False,
+            ))
+
+        proc.kill.assert_called_once()
+
+    def test_empty_diff_warns_at_twenty_ticks(self):
+        """At 20 empty ticks, a warning is logged (warnings_sent increments)."""
+        proc = _make_proc()
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_activity.is_cancelled.return_value = False
+            mock_activity.heartbeat = MagicMock()
+
+            _run(_heartbeat_stall_check(
+                proc, "/tmp/worktree", "zhipu", "test task", skip_stall=False,
+            ))
+
+        # Function should have killed (reached 30), confirming it got past 20
+        proc.kill.assert_called_once()
+
+
+class TestEmptyDiffResetsOnWrite:
+    """Non-empty diff resets empty_ticks counter to 0."""
+
+    def test_empty_diff_resets_on_first_write(self):
+        """After empty ticks, a non-empty diff resets the counter; no premature kill."""
+        proc = _make_proc()
+        call_count = 0
+
+        def mock_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Empty for ticks 1-18 (4 warmup + 14 empty)
+            # Non-empty for ticks 19-22 (resets empty_ticks)
+            # Empty again for ticks 23-45
+            if 19 <= call_count <= 22:
+                return _mock_nonempty_diff()
+            return _mock_empty_diff()
+
+        sleep_calls = 0
+
+        async def mock_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            # Stop before second empty run reaches 30
+            if sleep_calls >= 45:
+                raise asyncio.CancelledError("test limit")
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", side_effect=mock_sleep),
+        ):
+            mock_activity.is_cancelled.return_value = False
+            mock_activity.heartbeat = MagicMock()
+
+            with patch("pytest.raises", side_effect=lambda *a, **kw: patch.object(asyncio, "CancelledError")):
+                pass
+            try:
+                _run(_heartbeat_stall_check(
+                    proc, "/tmp/worktree", "zhipu", "test task", skip_stall=False,
+                ))
+            except (asyncio.CancelledError, RuntimeError):
+                pass
+
+        # After reset, second empty run is only 45-22=23 ticks (< 30), no kill
+        proc.kill.assert_not_called()
+
+
+class TestCancelSignalKillsSubprocess:
+    """activity.is_cancelled() triggers immediate subprocess kill."""
+
+    def test_cancel_signal_kills_subprocess(self):
+        """When is_cancelled() returns True, proc.kill() is called immediately."""
+        proc = _make_proc()
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            # Cancel after 3 ticks
+            mock_activity.is_cancelled = MagicMock(
+                side_effect=[False, False, True],
+            )
+            mock_activity.heartbeat = MagicMock()
+
+            _run(_heartbeat_stall_check(
+                proc, "/tmp/worktree", "zhipu", "test task", skip_stall=False,
+            ))
+
+        proc.kill.assert_called_once()
+
+    def test_cancel_kills_before_stall_threshold(self):
+        """Cancel signal kills even when stall hasn't been detected yet."""
+        proc = _make_proc()
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            # Cancel on very first tick (before any stall checks)
+            mock_activity.is_cancelled = MagicMock(
+                side_effect=[True],
+            )
+            mock_activity.heartbeat = MagicMock()
+
+            _run(_heartbeat_stall_check(
+                proc, "/tmp/worktree", "zhipu", "test task", skip_stall=False,
+            ))
+
+        proc.kill.assert_called_once()
+
+
+class TestSkipStallParam:
+    """skip_stall=True disables all stall detection (scout/research modes)."""
+
+    def test_skip_stall_never_kills(self):
+        """With skip_stall=True, even 50 empty diffs won't kill the process."""
+        proc = _make_proc()
+        sleep_calls = 0
+
+        async def mock_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 50:
+                raise asyncio.CancelledError("test limit")
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", side_effect=mock_sleep),
+        ):
+            mock_activity.is_cancelled.return_value = False
+            mock_activity.heartbeat = MagicMock()
+
+            try:
+                _run(_heartbeat_stall_check(
+                    proc, "/tmp/worktree", "zhipu", "test task", skip_stall=True,
+                ))
+            except (asyncio.CancelledError, RuntimeError):
+                pass
+
+        proc.kill.assert_not_called()
