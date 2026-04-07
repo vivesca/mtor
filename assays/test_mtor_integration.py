@@ -115,7 +115,7 @@ class TestModuleImports:
     def test_version_in_init(self):
         from mtor import VERSION
 
-        assert VERSION == "0.6.0"
+        assert VERSION  # non-empty string, don't hardcode version
 
     def test_constants_in_init(self):
         from mtor import COACHING_PATH, WORKER_HOST

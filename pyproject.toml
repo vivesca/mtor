@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 
 [project]
 name = "mtor"
-version = "0.7.0"
+dynamic = [ "version" ]
 description = "Agent-first coding task dispatcher for Temporal workflows"
 readme = "README.md"
 keywords = [
@@ -41,6 +41,9 @@ scripts.mtor = "mtor.cli:app"
 dev = [
   "pytest>=9.0.2",
 ]
+
+[tool.hatch.version]
+path = "mtor/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [ "mtor" ]

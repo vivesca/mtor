@@ -601,6 +601,72 @@ def deny(workflow_id: str) -> None:
 
 
 @app.command
+def publish(
+    *,
+    bump: Annotated[Literal["patch", "minor", "major"], Parameter(name=["-b", "--bump"])] = "patch",
+) -> None:
+    """Bump version, build, publish to PyPI, upgrade soma + ganglion."""
+    import re as _re
+
+    init_path = Path(__file__).parent / "__init__.py"
+    init_text = init_path.read_text()
+    match = _re.search(r'VERSION = "(\d+)\.(\d+)\.(\d+)"', init_text)
+    if not match:
+        sys.exit(_err("mtor publish", "Cannot parse VERSION", "VERSION_PARSE_ERROR", "Check mtor/__init__.py"))
+
+    major, minor, patch_v = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if bump == "major":
+        major += 1; minor = 0; patch_v = 0
+    elif bump == "minor":
+        minor += 1; patch_v = 0
+    else:
+        patch_v += 1
+    new_version = f"{major}.{minor}.{patch_v}"
+
+    # Step 1: bump version
+    init_path.write_text(init_text.replace(match.group(0), f'VERSION = "{new_version}"'))
+    print(f"[publish] bumped to {new_version}", file=sys.stderr)
+
+    # Step 2: commit + push
+    subprocess.run(["git", "add", "-A"], cwd=str(init_path.parent.parent), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"chore: bump to v{new_version}"],
+        cwd=str(init_path.parent.parent), check=True,
+    )
+    subprocess.run(["git", "push"], cwd=str(init_path.parent.parent), check=True)
+    print("[publish] committed + pushed", file=sys.stderr)
+
+    # Step 3: build + publish
+    subprocess.run(["uv", "build"], cwd=str(init_path.parent.parent), check=True)
+
+    token_result = subprocess.run(
+        ["op", "item", "get", "pypi-token", "--vault", "Agents", "--fields", "credential", "--reveal"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if token_result.returncode != 0:
+        sys.exit(_err("mtor publish", "Cannot get PyPI token from 1Password", "PYPI_TOKEN_ERROR", "op signin"))
+
+    subprocess.run(
+        ["uv", "publish", "--token", token_result.stdout.strip()],
+        cwd=str(init_path.parent.parent), check=True,
+    )
+    print(f"[publish] published {new_version} to PyPI", file=sys.stderr)
+
+    # Step 4: upgrade both machines
+    subprocess.run(["uv", "tool", "install", "mtor", "--upgrade"], check=True)
+    print("[publish] upgraded soma", file=sys.stderr)
+
+    subprocess.run(
+        ["ssh", WORKER_HOST,
+         "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH && uv tool install mtor --upgrade"],
+        timeout=30,
+    )
+    print("[publish] upgraded ganglion", file=sys.stderr)
+
+    _ok("mtor publish", {"version": new_version, "published": True}, version=new_version)
+
+
+@app.command
 def deploy() -> None:
     """Sync code to worker host, restart Temporal worker, verify health."""
     import time
