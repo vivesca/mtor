@@ -850,6 +850,39 @@ async def merge_approved(args: dict) -> dict:
     return {"merged": merged, "branch_name": branch_name}
 
 
+@activity.defn
+async def watch_cycle(repo_path: str, plan_dir: str) -> dict:
+    """Single watch cycle: sync from ganglion, scan for ready specs.
+
+    Returns dict with:
+        synced      – True if sync succeeded
+        fetched     – number of new commits fetched
+        ready_specs – list of spec dicts ready for dispatch (topologically sorted)
+    """
+    from mtor.sync import sync_from_ganglion
+
+    sync_result = await asyncio.to_thread(sync_from_ganglion, repo_path)
+
+    ready_specs: list[dict] = []
+    if plan_dir:
+        try:
+            from mtor.plan import resolve_dag, scan_specs, topological_sort
+
+            specs = scan_specs(Path(plan_dir))
+            if specs:
+                resolved = resolve_dag(specs)
+                dispatchable = [s for s in resolved if s.get("dispatchable")]
+                ready_specs = topological_sort(dispatchable)
+        except Exception:
+            pass
+
+    return {
+        "synced": sync_result.get("merged", False),
+        "fetched": sync_result.get("fetched", 0),
+        "ready_specs": ready_specs,
+    }
+
+
 # Coaching-promoted checks: patterns that were prose coaching notes,
 # now enforced as deterministic gate checks. Coaching entries should
 # decay toward zero — each one either gets promoted here or retired.
@@ -1116,7 +1149,7 @@ async def main() -> None:
         sys.exit(0)
 
     # Deferred import to avoid circular dependency with workflow.py
-    from mtor.workflow import TranslationWorkflow
+    from mtor.worker.workflow import TranslationWorkflow, WatchWorkflow
 
     host = os.getenv("TEMPORAL_HOST", "ganglion:7233")
     client = await Client.connect(host)
@@ -1125,8 +1158,8 @@ async def main() -> None:
     worker = Worker(
         client=client,
         task_queue=TASK_QUEUE,
-        workflows=[TranslationWorkflow],
-        activities=[translate, chaperone, merge_approved],
+        workflows=[TranslationWorkflow, WatchWorkflow],
+        activities=[translate, chaperone, merge_approved, watch_cycle],
         max_concurrent_activities=max_concurrent,
     )
     _gc_worktrees(str(Path.home() / "germline"))
