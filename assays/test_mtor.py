@@ -80,6 +80,8 @@ def make_mock_client():
     wf_handle.describe = describe_coro
     cancel_coro = AsyncMock(return_value=None)
     wf_handle.cancel = cancel_coro
+    terminate_coro = AsyncMock(return_value=None)
+    wf_handle.terminate = terminate_coro
     client.get_workflow_handle = MagicMock(return_value=wf_handle)
 
     # count_workflows returns a coroutine (async)
@@ -338,11 +340,11 @@ class TestCancel:
             exit_code, data = invoke(["cancel", "ribosome-test1234"])
         assert exit_code == 0
         assert data["ok"] is True
-        assert data["result"]["cancelled"] is True
+        assert data["result"]["terminated"] is True
 
     def test_cancel_not_found_exits_4(self):
         mock_client, mock_handle = make_mock_client()
-        mock_handle.cancel = AsyncMock(side_effect=Exception("workflow not found"))
+        mock_handle.terminate = AsyncMock(side_effect=Exception("workflow not found"))
         with _patch_client(mock_client):
             exit_code, data = invoke(["cancel", "nonexistent-id"])
         assert exit_code == 4
@@ -352,7 +354,7 @@ class TestCancel:
     def test_cancel_already_cancelled_is_ok(self):
         """Cancelling an already-cancelled workflow = idempotent success."""
         mock_client, mock_handle = make_mock_client()
-        mock_handle.cancel = AsyncMock(side_effect=Exception("workflow already cancelled"))
+        mock_handle.terminate = AsyncMock(side_effect=Exception("workflow already cancelled"))
         with _patch_client(mock_client):
             exit_code, data = invoke(["cancel", "ribosome-done1234"])
         assert exit_code == 0

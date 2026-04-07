@@ -156,8 +156,60 @@ def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> 
     return wid
 
 
+def _check_worker_sha(*, skip: bool = False) -> str | None:
+    """Compare local HEAD with worker HEAD. Returns None if in sync, error message if not.
+
+    If out of sync and skip=False, auto-deploys before returning.
+    """
+    if skip:
+        return None
+
+    import subprocess
+
+    try:
+        local = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if local.returncode != 0:
+            return None  # Not a git repo — skip silently
+
+        remote = subprocess.run(
+            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if remote.returncode != 0:
+            return f"Cannot reach worker: {remote.stderr.strip()[:100]}"
+
+        local_sha = local.stdout.strip()[:8]
+        remote_sha = remote.stdout.strip()[:8]
+
+        if local_sha == remote_sha:
+            return None
+
+        # Auto-deploy: push + merge on worker
+        subprocess.run(
+            ["git", "push", WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
+            capture_output=True, text=True, timeout=15,
+        )
+        subprocess.run(
+            ["ssh", WORKER_HOST,
+             "cd ~/germline && git merge deploy-sync --no-edit 2>/dev/null; "
+             "git branch -d deploy-sync 2>/dev/null; true"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return None  # Synced
+    except (subprocess.TimeoutExpired, OSError):
+        return None  # Non-fatal — proceed with dispatch
+
+
 def _dispatch_prompt(
-    prompt: str, *, provider: str | None = None, experiment: bool = False, mode: str | None = None
+    prompt: str,
+    *,
+    provider: str | None = None,
+    experiment: bool = False,
+    mode: str | None = None,
+    skip_sha_check: bool = False,
 ) -> None:
     """Core dispatch logic."""
     # If prompt is a file path, read it as the spec
@@ -224,6 +276,11 @@ def _dispatch_prompt(
         full_prompt = prompt + research_suffix
     else:
         full_prompt = prompt
+
+    # SHA gate: sync worker before dispatch
+    sha_err = _check_worker_sha(skip=skip_sha_check)
+    if sha_err:
+        print(f"[sha-gate] warning: {sha_err}", file=sys.stderr)
 
     client, err = _get_client()
     if err:

@@ -123,8 +123,8 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor cancel <workflow_id>",
-    "Cancel a running workflow. Idempotent — cancelling an already-cancelled workflow is ok.",
+    "mtor terminate <workflow_id>",
+    "Immediately terminate a running workflow. Idempotent.",
     params=[
         {
             "name": "workflow_id",
@@ -136,7 +136,26 @@ tree.add_command(
     returns={
         "ok": "boolean",
         "command": "string",
-        "result": {"workflow_id": "string", "cancelled": "boolean"},
+        "result": {"workflow_id": "string", "terminated": "boolean"},
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False, "idempotent": True},
+)
+tree.add_command(
+    "mtor cancel <workflow_id>",
+    "Cancel a running workflow. Delegates to terminate for immediate stop. Idempotent.",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": True,
+            "description": "Temporal workflow ID",
+        }
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {"workflow_id": "string", "terminated": "boolean"},
         "next_actions": "array",
     },
     annotations={"readonly": False, "destructive": False, "idempotent": True},

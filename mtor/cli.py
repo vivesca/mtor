@@ -55,6 +55,7 @@ def default_handler(
     *,
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
     experiment: Annotated[bool, Parameter(name=["-x", "--experiment"])] = False,
+    skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal."""
     if prompt is None:
@@ -64,7 +65,7 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
-        _dispatch_prompt(prompt, provider=provider, experiment=experiment)
+        _dispatch_prompt(prompt, provider=provider, experiment=experiment, skip_sha_check=skip_sha_check)
 
 
 @app.command(name="list")
@@ -370,10 +371,19 @@ def logs(workflow_id: str) -> None:
 
 
 @app.command
-def cancel(workflow_id: str) -> None:
-    """Cancel a running workflow. Idempotent."""
-    cmd = f"mtor cancel {workflow_id}"
+def terminate(workflow_id: str) -> None:
+    """Immediately terminate a running workflow."""
+    _terminate_workflow(workflow_id, "mtor terminate")
 
+
+@app.command
+def cancel(workflow_id: str) -> None:
+    """Cancel a running workflow. Delegates to terminate for immediate stop."""
+    _terminate_workflow(workflow_id, "mtor cancel")
+
+
+def _terminate_workflow(workflow_id: str, cmd: str) -> None:
+    """Shared terminate logic for both cancel and terminate commands."""
     client, err = _get_client()
     if err:
         sys.exit(
@@ -389,22 +399,21 @@ def cancel(workflow_id: str) -> None:
 
     try:
 
-        async def _cancel():
+        async def _do_terminate():
             handle = client.get_workflow_handle(workflow_id)
-            await handle.cancel()
+            await handle.terminate(reason="Terminated via mtor CLI")
 
-        asyncio.run(_cancel())
+        asyncio.run(_do_terminate())
         _ok(
             cmd,
-            {"workflow_id": workflow_id, "cancelled": True},
+            {"workflow_id": workflow_id, "terminated": True},
             [
-                _action(f"mtor status {workflow_id}", "Verify cancellation status"),
+                _action(f"mtor status {workflow_id}", "Verify termination status"),
             ],
             version=VERSION,
         )
     except Exception as exc:
         exc_str = str(exc)
-        # Idempotent: already cancelled/completed = ok
         if any(phrase in exc_str.lower() for phrase in ["not found", "workflow_not_found"]):
             sys.exit(
                 _err(
@@ -416,7 +425,7 @@ def cancel(workflow_id: str) -> None:
                     exit_code=4,
                 )
             )
-        # Already terminated/cancelled — treat as idempotent success
+        # Already terminated/cancelled — idempotent success
         if any(
             phrase in exc_str.lower()
             for phrase in ["already", "terminated", "cancelled", "canceled", "completed"]
@@ -425,7 +434,7 @@ def cancel(workflow_id: str) -> None:
                 cmd,
                 {
                     "workflow_id": workflow_id,
-                    "cancelled": True,
+                    "terminated": True,
                     "note": "Workflow was already in terminal state",
                 },
                 [
@@ -438,7 +447,7 @@ def cancel(workflow_id: str) -> None:
             _err(
                 cmd,
                 exc_str,
-                "CANCEL_ERROR",
+                "TERMINATE_ERROR",
                 "Check Temporal server health with: mtor doctor",
                 [_action("mtor doctor", "Run health check")],
             )
@@ -486,9 +495,10 @@ def scout(
     prompt: str,
     *,
     provider: Annotated[str | None, Parameter(name=["-p", "--provider"])] = None,
+    skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
-    _dispatch_prompt(prompt, provider=provider, mode="scout")
+    _dispatch_prompt(prompt, provider=provider, mode="scout", skip_sha_check=skip_sha_check)
 
 
 @app.command
@@ -496,9 +506,10 @@ def research(
     prompt: str,
     *,
     provider: Annotated[str | None, Parameter(name=["-p", "--provider"])] = None,
+    skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
-    _dispatch_prompt(prompt, provider=provider, mode="research")
+    _dispatch_prompt(prompt, provider=provider, mode="research", skip_sha_check=skip_sha_check)
 
 
 @app.command
