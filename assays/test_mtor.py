@@ -436,6 +436,30 @@ class TestDoctor:
         assert isinstance(data, dict)
         assert "result" in data
 
+    def test_doctor_warns_localhost_worker_host(self):
+        """worker_host check fails when MTOR_WORKER_HOST is localhost."""
+        with _patch_client_error("Connection refused"), \
+             patch("mtor.doctor.WORKER_HOST", "localhost"):
+            _, data = invoke(["doctor"])
+        checks = data["result"]["checks"]
+        wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
+        assert wh_check is not None, f"worker_host check not found in {checks}"
+        assert wh_check["ok"] is False
+        assert "localhost" in wh_check["detail"]
+
+    def test_doctor_ok_with_real_worker_host(self):
+        """worker_host check passes when MTOR_WORKER_HOST is a real hostname."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client), \
+             patch("mtor.doctor.WORKER_HOST", "ganglion"):
+            _, data = invoke(["doctor"])
+        checks = data["result"]["checks"]
+        wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
+        assert wh_check is not None, f"worker_host check not found in {checks}"
+        assert wh_check["ok"] is True
+        assert "ganglion" in wh_check["detail"]
+
+
 
 # ---------------------------------------------------------------------------
 # Schema tests

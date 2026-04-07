@@ -32,7 +32,25 @@ def doctor() -> None:
         }
     )
 
-    # Check 2: Worker alive (query for recent RUNNING workflows as a proxy)
+    # Check 2: WORKER_HOST not set to localhost
+    worker_host_ok = WORKER_HOST != "localhost"
+    if not worker_host_ok:
+        all_ok = False
+    checks.append(
+        {
+            "name": "worker_host",
+            "ok": worker_host_ok,
+            "detail": (
+                f"MTOR_WORKER_HOST={WORKER_HOST}"
+                if worker_host_ok
+                else "MTOR_WORKER_HOST not set (defaults to localhost) "
+                     "— SSH operations (logs, SHA gate) will fail. "
+                     "Set MTOR_WORKER_HOST to your worker hostname."
+            ),
+        }
+    )
+
+    # Check 3: Worker alive (query for recent RUNNING workflows as a proxy)
     worker_ok = False
     worker_detail = "Skipped (Temporal unreachable)"
     if temporal_ok and client is not None:
@@ -85,47 +103,56 @@ def doctor() -> None:
         )
 
     # Check 4: Provider readiness on ganglion (where ribosome executes)
-    try:
-        provider_result = subprocess.run(
-            [
-                "ssh",
-                WORKER_HOST,
-                "set -a; source ~/.temporal-worker.env 2>/dev/null; set +a;"
-                " ribosome-tools status --compact --json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        providers = json.loads(provider_result.stdout) if provider_result.returncode == 0 else []
-        healthy = [p for p in providers if p.get("health") in ("OK", "HEALTHY")]
+    if WORKER_HOST == "localhost":
         checks.append(
             {
                 "name": "providers",
-                "ok": len(healthy) > 0,
-                "detail": f"{len(healthy)}/{len(providers)} providers available ({WORKER_HOST})",
-                "providers": providers,
+                "ok": False,
+                "detail": "Skipped — WORKER_HOST is localhost (set MTOR_WORKER_HOST first)",
             }
         )
-        if not healthy:
+    else:
+        try:
+            provider_result = subprocess.run(
+                [
+                    "ssh",
+                    WORKER_HOST,
+                    "set -a; source ~/.temporal-worker.env 2>/dev/null; set +a;"
+                    " ribosome-tools status --compact --json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            providers = json.loads(provider_result.stdout) if provider_result.returncode == 0 else []
+            healthy = [p for p in providers if p.get("health") in ("OK", "HEALTHY")]
+            checks.append(
+                {
+                    "name": "providers",
+                    "ok": len(healthy) > 0,
+                    "detail": f"{len(healthy)}/{len(providers)} providers available ({WORKER_HOST})",
+                    "providers": providers,
+                }
+            )
+            if not healthy:
+                all_ok = False
+        except (subprocess.TimeoutExpired, OSError) as exc:
             all_ok = False
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        all_ok = False
-        checks.append(
-            {
-                "name": "providers",
-                "ok": False,
-                "detail": f"{WORKER_HOST} unreachable: {exc}",
-            }
-        )
-    except Exception:
-        checks.append(
-            {
-                "name": "providers",
-                "ok": False,
-                "detail": f"ribosome status not available on {WORKER_HOST}",
-            }
-        )
+            checks.append(
+                {
+                    "name": "providers",
+                    "ok": False,
+                    "detail": f"{WORKER_HOST} unreachable: {exc}",
+                }
+            )
+        except Exception:
+            checks.append(
+                {
+                    "name": "providers",
+                    "ok": False,
+                    "detail": f"ribosome status not available on {WORKER_HOST}",
+                }
+            )
 
     result = {
         "temporal_reachable": temporal_ok,
