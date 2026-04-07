@@ -24,6 +24,17 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from mtor.worker.provider import (
+    EXIT_RATE_LIMITED,
+    HEALTH_FILE,
+    PROVIDER_PRIORITY,
+    load_health,
+    parse_rate_limit_window,
+    save_health,
+    select_provider,
+    update_health,
+)
+
 TASK_QUEUE = "translation-queue"
 RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
@@ -405,137 +416,185 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
     if is_supervised:
         effective_task = effective_task.replace("[supervised]", "").strip()
 
-    resolved_provider = provider or "zhipu"
-    cmd = [
-        "bash",
-        str(RIBOSOME_SCRIPT),
-        *(["--supervised"] if is_supervised else []),
-        "--provider",
-        resolved_provider,
-        effective_task,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=work_dir,
-        env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
-    )
+    # Load provider health and resolve actual provider via circuit-breaker routing
+    health = load_health()
+    resolved_provider = select_provider(health, provider)
 
-    async def _heartbeat_with_stall_detection():
-        """Progress-based stall detection instead of dumb turn/time limits.
+    # Retry loop: on exit 42 (rate-limited), circuit-trip and try next provider
+    _attempted: set[str] = set()
+    rc = None
+    stdout = ""
+    stderr = ""
 
-        Every 30s, hash the git diff in the worktree. If the hash is unchanged
-        for 3 consecutive checks (frozen) or alternates between 2 values
-        (edit/revert oscillation), the agent is stalled.
+    while True:
+        # Skip providers we've already tried; select next available
+        available = [p for p in PROVIDER_PRIORITY if p not in _attempted]
+        if available:
+            # Build a temporary health view that pretends unchecked providers are closed
+            tmp_health = {p: health.get(p, {"state": "closed"}) for p in available}
+            resolved_provider = select_provider(tmp_health, override=None)
 
-        Graduated response: first stall detection logs a warning; second kills.
-        """
-        import hashlib
+        _attempted.add(resolved_provider)
+        print(
+            f"[translocase] selected: {resolved_provider} "
+            f"(health: {health.get(resolved_provider, {}).get('state', 'closed')})",
+            file=sys.stderr,
+        )
+        cmd = [
+            "bash",
+            str(RIBOSOME_SCRIPT),
+            *(["--supervised"] if is_supervised else []),
+            "--provider",
+            resolved_provider,
+            effective_task,
+        ]
 
-        stall_frozen_threshold = 5  # consecutive identical hashes (~2.5 min)
-        stall_oscillation_threshold = 6  # alternating between 2 hashes
-        recent_hashes: list[str] = []
-        warnings_sent = 0
-        empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=work_dir,
+            env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
+        )
 
-        tick = 0
-        while True:
-            await asyncio.sleep(_HEARTBEAT_INTERVAL)
-            tick += 1
+        async def _heartbeat_with_stall_detection():
+            """Progress-based stall detection instead of dumb turn/time limits.
 
-            # Compute diff content hash
-            diff_hash = "unknown"
-            try:
-                diff_result = await asyncio.to_thread(
-                    lambda: _subprocess.run(
-                        ["git", "diff", "main..HEAD"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        cwd=work_dir,
+            Every 30s, hash the git diff in the worktree. If the hash is unchanged
+            for 3 consecutive checks (frozen) or alternates between 2 values
+            (edit/revert oscillation), the agent is stalled.
+
+            Graduated response: first stall detection logs a warning; second kills.
+            """
+            import hashlib
+
+            stall_frozen_threshold = 5  # consecutive identical hashes (~2.5 min)
+            stall_oscillation_threshold = 6  # alternating between 2 hashes
+            recent_hashes: list[str] = []
+            warnings_sent = 0
+            empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
+
+            tick = 0
+            while True:
+                await asyncio.sleep(_HEARTBEAT_INTERVAL)
+                tick += 1
+
+                # Compute diff content hash
+                diff_hash = "unknown"
+                try:
+                    diff_result = await asyncio.to_thread(
+                        lambda: _subprocess.run(
+                            ["git", "diff", "main..HEAD"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            cwd=work_dir,
+                        )
                     )
+                    diff_hash = hashlib.sha256(diff_result.stdout.encode()).hexdigest()[:12]
+                except Exception:
+                    pass
+
+                recent_hashes.append(diff_hash)
+                if len(recent_hashes) > stall_oscillation_threshold + 1:
+                    recent_hashes.pop(0)
+
+                with contextlib.suppress(Exception):
+                    activity.heartbeat(f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash}")
+
+                # Skip stall checks for first 2 minutes (4 ticks) — let agent ramp up
+                if tick < 4:
+                    continue
+
+                # Skip stall checks when diff is empty — agent hasn't started writing
+                # yet (CC startup, dep install, web fetch, or explore mode which is
+                # read-only). Only detect stalls once the agent has made changes.
+                if diff_hash == empty_diff_hash:
+                    continue
+
+                # Detect frozen: last N hashes identical
+                is_frozen = (
+                    len(recent_hashes) >= stall_frozen_threshold
+                    and len(set(recent_hashes[-stall_frozen_threshold:])) == 1
                 )
-                diff_hash = hashlib.sha256(diff_result.stdout.encode()).hexdigest()[:12]
-            except Exception:
-                pass
 
-            recent_hashes.append(diff_hash)
-            if len(recent_hashes) > stall_oscillation_threshold + 1:
-                recent_hashes.pop(0)
+                # Detect oscillation: alternating between exactly 2 hashes
+                is_oscillating = False
+                if len(recent_hashes) >= stall_oscillation_threshold:
+                    tail = recent_hashes[-stall_oscillation_threshold:]
+                    unique = set(tail)
+                    if len(unique) == 2:
+                        # Check if it's truly alternating (ABAB pattern)
+                        is_oscillating = all(
+                            tail[idx] != tail[idx + 1] for idx in range(len(tail) - 1)
+                        )
 
-            with contextlib.suppress(Exception):
-                activity.heartbeat(f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash}")
-
-            # Skip stall checks for first 2 minutes (4 ticks) — let agent ramp up
-            if tick < 4:
-                continue
-
-            # Skip stall checks when diff is empty — agent hasn't started writing
-            # yet (CC startup, dep install, web fetch, or explore mode which is
-            # read-only). Only detect stalls once the agent has made changes.
-            if diff_hash == empty_diff_hash:
-                continue
-
-            # Detect frozen: last N hashes identical
-            is_frozen = (
-                len(recent_hashes) >= stall_frozen_threshold
-                and len(set(recent_hashes[-stall_frozen_threshold:])) == 1
-            )
-
-            # Detect oscillation: alternating between exactly 2 hashes
-            is_oscillating = False
-            if len(recent_hashes) >= stall_oscillation_threshold:
-                tail = recent_hashes[-stall_oscillation_threshold:]
-                unique = set(tail)
-                if len(unique) == 2:
-                    # Check if it's truly alternating (ABAB pattern)
-                    is_oscillating = all(
-                        tail[idx] != tail[idx + 1] for idx in range(len(tail) - 1)
-                    )
-
-            if is_frozen or is_oscillating:
-                stall_type = "frozen" if is_frozen else "oscillating"
-                warnings_sent += 1
-                print(
-                    f"[stall-detect] {stall_type} at tick {tick} "
-                    f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
-                    file=sys.stderr,
-                )
-                if warnings_sent >= 2:
+                if is_frozen or is_oscillating:
+                    stall_type = "frozen" if is_frozen else "oscillating"
+                    warnings_sent += 1
                     print(
-                        f"[stall-detect] killing stalled process (pid={proc.pid})",
+                        f"[stall-detect] {stall_type} at tick {tick} "
+                        f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
                         file=sys.stderr,
                     )
-                    proc.kill()
-                    return
+                    if warnings_sent >= 2:
+                        print(
+                            f"[stall-detect] killing stalled process (pid={proc.pid})",
+                            file=sys.stderr,
+                        )
+                        proc.kill()
+                        return
 
-    hb_task = asyncio.create_task(_heartbeat_with_stall_detection())
-    try:
+        hb_task = asyncio.create_task(_heartbeat_with_stall_detection())
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=_ACTIVITY_TIMEOUT.total_seconds(),
-            )
-        except TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return {
-                "success": False,
-                "exit_code": -1,
-                "provider": provider,
-                "task": task[:200],
-                "stdout": "",
-                "stderr": "timeout after 30m",
-            }
-    finally:
-        hb_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await hb_task
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=_ACTIVITY_TIMEOUT.total_seconds(),
+                )
+            except TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return {
+                    "success": False,
+                    "exit_code": -1,
+                    "provider": provider,
+                    "task": task[:200],
+                    "stdout": "",
+                    "stderr": "timeout after 30m",
+                }
+        finally:
+            hb_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await hb_task
 
-    rc = proc.returncode or 0
-    stdout = stdout_bytes.decode(errors="replace")
-    stderr = stderr_bytes.decode(errors="replace")
+        rc = proc.returncode or 0
+        stdout = stdout_bytes.decode(errors="replace")
+        stderr = stderr_bytes.decode(errors="replace")
+
+        # Update provider health state and persist
+        window_hours = parse_rate_limit_window(stderr)
+        update_health(resolved_provider, rc, health, window_hours)
+        save_health(health)
+
+        # Retry on rate-limit exit: circuit-trip this provider, select next, re-run
+        if rc == EXIT_RATE_LIMITED:
+            print(
+                f"[translocase] rate-limited provider {resolved_provider}, "
+                f"retrying with fallback (attempted={sorted(_attempted)})",
+                file=sys.stderr,
+            )
+            if _attempted.issuperset(PROVIDER_PRIORITY):
+                # All providers exhausted
+                return {
+                    "success": False,
+                    "exit_code": rc,
+                    "provider": resolved_provider,
+                    "task": task[:200],
+                    "stdout": stdout[:1000],
+                    "stderr": f"All providers rate-limited: {sorted(_attempted)}",
+                }
+            continue
 
     # SRP defer detection: supervised mode returns JSON with stop_reason
     if is_supervised and rc == 0:
