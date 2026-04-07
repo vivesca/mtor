@@ -300,6 +300,45 @@ def resolve_dag(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Topological sort
+# ---------------------------------------------------------------------------
+
+
+def topological_sort(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort specs in topological order so dependencies precede dependents.
+
+    Uses Kahn's algorithm.  Dependencies on names *not* in *specs* are
+    treated as already satisfied (zero in-degree).  Specs at the same
+    dependency level are sorted alphabetically by name for determinism.
+    """
+    name_to_spec = {s["name"]: s for s in specs}
+    spec_names = set(name_to_spec)
+
+    in_degree: dict[str, int] = {n: 0 for n in spec_names}
+    dependents: dict[str, list[str]] = {n: [] for n in spec_names}
+
+    for spec in specs:
+        for dep in spec.get("depends_on", []):
+            if dep in spec_names:
+                in_degree[spec["name"]] += 1
+                dependents[dep].append(spec["name"])
+
+    queue = sorted(n for n in spec_names if in_degree[n] == 0)
+    result: list[dict[str, Any]] = []
+
+    while queue:
+        name = queue.pop(0)
+        result.append(name_to_spec[name])
+        for dep_name in sorted(dependents[name]):
+            in_degree[dep_name] -= 1
+            if in_degree[dep_name] == 0:
+                queue.append(dep_name)
+                queue.sort()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # DAG display
 # ---------------------------------------------------------------------------
 

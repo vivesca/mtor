@@ -41,7 +41,7 @@ from mtor.dedup import check_and_record as _check_dedup
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
-from mtor.plan import CycleDetected, display_dag, resolve_dag, scan_specs
+from mtor.plan import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
 from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
@@ -195,7 +195,8 @@ def default_handler(
         return
     else:
         # Dedup check — block identical dispatches within 5-minute window
-        dup_key = _check_dedup(prompt, spec_path=spec)
+        # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
+        dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
         if dup_key is not None:
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
             sys.exit(
@@ -226,6 +227,8 @@ def list_cmd(
     since: Annotated[int | None, Parameter(name=["-s", "--since"])] = None,
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
     all_: Annotated[bool, Parameter(name=["--all"])] = False,
+    provider_filter: Annotated[str | None, Parameter(name=["--provider"])] = None,
+    verdict_filter: Annotated[str | None, Parameter(name=["--verdict"])] = None,
 ) -> None:
     """List recent workflows. --since N shows last N hours only."""
     cmd = "mtor list" + (f" --status {status}" if status else "") + f" --count {count}"
@@ -290,19 +293,28 @@ def list_cmd(
             status_val = ex.status.name if ex.status else "UNKNOWN"
             start_time = ex.start_time.isoformat() if ex.start_time else None
             close_time = ex.close_time.isoformat() if ex.close_time else None
-            verdict = "\u2014"
+            sa_verdict = "\u2014"
+            sa_provider = ""
             with contextlib.suppress(Exception):
                 sa = getattr(ex, "search_attributes", None)
                 if sa:
                     for key, val in sa.items():
                         if "verdict" in str(key).lower() and val:
-                            verdict = str(val[0])
+                            sa_verdict = str(val[0])
+                        if "provider" in str(key).lower() and val:
+                            sa_provider = str(val[0])
+
+            # Filter by --provider / --verdict search attributes
+            if provider_filter and sa_provider != provider_filter:
+                continue
+            if verdict_filter and sa_verdict != verdict_filter:
+                continue
 
             is_reviewed = wf_id in reviewed_set
             is_archived = wf_id in archived_set
 
             if is_reviewed:
-                verdict = f"[R] {verdict}"
+                sa_verdict = f"[R] {sa_verdict}"
                 reviewed_count += 1
 
             # --pending: only unreviewed completed workflows
@@ -322,7 +334,8 @@ def list_cmd(
                 {
                     "workflow_id": wf_id,
                     "status": status_val,
-                    "verdict": verdict,
+                    "verdict": sa_verdict,
+                    "provider": sa_provider,
                     "start_time": start_time,
                     "close_time": close_time,
                 }
@@ -1442,7 +1455,7 @@ def dispatch_all(
             )
         )
 
-    dispatchable = [s for s in resolved if s.get("dispatchable")]
+    dispatchable = topological_sort([s for s in resolved if s.get("dispatchable")])
 
     if not dispatchable:
         _ok(
