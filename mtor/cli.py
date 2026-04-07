@@ -43,6 +43,7 @@ from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
+from mtor.spec import scaffold_spec
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,7 @@ def default_handler(
     experiment: Annotated[bool, Parameter(name=["-x", "--experiment"])] = False,
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
+    spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
@@ -182,6 +184,7 @@ def default_handler(
             experiment=experiment,
             skip_sha_check=skip_sha_check,
             chain=then,
+            spec_path=spec,
         )
 
 
@@ -1115,3 +1118,75 @@ def archive(
         [_action("mtor list", "View updated list")],
         version=VERSION,
     )
+
+
+@app.command
+def init(
+    name: str,
+    *,
+    repo: Annotated[str | None, Parameter(name=["--repo"])] = None,
+    scope: Annotated[str | None, Parameter(name=["--scope"])] = None,
+    exclude: Annotated[str | None, Parameter(name=["--exclude"])] = None,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("."),
+) -> None:
+    """Scaffold a new spec file with YAML frontmatter."""
+    import subprocess
+
+    cmd = f"mtor init {name}"
+
+    # Default repo: git rev-parse --show-toplevel, fall back to ~
+    if repo is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=dir.resolve() if dir.exists() else None,
+            )
+            repo = result.stdout.strip() if result.returncode == 0 else "~"
+        except Exception:
+            repo = "~"
+
+    # Parse comma-separated strings to lists
+    scope_list: list[str] | None = None
+    if scope:
+        scope_list = [s.strip() for s in scope.split(",") if s.strip()]
+
+    exclude_list: list[str] | None = None
+    if exclude:
+        exclude_list = [e.strip() for e in exclude.split(",") if e.strip()]
+
+    # Build output path: <dir>/<name>.md
+    out_path = (dir / name).with_suffix(".md")
+
+    try:
+        created_path = scaffold_spec(
+            name=name,
+            path=out_path,
+            repo=repo,
+            scope=scope_list,
+            exclude=exclude_list,
+        )
+        _ok(
+            cmd,
+            {"path": str(created_path), "name": name},
+            [
+                _action(
+                    f"$EDITOR {created_path}",
+                    "Open spec in editor",
+                )
+            ],
+            version=VERSION,
+        )
+    except FileExistsError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "SPEC_EXISTS",
+                f"Remove or rename {out_path} before scaffolding",
+                [_action(f"ls -la {out_path}", "Inspect existing file")],
+                exit_code=1,
+            )
+        )

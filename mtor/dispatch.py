@@ -12,6 +12,7 @@ from porin import action as _action
 from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST, WORKFLOW_TYPE
 from mtor.client import _get_client
 from mtor.envelope import _err, _ok
+from mtor.spec import update_spec_status
 
 
 def decompose_spec(prompt: str) -> list[str] | None:
@@ -218,6 +219,7 @@ def _dispatch_prompt(
     chain: list[str] | None = None,
     wait: bool = False,
     timeout: int = 300,
+    spec_path: Path | None = None,
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -338,6 +340,15 @@ def _dispatch_prompt(
             return handle.id
 
         started_id = asyncio.run(_start())
+
+        # Update spec file frontmatter if --spec was provided
+        if spec_path is not None:
+            try:
+                from mtor.spec import update_spec_status
+                update_spec_status(spec_path, "dispatched", workflow_id=started_id)
+            except Exception as exc:
+                print(f"[spec] warning: {exc}", file=sys.stderr)
+
         result_envelope: dict = {
             "workflow_id": started_id,
             "status": "RUNNING",
@@ -352,6 +363,8 @@ def _dispatch_prompt(
         if chain:
             result_envelope["chain"] = chain
             result_envelope["chain_length"] = len(chain)
+        if spec_path is not None:
+            result_envelope["spec"] = str(spec_path)
 
         next_actions = [
             _action(f"mtor status {started_id}", "Poll workflow status"),

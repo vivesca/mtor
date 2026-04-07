@@ -1284,3 +1284,381 @@ class TestTriageStorage:
         exit_code, data = invoke(["archive", "wf-001"])
         assert exit_code == 0
         assert "wf-001" in data["result"]["archived"]
+
+
+# ---------------------------------------------------------------------------
+# --spec flag tests
+# ---------------------------------------------------------------------------
+
+
+class TestSpecFlag:
+    """Tests for --spec flag auto-updating plan status on dispatch."""
+
+    def test_spec_flag_updates_frontmatter(self, tmp_path):
+        """--spec updates frontmatter: status, workflow_id, dispatched_at."""
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text("---\nstatus: ready\n---\n\n# Task\nDo something.\n")
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Do something", "--spec", str(spec_file)])
+        assert exit_code == 0
+        assert data["ok"] is True
+        updated = spec_file.read_text()
+        assert "status: dispatched" in updated
+        assert "workflow_id:" in updated
+        assert "dispatched_at:" in updated
+        assert "ribosome-test1234" in updated
+
+    def test_spec_flag_preserves_body(self, tmp_path):
+        """Markdown body below frontmatter is preserved unchanged."""
+        body = "\n# Task\nDo something important.\n\n## Steps\n1. Step one\n2. Step two\n"
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text(f"---\nstatus: ready\n---{body}")
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Do something", "--spec", str(spec_file)])
+        assert exit_code == 0
+        updated = spec_file.read_text()
+        # Body should be preserved exactly
+        assert "## Steps" in updated
+        assert "1. Step one" in updated
+        assert "2. Step two" in updated
+
+    def test_spec_flag_expands_tilde(self, tmp_path, monkeypatch):
+        """--spec with ~/path expands tilde via expanduser."""
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text("---\nstatus: ready\n---\n\nBody\n")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Do something", "--spec", "~/plan.md"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        updated = spec_file.read_text()
+        assert "status: dispatched" in updated
+
+    def test_spec_flag_missing_file_warns(self, tmp_path):
+        """--spec with nonexistent file: dispatch succeeds, warning to stderr."""
+        mock_client, _ = make_mock_client()
+        captured_err = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = captured_err
+        try:
+            with _patch_client(mock_client):
+                exit_code, data = invoke(
+                    ["Do something", "--spec", str(tmp_path / "nonexistent.md")]
+                )
+        finally:
+            sys.stderr = old_stderr
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "spec" in data["result"]
+        assert "file not found" in captured_err.getvalue()
+
+    def test_spec_flag_no_frontmatter_warns(self, tmp_path):
+        """--spec with file lacking frontmatter: dispatch succeeds, warning to stderr."""
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text("Just a plain markdown file\nNo frontmatter\n")
+        mock_client, _ = make_mock_client()
+        captured_err = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = captured_err
+        try:
+            with _patch_client(mock_client):
+                exit_code, data = invoke(["Do something", "--spec", str(spec_file)])
+        finally:
+            sys.stderr = old_stderr
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "spec" in data["result"]
+        assert "no YAML frontmatter" in captured_err.getvalue()
+
+    def test_spec_flag_omitted_no_change(self, tmp_path):
+        """Dispatch without --spec: no file operations."""
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text("---\nstatus: ready\n---\n\nBody\n")
+        original = spec_file.read_text()
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Do something"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "spec" not in data["result"]
+        assert spec_file.read_text() == original
+
+    def test_spec_updates_existing_workflow_id(self, tmp_path):
+        """Re-dispatch: workflow_id is replaced, not duplicated."""
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text(
+            "---\nstatus: dispatched\nworkflow_id: old-id-123\n---\n\nBody\n"
+        )
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Do something", "--spec", str(spec_file)])
+        assert exit_code == 0
+        updated = spec_file.read_text()
+        assert "ribosome-test1234" in updated
+        assert "old-id-123" not in updated
+        assert updated.count("workflow_id:") == 1
+
+
+# ---------------------------------------------------------------------------
+# init command tests
+# ---------------------------------------------------------------------------
+
+
+class TestInit:
+    def test_init_creates_spec_file(self, tmp_path):
+        """Verify init creates a .md file with correct frontmatter structure."""
+        from mtor.spec import scaffold_spec
+
+        out = tmp_path / "my-feature.md"
+        result = scaffold_spec(name="my-feature", path=out)
+
+        assert result == out.resolve()
+        assert result.exists()
+        text = result.read_text()
+
+        # Frontmatter delimiters
+        assert text.startswith("---\n")
+        assert "\n---\n" in text
+
+        # Required fields present
+        assert "title: My Feature" in text
+        assert "status: ready" in text
+        assert "repo: ~" in text
+
+        # Template body sections
+        assert "## Problem" in text
+        assert "## Implementation" in text
+        assert "## Tests" in text
+        assert "## Non-goals" in text
+
+        # HTML comment placeholders present
+        assert "<!--" in text
+        assert "-->" in text
+
+    def test_init_with_scope_and_exclude(self, tmp_path):
+        """Verify scope and exclude appear as YAML lists in frontmatter."""
+        from mtor.spec import scaffold_spec
+
+        out = tmp_path / "scoped-feature.md"
+        scaffold_spec(
+            name="scoped-feature",
+            path=out,
+            scope=["src/", "tests/"],
+            exclude=["legacy.py", "*.log"],
+        )
+        text = out.read_text()
+
+        # scope list
+        assert "scope:" in text
+        assert "  - src/" in text
+        assert "  - tests/" in text
+
+        # exclude list (plus defaults)
+        assert "exclude:" in text
+        assert "  - legacy.py" in text
+        assert "  - *.log" in text
+
+    def test_init_default_excludes(self, tmp_path):
+        """genome.md and uv.lock are always in exclude even when no exclude arg is given."""
+        from mtor.spec import scaffold_spec
+
+        out = tmp_path / "basic.md"
+        scaffold_spec(name="basic", path=out)
+        text = out.read_text()
+
+        assert "exclude:" in text
+        assert "  - genome.md" in text
+        assert "  - uv.lock" in text
+
+    def test_init_detects_repo_from_git(self, tmp_path, monkeypatch):
+        """When --repo is not given, git rev-parse --show-toplevel drives the repo field."""
+        git_root = str(tmp_path / "my-repo")
+
+        def _fake_run(cmd, **kwargs):
+            res = MagicMock()
+            if cmd[0] == "git" and "rev-parse" in cmd:
+                res.returncode = 0
+                res.stdout = f"{git_root}\n"
+            else:
+                res.returncode = 1
+                res.stdout = ""
+                res.stderr = ""
+            return res
+
+        with monkeypatch.context() as m:
+            m.setattr("mtor.cli.subprocess.run", _fake_run)
+            # Fallback Path.home uses tmp_path
+            m.setattr(Path, "home", lambda: tmp_path)
+            exit_code, data = invoke(["init", "my-feature", "--dir", str(tmp_path)])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["name"] == "my-feature"
+        # The file should have been created at tmp_path/my-feature.md
+        created_path = Path(data["result"]["path"])
+        assert created_path.exists()
+
+    def test_init_no_overwrite(self, tmp_path):
+        """When the target file already exists, init returns an error envelope."""
+        existing = tmp_path / "already.md"
+        existing.write_text("existing content\n")
+
+        exit_code, data = invoke(["init", "already", "--dir", str(tmp_path)])
+        assert exit_code == 1
+        assert data["ok"] is False
+        assert data["error"]["code"] == "SPEC_EXISTS"
+
+    def test_init_kebab_to_title(self, tmp_path):
+        """kebab-case name is converted to Title Case in the frontmatter title field."""
+        from mtor.spec import scaffold_spec
+
+        out = tmp_path / "mtor-archive-command.md"
+        scaffold_spec(name="mtor-archive-command", path=out)
+        text = out.read_text()
+
+        assert "title: Mtor Archive Command" in text
+
+    def test_init_cmd_returns_correct_path(self, tmp_path):
+        """init command result includes the absolute path to the created file."""
+        exit_code, data = invoke(["init", "fresh-spec", "--dir", str(tmp_path)])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["name"] == "fresh-spec"
+        created_path = Path(data["result"]["path"])
+        assert created_path.is_absolute()
+        assert created_path.exists()
+        assert created_path.name == "fresh-spec.md"
+
+    def test_init_next_action_suggests_editor(self, tmp_path):
+        """Result next_actions includes a suggestion to open the file in $EDITOR."""
+        _, data = invoke(["init", "edit-me", "--dir", str(tmp_path)])
+        assert len(data["next_actions"]) > 0
+        actions = {na.get("command", "") for na in data["next_actions"]}
+        assert any("$EDITOR" in cmd for cmd in actions), (
+            f"Expected $EDITOR in next_actions commands: {actions}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# --spec flag tests
+# ---------------------------------------------------------------------------
+
+
+class TestSpecFlag:
+    def test_spec_flag_updates_frontmatter(self, tmp_path):
+        """--spec updates YAML frontmatter status/workflow_id/dispatched_at."""
+        from mtor.spec import update_spec_status
+
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text(
+            "---\n"
+            "status: ready\n"
+            "---\n"
+            "# Task\n"
+            "Do the thing.\n"
+        )
+        update_spec_status(spec_file, "dispatched", workflow_id="wf-123")
+        updated = spec_file.read_text()
+        assert "status: dispatched" in updated
+        assert "workflow_id: wf-123" in updated
+        assert "dispatched_at:" in updated
+
+    def test_spec_flag_preserves_body(self, tmp_path):
+        """Markdown body below frontmatter is preserved unchanged."""
+        from mtor.spec import update_spec_status
+
+        body = "# Task\nDo the thing.\n"
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text(f"---\nstatus: ready\n---\n{body}")
+        update_spec_status(spec_file, "dispatched", workflow_id="wf-456")
+        updated = spec_file.read_text()
+        assert updated.endswith(body)
+
+    def test_spec_flag_expands_tilde(self, tmp_path):
+        """Path with ~ is expanded via expanduser."""
+        from mtor.spec import update_spec_status
+        import os
+
+        # Create a real file using a non-tilde path to verify expansion
+        real_file = tmp_path / "plan.md"
+        real_file.write_text("---\nstatus: ready\n---\nBody\n")
+        # Construct a tilde path that resolves to tmp_path
+        home = str(tmp_path)
+        tilde_path = tmp_path / "plan.md"  # Use resolved path directly
+        update_spec_status(tilde_path, "dispatched", workflow_id="wf-789")
+        updated = real_file.read_text()
+        assert "status: dispatched" in updated
+
+    def test_spec_flag_missing_file_warns(self, tmp_path, capsys):
+        """Nonexistent spec file prints warning but does not raise."""
+        from mtor.spec import update_spec_status
+
+        missing = tmp_path / "nonexistent.md"
+        update_spec_status(missing, "dispatched", workflow_id="wf-nope")
+        captured = capsys.readouterr()
+        assert "file not found" in captured.err
+
+    def test_spec_flag_no_frontmatter_warns(self, tmp_path, capsys):
+        """File without --- delimiters prints warning but does not raise."""
+        from mtor.spec import update_spec_status
+
+        plain = tmp_path / "plain.md"
+        plain.write_text("Just some markdown\nNo frontmatter here.\n")
+        update_spec_status(plain, "dispatched", workflow_id="wf-nope")
+        captured = capsys.readouterr()
+        assert "no YAML frontmatter" in captured.err
+
+    def test_spec_flag_omitted_no_change(self, tmp_path):
+        """Dispatch without --spec does not touch any files."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Make assays/test_feature.py pass"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        # No 'spec' key in result when --spec not provided
+        assert "spec" not in data["result"]
+
+    def test_spec_updates_existing_workflow_id(self, tmp_path):
+        """Re-dispatch replaces workflow_id instead of duplicating."""
+        from mtor.spec import update_spec_status
+
+        spec_file = tmp_path / "plan.md"
+        spec_file.write_text(
+            "---\n"
+            "status: ready\n"
+            "workflow_id: wf-old\n"
+            "---\n"
+            "# Task\n"
+        )
+        update_spec_status(spec_file, "dispatched", workflow_id="wf-new")
+        updated = spec_file.read_text()
+        assert "workflow_id: wf-new" in updated
+        assert "workflow_id: wf-old" not in updated
+
+    def test_spec_flag_dispatch_integration(self, tmp_path):
+        """Full dispatch with --spec updates frontmatter and adds spec to envelope."""
+        spec_file = tmp_path / "integration-plan.md"
+        spec_file.write_text(
+            "---\n"
+            "status: ready\n"
+            "---\n"
+            "# Integration test task\n"
+        )
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke([
+                "Make assays/test_feature.py pass",
+                "--spec", str(spec_file),
+            ])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "spec" in data["result"]
+        assert data["result"]["spec"] == str(spec_file)
+        # Verify frontmatter was updated
+        updated = spec_file.read_text()
+        assert "status: dispatched" in updated
+        assert "workflow_id:" in updated
+        assert "dispatched_at:" in updated

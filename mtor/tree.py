@@ -22,6 +22,12 @@ tree.add_command(
             "type": "string",
             "required": True,
             "description": "Task instruction for the ribosome worker",
+        },
+        {
+            "name": "--spec",
+            "type": "string",
+            "required": False,
+            "description": "Path to spec file — auto-updates status on dispatch",
         }
     ],
     returns={
@@ -348,6 +354,47 @@ tree.add_command(
             "required": False,
             "default": False,
             "description": "Archive all reviewed tasks",
+        },
+    ],
+    annotations={"readonly": False},
+)
+tree.add_command(
+    "init <name>",
+    "Scaffold a new spec file with YAML frontmatter.",
+    params=[
+        {
+            "name": "name",
+            "type": "string",
+            "required": True,
+            "description": "Spec name in kebab-case (becomes Title Case title)",
+        },
+        {
+            "name": "--repo",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Repository path (auto-detected from git root if omitted)",
+        },
+        {
+            "name": "--scope",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Comma-separated list of scope entries",
+        },
+        {
+            "name": "--exclude",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Comma-separated list of excluded files/directories",
+        },
+        {
+            "name": "--dir",
+            "type": "string",
+            "required": False,
+            "default": ".",
+            "description": "Output directory (default: current directory)",
         },
     ],
     annotations={"readonly": False},

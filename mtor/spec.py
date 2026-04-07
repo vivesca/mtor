@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -83,3 +84,79 @@ def update_spec_status(
     # Reassemble: preserve body exactly (including leading newline if present)
     new_text = f"---\n{frontmatter}\n---\n{body}"
     resolved.write_text(new_text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Scaffold
+# ---------------------------------------------------------------------------
+
+
+def scaffold_spec(
+    name: str,
+    path: Path,
+    repo: str = "~",
+    scope: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> Path:
+    """Scaffold a new spec file with YAML frontmatter.
+
+    - Build frontmatter as plain string (no yaml library)
+    - Fields: status, repo, scope (YAML list), exclude (YAML list)
+    - genome.md and uv.lock are always in exclude (merged with user values)
+    - Title is kebab-case → Title Case (mtor-archive-command → Mtor Archive Command)
+    - Template body with ## Problem, ## Implementation, ## Tests, ## Non-goals
+    - Raises FileExistsError if path already exists
+    - Returns absolute path
+    """
+    if path.exists():
+        raise FileExistsError(f"Spec file already exists: {path}")
+
+    resolved = path.resolve()
+
+    # Title: kebab-case → Title Case
+    title = " ".join(word.capitalize() for word in name.split("-"))
+
+    # Build frontmatter as plain string
+    lines = [
+        "---",
+        f"title: {title}",
+        "status: ready",
+        f"repo: {repo}",
+    ]
+    if scope:
+        lines.append("scope:")
+        for item in scope:
+            lines.append(f"  - {item}")
+
+    # Always include exclude: label + defaults (merge user values)
+    default_excludes = ["genome.md", "uv.lock"]
+    user_excludes = list(exclude) if exclude else []
+    all_excludes = user_excludes + [d for d in default_excludes if d not in user_excludes]
+    lines.append("exclude:")
+    for item in all_excludes:
+        lines.append(f"  - {item}")
+
+    lines.append("---")
+
+    # Template body with HTML comment placeholders
+    body = f"""\
+## Problem
+
+<!-- What specific problem does this solve? Who is affected? -->
+
+## Implementation
+
+<!-- How should this be built? What files change, what is the algorithm? -->
+
+## Tests
+
+<!-- What test cases prove this works? What edge cases must be covered? -->
+
+## Non-goals
+
+<!-- What is explicitly out of scope? What will NOT be addressed here? -->
+"""
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text("\n".join(lines) + "\n" + body, encoding="utf-8")
+    return resolved
