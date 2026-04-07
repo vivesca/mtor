@@ -7,6 +7,7 @@ Reports each sync cycle and cumulative statistics.
 from __future__ import annotations
 
 import signal
+import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -118,6 +119,70 @@ class RejectionTracker:
     def should_throttle(self) -> bool:
         """Return True when the rejection rate meets or exceeds the threshold."""
         return self.rejection_rate() >= self.threshold
+
+
+# ---------------------------------------------------------------------------
+# AMPK sensing — ganglion load monitoring
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GanglionLoad:
+    """Load metrics from the ganglion (remote worker).
+
+    AMPK metaphor: senses energy deficit on the ganglion so the dispatcher
+    (mTOR) can throttle when resources are scarce.
+    """
+
+    running_tasks: int
+    load_avg: float
+    load_level: str  # "low", "medium", "high"
+
+
+# Thresholds for load-level classification.
+_HIGH_TASKS = 5
+_HIGH_LOAD = 4.0
+_MEDIUM_TASKS = 3
+_MEDIUM_LOAD = 2.0
+
+
+def check_ganglion_load(worker_host: str | None = None) -> GanglionLoad:
+    """Check load on the ganglion remote via SSH.
+
+    Runs ``pgrep -f ribosome | wc -l`` and ``cat /proc/loadavg`` over SSH.
+    Returns a high-load sentinel on any SSH failure (fail-closed).
+    """
+    from mtor import WORKER_HOST
+
+    host = worker_host or WORKER_HOST
+
+    try:
+        result = subprocess.run(
+            [
+                "ssh", host,
+                "pgrep -f ribosome | wc -l; awk '{print $1}' /proc/loadavg",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return GanglionLoad(running_tasks=0, load_avg=99.0, load_level="high")
+
+        lines = result.stdout.strip().split("\n")
+        running_tasks = int(lines[0].strip())
+        load_avg = float(lines[1].strip())
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return GanglionLoad(running_tasks=0, load_avg=99.0, load_level="high")
+
+    if running_tasks >= _HIGH_TASKS or load_avg >= _HIGH_LOAD:
+        level = "high"
+    elif running_tasks >= _MEDIUM_TASKS or load_avg >= _MEDIUM_LOAD:
+        level = "medium"
+    else:
+        level = "low"
+
+    return GanglionLoad(running_tasks=running_tasks, load_avg=load_avg, load_level=level)
 
 
 def run_watch(
