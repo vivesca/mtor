@@ -684,6 +684,40 @@ def doctor() -> None:
 
 
 @app.command
+def probe() -> None:
+    """Show provider circuit-breaker state and recommended selection."""
+    from mtor.worker.provider import (
+        PROVIDER_PRIORITY,
+        load_health,
+        select_provider,
+    )
+
+    cmd = "mtor probe"
+    health = load_health()
+    recommended = select_provider(health)
+
+    providers = []
+    for name in PROVIDER_PRIORITY:
+        entry = health.get(name, {})
+        providers.append({
+            "name": name,
+            "state": entry.get("state", "closed"),
+            "cooldown_until": entry.get("cooldown_until"),
+            "consecutive_failures": entry.get("consecutive_failures", 0),
+        })
+
+    _ok(
+        cmd,
+        {
+            "providers": providers,
+            "recommended": recommended,
+        },
+        [_action("mtor doctor", "Full health check")],
+        version=VERSION,
+    )
+
+
+@app.command
 def history(
     *,
     count: int = 20,
@@ -1310,3 +1344,107 @@ def plan_done(
     update_spec_status(spec_file, "done")
 
     _ok(cmd, {"name": name, "status": "done"}, version=VERSION)
+
+
+@app.command(name="dispatch-all")
+def dispatch_all(
+    *,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
+    dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
+) -> None:
+    """Dispatch all ready (dispatchable) specs from a plan directory."""
+    import io as _io
+
+    from mtor.dispatch import _inject_spec_constraints
+
+    cmd = "mtor dispatch-all"
+    directory = dir.expanduser()
+
+    specs = scan_specs(directory)
+
+    if not specs:
+        _ok(cmd, {"dispatched": [], "count": 0, "directory": str(directory)}, version=VERSION)
+        return
+
+    try:
+        resolved = resolve_dag(specs)
+    except CycleDetected as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "CIRCULAR_DEPENDENCY",
+                "Break the cycle by removing one depends_on entry",
+                [_action("mtor plan", "View the DAG")],
+                exit_code=1,
+            )
+        )
+
+    dispatchable = [s for s in resolved if s.get("dispatchable")]
+
+    if not dispatchable:
+        _ok(
+            cmd,
+            {"dispatched": [], "count": 0, "message": "No dispatchable specs", "directory": str(directory)},
+            version=VERSION,
+        )
+        return
+
+    dispatched: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for spec in dispatchable:
+        base_prompt = spec.get("body", "") or spec.get("name", "")
+        spec_path = Path(spec["path"])
+
+        prompt = _inject_spec_constraints(
+            base_prompt,
+            spec_path=spec_path,
+            prompt_for_cmd=base_prompt,
+        )
+
+        if dry_run:
+            dispatched.append({
+                "name": spec["name"],
+                "status": "would_dispatch",
+                "prompt_preview": prompt[:100],
+            })
+            continue
+
+        # Capture stdout to prevent individual dispatch from printing
+        captured = _io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            workflow_id = _dispatch_prompt(
+                prompt,
+                provider=provider,
+                spec_path=spec_path,
+            )
+            dispatched.append({
+                "name": spec["name"],
+                "workflow_id": workflow_id,
+                "status": "dispatched",
+            })
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+            output = captured.getvalue()
+            error_msg = output[:200] if output else f"exit_code={code}"
+            errors.append({
+                "name": spec["name"],
+                "error": error_msg,
+            })
+        finally:
+            sys.stdout = old_stdout
+
+    result: dict[str, Any] = {
+        "dispatched": dispatched,
+        "count": len(dispatched),
+        "errors": errors,
+        "directory": str(directory),
+    }
+    if dry_run:
+        result["dry_run"] = True
+
+    _ok(cmd, result, version=VERSION)
