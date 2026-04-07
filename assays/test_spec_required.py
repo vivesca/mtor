@@ -147,12 +147,14 @@ class TestScoutNoSpec:
         """Scout dispatch without --spec should not be rejected."""
         from mtor.dispatch import _dispatch_prompt
 
-        with patch("mtor.dispatch._get_client") as mock_client, \
+        with patch("mtor.dispatch._get_client") as mock_get_client, \
              patch("mtor.dispatch._check_worker_sha"):
             # Set up mock to avoid actual Temporal connection
             mock_handle = MagicMock()
             mock_handle.id = "test-workflow-id"
-            mock_client.return_value.start_workflow = MagicMock(return_value=mock_handle)
+            mock_client = MagicMock()
+            mock_client.start_workflow = MagicMock(return_value=mock_handle)
+            mock_get_client.return_value = (mock_client, None)
 
             # Scout mode without --spec should proceed (may fail at Temporal, not at validation)
             try:

@@ -259,6 +259,19 @@ def _dispatch_prompt(
     else:
         spec_mode = "build"
 
+    # Build tasks require --spec for dispatch.
+    if spec_mode == "build" and spec_path is None:
+        sys.exit(
+            _err(
+                cmd,
+                "Build tasks require --spec with tests. CC writes tests, ribosome executes.",
+                "NO_SPEC",
+                'Create spec: mtor init <name>, then mtor "prompt" --spec <spec.md>',
+                [_action("mtor init", "Create a new spec")],
+                exit_code=2,
+            )
+        )
+
     # Build tasks require a CC-written test file reference in the prompt.
     # Tests are judgment (CC writes), implementation is execution (ribosome).
     if spec_mode == "build" and not re.search(r"test_\w+\.py|assays/", prompt):
@@ -444,3 +457,41 @@ def _inject_spec_constraints(
         parts.append(f"Verify test functions: {', '.join(func_names)}")
 
     return "\n".join(parts)
+
+
+def validate_spec(spec_path: Path, repo: Path) -> list[str]:
+    """Validate a spec file for dispatch readiness.
+
+    Checks:
+    - Status is ``ready`` (not dispatched/done/superseded)
+    - ``tests`` field exists in frontmatter
+    - Test file paths extracted from ``tests.run`` exist in *repo*
+
+    Returns a list of error strings — empty means valid.
+    """
+    from mtor.plan import parse_spec
+
+    errors: list[str] = []
+    spec = parse_spec(spec_path)
+
+    # Status must be "ready"
+    status = spec.get("status", "ready")
+    if status != "ready":
+        errors.append(f"Spec status is '{status}', expected 'ready'")
+
+    # Tests field is required for build dispatch
+    tests = spec.get("tests", {})
+    if not tests:
+        errors.append("Spec is missing 'tests' field")
+        return errors
+
+    # Verify test files referenced in tests.run exist
+    run_cmd = tests.get("run", "") if isinstance(tests, dict) else ""
+    if run_cmd:
+        test_file_matches = re.findall(r"([\w/]*test_\w+\.py)", run_cmd)
+        for tf in test_file_matches:
+            test_path = repo / tf
+            if not test_path.exists():
+                errors.append(f"Test file not found: {tf}")
+
+    return errors
