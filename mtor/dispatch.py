@@ -229,6 +229,14 @@ def _dispatch_prompt(
         # Strip YAML frontmatter (--- ... ---) — confuses GLM into treating spec as document
         prompt = re.sub(r"\A---\n.*?\n---\n*", "", prompt, count=1, flags=re.DOTALL).strip()
 
+    # Inject scope/tests/exclude constraints from spec frontmatter
+    if spec_path is not None:
+        prompt = _inject_spec_constraints(
+            prompt,
+            spec_path=spec_path,
+            prompt_for_cmd=prompt[:60],
+        )
+
     cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
 
     if not prompt.strip():
