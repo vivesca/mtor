@@ -292,11 +292,6 @@ def _dispatch_prompt(
     else:
         full_prompt = prompt
 
-    # SHA gate: sync worker before dispatch
-    sha_err = _check_worker_sha(skip=skip_sha_check)
-    if sha_err:
-        print(f"[sha-gate] warning: {sha_err}", file=sys.stderr)
-
     client, err = _get_client()
     if err:
         sys.exit(
