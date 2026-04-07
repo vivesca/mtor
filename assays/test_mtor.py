@@ -161,6 +161,16 @@ class TestBareInvocation:
                 f"Command starting with '{first_word}' not found in tree"
             )
 
+    def test_self_discovery_lists_all_commands(self):
+        """Bare mtor output includes scout, research, scan, auto."""
+        _, data = invoke([])
+        commands = data["result"]["commands"]
+        cmd_names = {cmd["name"] for cmd in commands}
+        for expected in ["scout", "research", "scan", "auto"]:
+            assert any(expected in name for name in cmd_names), (
+                f"Missing command containing '{expected}'. Available: {cmd_names}"
+            )
+
 
 class TestHelpSuppression:
     def test_no_human_help_output(self):
@@ -267,6 +277,16 @@ class TestDispatch:
                 _exit_code, data = invoke(args)
                 assert isinstance(data, dict), f"Not a dict for args={args}"
 
+    def test_dispatch_result_includes_provider(self):
+        """Dispatch result envelope includes provider field."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            _, data = invoke(["Make assays/test_feature.py pass"])
+        assert "provider" in data["result"], (
+            f"Missing provider field in result: {data['result']}"
+        )
+        assert data["result"]["provider"] is not None
+
 
 # ---------------------------------------------------------------------------
 # List tests
@@ -326,6 +346,27 @@ class TestStatus:
             exit_code, data = invoke(["status", "any-id"])
         assert exit_code == 3
         assert data["ok"] is False
+
+    def test_status_includes_failure_reason(self):
+        """Status for failed workflow includes failure_reason field."""
+        mock_client, mock_handle = make_mock_client()
+        # Set up a COMPLETED workflow with rejected verdict and error
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        mock_handle.result = AsyncMock(return_value={
+            "results": [{
+                "exit_code": 1,
+                "review": {"verdict": "rejected"},
+                "error": "Build failed: syntax error at line 42",
+            }]
+        })
+        with _patch_client(mock_client):
+            _, data = invoke(["status", "ribosome-test1234"])
+        assert data["ok"] is True
+        assert "failure_reason" in data["result"], (
+            f"Missing failure_reason: {data['result']}"
+        )
+        assert "syntax error" in data["result"]["failure_reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -821,19 +862,29 @@ class TestCheckpoints:
 
 class TestScoutMode:
     def test_scout_command_dispatches(self):
-        """Scout subcommand dispatches a workflow with mode=scout."""
+        """Verify --wait triggers polling (mock the poll loop)."""
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client):
-            exit_code, data = invoke(["scout", "Find all files importing argparse"])
+        with _patch_client(mock_client), \
+             patch("mtor.cli._wait_and_print_logs", return_value=0) as mock_wait:
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            exit_code = 0
+            try:
+                sys.stdout = captured
+                app(["scout", "Find all files importing argparse"])
+            except SystemExit as exc:
+                exit_code = exc.code if isinstance(exc.code, int) else 1
+            finally:
+                sys.stdout = old_stdout
         assert exit_code == 0
-        assert data["ok"] is True
-        assert data["result"]["status"] == "RUNNING"
+        mock_wait.assert_called_once()
+        assert mock_wait.call_args[0][0] == "ribosome-test1234"
 
     def test_scout_sets_mode_in_spec(self):
         """Verify the workflow spec has mode=scout."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            invoke(["scout", "List all Python files"])
+            invoke(["scout", "--no-wait", "List all Python files"])
         call_kwargs = mock_client.start_workflow.call_args.kwargs
         spec = call_kwargs["args"][0][0]
         assert spec["mode"] == "scout"
@@ -842,7 +893,7 @@ class TestScoutMode:
         """Scout mode appends READ-ONLY instructions to the prompt."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            invoke(["scout", "Audit dead code"])
+            invoke(["scout", "--no-wait", "Audit dead code"])
         call_kwargs = mock_client.start_workflow.call_args.kwargs
         spec = call_kwargs["args"][0][0]
         assert "READ-ONLY" in spec["task"]
@@ -852,14 +903,14 @@ class TestScoutMode:
         """Scout mode result envelope has scout=True."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, data = invoke(["scout", "Find patterns"])
+            _, data = invoke(["scout", "--no-wait", "Find patterns"])
         assert data["result"]["scout"] is True
 
     def test_scout_has_scout_next_action(self):
         """Scout mode next_actions includes read-only analysis note."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, data = invoke(["scout", "Check imports"])
+            _, data = invoke(["scout", "--no-wait", "Check imports"])
         action_descs = [na.get("description", "") for na in data["next_actions"]]
         assert any("no merge" in desc.lower() for desc in action_descs)
 
@@ -867,7 +918,7 @@ class TestScoutMode:
         """Scout command accepts --provider flag."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["scout", "-p", "droid", "Explore codebase"])
+            exit_code, data = invoke(["scout", "--no-wait", "-p", "droid", "Explore codebase"])
         assert exit_code == 0
         assert data["ok"] is True
         call_kwargs = mock_client.start_workflow.call_args.kwargs
@@ -878,7 +929,7 @@ class TestScoutMode:
         """Scout result does NOT have experiment flag."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, data = invoke(["scout", "Analyze architecture"])
+            _, data = invoke(["scout", "--no-wait", "Analyze architecture"])
         assert data["result"].get("experiment") is not True
 
     def test_scout_temporal_unreachable(self):
@@ -887,3 +938,325 @@ class TestScoutMode:
             exit_code, data = invoke(["scout", "Find issues"])
         assert exit_code == 3
         assert data["ok"] is False
+
+    def test_scout_wait_timeout(self):
+        """Verify timeout exits 124."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client), \
+             patch("mtor.cli._wait_and_print_logs", return_value=124) as mock_wait:
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            exit_code = 0
+            try:
+                sys.stdout = captured
+                app(["scout", "--timeout", "60", "Find issues"])
+            except SystemExit as exc:
+                exit_code = exc.code if isinstance(exc.code, int) else 1
+            finally:
+                sys.stdout = old_stdout
+        assert exit_code == 124
+        mock_wait.assert_called_once_with("ribosome-test1234", timeout=60)
+
+    def test_scout_skips_sha_gate(self):
+        """Verify _check_worker_sha is NOT called for scout mode."""
+        mock_client, _ = make_mock_client()
+        with ExitStack() as stack:
+            for target in _CLIENT_PATCH_TARGETS:
+                stack.enter_context(patch(target, return_value=(mock_client, None)))
+            sha_mock = stack.enter_context(
+                patch("mtor.dispatch._check_worker_sha", return_value=True)
+            )
+            invoke(["scout", "--no-wait", "Analyze code"])
+        sha_mock.assert_not_called()
+
+    def test_scout_no_duplicate_next_actions(self):
+        """Scout mode next_actions has exactly one mtor logs action."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            _, data = invoke(["scout", "--no-wait", "Check imports"])
+        logs_actions = [
+            na for na in data["next_actions"]
+            if "mtor logs" in na.get("command", "")
+        ]
+        assert len(logs_actions) == 1, (
+            f"Expected exactly 1 mtor logs action, got {len(logs_actions)}: {logs_actions}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Review / Archive / Triage tests
+# ---------------------------------------------------------------------------
+
+
+class TestReview:
+    def test_review_adds_to_set(self, tmp_path, monkeypatch):
+        """Review an ID, verify it's in reviewed."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        exit_code, data = invoke(["review", "wf-001"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "wf-001" in data["result"]["reviewed"]
+        assert data["result"]["count"] >= 1
+
+    def test_review_idempotent(self, tmp_path, monkeypatch):
+        """Review same ID twice, one entry."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        invoke(["review", "wf-001"])
+        exit_code, data = invoke(["review", "wf-001"])
+        assert exit_code == 0
+        assert data["result"]["reviewed"].count("wf-001") == 1
+
+    def test_review_all(self, tmp_path, monkeypatch):
+        """Review --all marks all completed non-running tasks."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["review", "--all"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["count"] >= 1
+
+
+class TestArchive:
+    def test_archive_moves_from_reviewed(self, tmp_path, monkeypatch):
+        """Archive a reviewed ID: gone from reviewed, in archived."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        # First review, then archive
+        invoke(["review", "wf-001"])
+        exit_code, data = invoke(["archive", "wf-001"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "wf-001" in data["result"]["archived"]
+        # Reload triage data and verify gone from reviewed
+        raw = json.loads((tmp_path / "triage.json").read_text())
+        assert "wf-001" not in raw["reviewed"]
+        assert "wf-001" in raw["archived"]
+
+    def test_archive_before_duration(self, tmp_path, monkeypatch):
+        """Archive --before 3h archives completed workflows older than 3 hours."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        # Override list_workflows to return workflows with specific close times
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+
+        async def _fake_list_aged(query=None):
+            for i, hours_ago in enumerate([1, 5, 10]):
+                execution = MagicMock()
+                execution.id = f"wf-old-{i}"
+                execution.status = MagicMock()
+                execution.status.name = "COMPLETED"
+                execution.start_time = now - timedelta(hours=hours_ago)
+                execution.close_time = now - timedelta(hours=hours_ago)
+                yield execution
+
+        mock_client.list_workflows = _fake_list_aged
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["archive", "--before", "3h"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        # Should archive wf-old-1 (5h) and wf-old-2 (10h), not wf-old-0 (1h)
+        archived = data["result"]["archived"]
+        assert "wf-old-0" not in archived
+        assert "wf-old-1" in archived
+        assert "wf-old-2" in archived
+
+    def test_archive_all_reviewed(self, tmp_path, monkeypatch):
+        """Archive --all-reviewed bulk archives everything in reviewed set."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        # Review two IDs
+        invoke(["review", "wf-a"])
+        invoke(["review", "wf-b"])
+        exit_code, data = invoke(["archive", "--all-reviewed"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "wf-a" in data["result"]["archived"]
+        assert "wf-b" in data["result"]["archived"]
+
+    def test_archive_without_review(self, tmp_path, monkeypatch):
+        """Archiving an ID that was never reviewed still works."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        exit_code, data = invoke(["archive", "wf-never-reviewed"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert "wf-never-reviewed" in data["result"]["archived"]
+
+
+class TestListTriage:
+    def test_list_hides_archived(self, tmp_path, monkeypatch):
+        """Default list hides archived workflows."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        # Override list_workflows to return two workflows
+        async def _fake_list_two(query=None):
+            for wf_id in ["wf-visible", "wf-hidden"]:
+                execution = MagicMock()
+                execution.id = wf_id
+                execution.status = MagicMock()
+                execution.status.name = "COMPLETED"
+                execution.start_time = MagicMock()
+                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.close_time = MagicMock()
+                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                yield execution
+
+        mock_client.list_workflows = _fake_list_two
+        # Archive one
+        invoke(["archive", "wf-hidden"])
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["list"])
+        assert exit_code == 0
+        wf_ids = [wf["workflow_id"] for wf in data["result"]["workflows"]]
+        assert "wf-visible" in wf_ids
+        assert "wf-hidden" not in wf_ids
+
+    def test_list_shows_reviewed_marker(self, tmp_path, monkeypatch):
+        """Reviewed task shows [R] marker in verdict field."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        # Return a single workflow
+        async def _fake_list_reviewed(query=None):
+            execution = MagicMock()
+            execution.id = "wf-reviewed"
+            execution.status = MagicMock()
+            execution.status.name = "COMPLETED"
+            execution.start_time = MagicMock()
+            execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+            execution.close_time = MagicMock()
+            execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+            yield execution
+
+        mock_client.list_workflows = _fake_list_reviewed
+        invoke(["review", "wf-reviewed"])
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["list"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        wf = data["result"]["workflows"][0]
+        assert "[R]" in wf["verdict"]
+
+    def test_list_pending_only_unreviewed(self, tmp_path, monkeypatch):
+        """--pending excludes reviewed and archived workflows."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        async def _fake_list_pending(query=None):
+            for wf_id in ["wf-pending", "wf-reviewed", "wf-archived"]:
+                execution = MagicMock()
+                execution.id = wf_id
+                execution.status = MagicMock()
+                execution.status.name = "COMPLETED"
+                execution.start_time = MagicMock()
+                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.close_time = MagicMock()
+                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                yield execution
+
+        mock_client.list_workflows = _fake_list_pending
+        invoke(["review", "wf-reviewed"])
+        invoke(["archive", "wf-archived"])
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["list", "--pending"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        wf_ids = [wf["workflow_id"] for wf in data["result"]["workflows"]]
+        assert "wf-pending" in wf_ids
+        assert "wf-reviewed" not in wf_ids
+        assert "wf-archived" not in wf_ids
+
+    def test_list_all_shows_everything(self, tmp_path, monkeypatch):
+        """--all bypasses all filters."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        async def _fake_list_all(query=None):
+            for wf_id in ["wf-visible", "wf-archived"]:
+                execution = MagicMock()
+                execution.id = wf_id
+                execution.status = MagicMock()
+                execution.status.name = "COMPLETED"
+                execution.start_time = MagicMock()
+                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.close_time = MagicMock()
+                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                yield execution
+
+        mock_client.list_workflows = _fake_list_all
+        invoke(["archive", "wf-archived"])
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["list", "--all"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        wf_ids = [wf["workflow_id"] for wf in data["result"]["workflows"]]
+        assert "wf-visible" in wf_ids
+        assert "wf-archived" in wf_ids
+
+    def test_list_pending_count_in_result(self, tmp_path, monkeypatch):
+        """Result envelope includes pending_count and reviewed_count."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        mock_client, _ = make_mock_client()
+        async def _fake_list_counts(query=None):
+            for wf_id in ["wf-pending", "wf-reviewed"]:
+                execution = MagicMock()
+                execution.id = wf_id
+                execution.status = MagicMock()
+                execution.status.name = "COMPLETED"
+                execution.start_time = MagicMock()
+                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.close_time = MagicMock()
+                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                yield execution
+
+        mock_client.list_workflows = _fake_list_counts
+        invoke(["review", "wf-reviewed"])
+        with _patch_client(mock_client):
+            _, data = invoke(["list"])
+        assert "reviewed_count" in data["result"]
+        assert "pending_count" in data["result"]
+        assert "archived_hidden" in data["result"]
+
+
+class TestTriageStorage:
+    def test_triage_creates_config_dir(self, tmp_path, monkeypatch):
+        """First write creates the parent directory."""
+        import mtor.triage as triage_mod
+
+        triage_file = tmp_path / "nested" / "config" / "triage.json"
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", triage_file)
+        invoke(["review", "wf-001"])
+        assert triage_file.exists()
+        raw = json.loads(triage_file.read_text())
+        assert "wf-001" in raw["reviewed"]
+
+    def test_triage_persists_across_invocations(self, tmp_path, monkeypatch):
+        """Data written in one call is readable in the next."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        invoke(["review", "wf-001"])
+        exit_code, data = invoke(["archive", "wf-001"])
+        assert exit_code == 0
+        assert "wf-001" in data["result"]["archived"]

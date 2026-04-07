@@ -99,6 +99,11 @@ ROUTE_TO_PROVIDER: dict[str, str] = {
 }
 
 
+def _resolve_default_provider(spec_mode: str) -> str:
+    """Return the default provider for a spec mode."""
+    return ROUTE_TO_PROVIDER.get(spec_mode, "zhipu")
+
+
 def detect_task_type(prompt: str) -> str:
     """Classify a prompt into a task type for routing."""
     lower = prompt.lower()
@@ -211,8 +216,10 @@ def _dispatch_prompt(
     mode: str | None = None,
     skip_sha_check: bool = False,
     chain: list[str] | None = None,
-) -> None:
-    """Core dispatch logic."""
+    wait: bool = False,
+    timeout: int = 300,
+) -> str | None:
+    """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
     prompt_path = Path(prompt).expanduser()
     if prompt_path.is_file():
@@ -255,6 +262,11 @@ def _dispatch_prompt(
                 exit_code=2,
             )
         )
+
+    # SHA gate — auto-deploy if worker is out of sync
+    # Scout/research are read-only — worker code version doesn't matter
+    if spec_mode not in ("scout", "research"):
+        _check_worker_sha(skip=skip_sha_check)
 
     # Mode-specific prompt suffixes
     if spec_mode == "scout":
@@ -332,6 +344,7 @@ def _dispatch_prompt(
             "prompt_preview": prompt[:100],
             "risk": classify_risk(full_prompt),
         }
+        result_envelope["provider"] = provider or _resolve_default_provider(spec_mode)
         if spec_mode == "experiment":
             result_envelope["experiment"] = True
         if spec_mode == "scout":
@@ -346,22 +359,21 @@ def _dispatch_prompt(
             _action(f"mtor cancel {started_id}", "Cancel if needed"),
         ]
         if spec_mode == "experiment":
-            next_actions.append(
-                _action(
-                    f"mtor status {started_id}", "Experiment mode — will NOT auto-merge to main"
-                )
+            next_actions[0] = _action(
+                f"mtor status {started_id}", "Experiment mode — will NOT auto-merge to main"
             )
         if spec_mode == "scout":
-            next_actions.append(
-                _action(f"mtor logs {started_id}", "Scout mode — read-only analysis, no merge")
-            )
+            next_actions[1] = _action(f"mtor logs {started_id}", "Scout mode — read-only analysis, no merge")
 
+        if wait:
+            return started_id
         _ok(
             cmd,
             result_envelope,
             next_actions,
             version=VERSION,
         )
+        return started_id
     except Exception as exc:
         sys.exit(
             _err(

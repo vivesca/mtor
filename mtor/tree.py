@@ -8,13 +8,13 @@ from mtor import LOG_TAIL_LINES
 
 tree = CommandTree("mtor")
 tree.add_command(
-    "mtor",
+    "",
     "Bare invocation — returns this JSON command tree for agent self-discovery",
     params=[],
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor <prompt>",
+    "<prompt>",
     "Dispatch a task prompt to Temporal for agent execution.",
     params=[
         {
@@ -37,7 +37,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "mtor list",
+    "list",
     "List recent workflows with optional filters",
     params=[
         {
@@ -68,7 +68,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor status <workflow_id>",
+    "status <workflow_id>",
     "Get detailed status of a single workflow",
     params=[
         {
@@ -100,7 +100,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor logs <workflow_id>",
+    "logs <workflow_id>",
     f"Fetch last {LOG_TAIL_LINES} lines of workflow output from worker host",
     params=[
         {
@@ -123,7 +123,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor terminate <workflow_id>",
+    "terminate <workflow_id>",
     "Immediately terminate a running workflow. Idempotent.",
     params=[
         {
@@ -142,7 +142,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False, "idempotent": True},
 )
 tree.add_command(
-    "mtor cancel <workflow_id>",
+    "cancel <workflow_id>",
     "Cancel a running workflow. Delegates to terminate for immediate stop. Idempotent.",
     params=[
         {
@@ -161,7 +161,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False, "idempotent": True},
 )
 tree.add_command(
-    "mtor approve <workflow_id>",
+    "approve <workflow_id>",
     "Approve a deferred (SRP-paused) ribosome task. Sends approval signal to Temporal.",
     params=[
         {
@@ -174,7 +174,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "mtor deny <workflow_id>",
+    "deny <workflow_id>",
     "Deny a deferred (SRP-paused) ribosome task. Sends rejection signal to Temporal.",
     params=[
         {
@@ -187,7 +187,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "mtor doctor",
+    "doctor",
     "Health check: Temporal server reachability, worker liveness, provider info",
     params=[],
     returns={
@@ -204,9 +204,151 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "mtor schema",
+    "schema",
     "Emit full JSON schema of all commands with params, types, enums, defaults",
     params=[],
     returns={"schema_version": "string", "commands": "array"},
     annotations={"readonly": True},
+)
+tree.add_command(
+    "scout <prompt>",
+    "Dispatch a read-only analysis task. Returns findings, not code.",
+    params=[
+        {
+            "name": "prompt",
+            "type": "string",
+            "required": True,
+            "description": "Analysis instruction",
+        },
+        {
+            "name": "--provider",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Override default provider",
+        },
+        {
+            "name": "--wait/--no-wait",
+            "type": "boolean",
+            "required": False,
+            "default": True,
+            "description": "Wait for completion and print logs",
+        },
+        {
+            "name": "--timeout",
+            "type": "integer",
+            "required": False,
+            "default": 300,
+            "description": "Max seconds to wait",
+        },
+    ],
+    annotations={"readonly": True},
+)
+tree.add_command(
+    "research <prompt>",
+    "Dispatch an external research task. Searches web, synthesizes findings.",
+    params=[
+        {
+            "name": "prompt",
+            "type": "string",
+            "required": True,
+            "description": "Research question",
+        },
+        {
+            "name": "--provider",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Override default provider",
+        },
+        {
+            "name": "--wait/--no-wait",
+            "type": "boolean",
+            "required": False,
+            "default": True,
+            "description": "Wait for completion and print logs",
+        },
+        {
+            "name": "--timeout",
+            "type": "integer",
+            "required": False,
+            "default": 600,
+            "description": "Max seconds to wait",
+        },
+    ],
+    annotations={"readonly": True},
+)
+tree.add_command(
+    "scan",
+    "Run deterministic checks: TODO/FIXME, missing tests, stale marks.",
+    params=[],
+    annotations={"readonly": True},
+)
+tree.add_command(
+    "auto",
+    "Scan for improvement opportunities and dispatch self-targeted tasks.",
+    params=[
+        {
+            "name": "--dry-run",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Preview without dispatching",
+        },
+        {
+            "name": "--provider",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Override default provider",
+        },
+    ],
+    annotations={"readonly": False},
+)
+tree.add_command(
+    "mtor review <workflow_id>",
+    "Mark a completed task as reviewed — seen, verdict noted.",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": False,
+            "description": "Temporal workflow ID (omit with --all)",
+        },
+        {
+            "name": "--all",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Review all completed non-running tasks",
+        },
+    ],
+    annotations={"readonly": False},
+)
+tree.add_command(
+    "mtor archive <workflow_id>",
+    "Archive a reviewed/completed task — hide from default list.",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": False,
+            "description": "Temporal workflow ID",
+        },
+        {
+            "name": "--before",
+            "type": "string",
+            "required": False,
+            "default": None,
+            "description": "Archive completed workflows older than duration (e.g. 3h, 1d, 30m)",
+        },
+        {
+            "name": "--all-reviewed",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Archive all reviewed tasks",
+        },
+    ],
+    annotations={"readonly": False},
 )

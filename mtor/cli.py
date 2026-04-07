@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import subprocess
 import sys
+import time
 from datetime import UTC
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -40,7 +41,113 @@ from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.scan import _run_checks
+from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
+
+
+# ---------------------------------------------------------------------------
+# Wait/poll helpers for scout/research --wait
+# ---------------------------------------------------------------------------
+
+
+def _fetch_log_text(workflow_id: str, client=None) -> str:
+    """Fetch workflow log text via SSH. Returns empty string on failure."""
+    log_path = ""
+    if client:
+        try:
+
+            async def _get_output_path():
+                handle = client.get_workflow_handle(workflow_id)
+                wf_result = await handle.result()
+                if isinstance(wf_result, dict):
+                    task_result = _extract_first_result(wf_result)
+                    if task_result:
+                        return task_result.get("review", {}).get("output_path", "")
+                return ""
+
+            log_path = asyncio.run(_get_output_path())
+        except Exception:
+            pass
+
+    if not log_path:
+        try:
+            find_result = subprocess.run(
+                ["ssh", WORKER_HOST, f"ls -t {OUTPUTS_DIR}/*.txt 2>/dev/null | head -20"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if find_result.returncode == 0:
+                wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+                for line in find_result.stdout.strip().splitlines():
+                    fname = line.strip().rsplit("/", 1)[-1]
+                    if wf_suffix in fname:
+                        log_path = line.strip()
+                        break
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    if not log_path:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["ssh", WORKER_HOST, f"tail -{LOG_TAIL_LINES} {log_path}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return ""
+
+
+def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
+    """Poll workflow until done, then print logs. Returns exit code."""
+    client, err = _get_client()
+    if err:
+        return 1
+
+    start_time = time.time()
+    while True:
+        elapsed = int(time.time() - start_time)
+        if elapsed >= timeout:
+            print(
+                f"\n[scout] timed out after {timeout}s — workflow {workflow_id} still running",
+                file=sys.stderr,
+            )
+            print(f"[scout] follow up manually: mtor logs {workflow_id}", file=sys.stderr)
+            return 124
+
+        try:
+
+            async def _poll():
+                handle = client.get_workflow_handle(workflow_id)
+                desc = await handle.describe()
+                return desc
+
+            desc = asyncio.run(_poll())
+            status_name = desc.status.name if desc.status else "UNKNOWN"
+        except Exception:
+            status_name = "UNKNOWN"
+
+        if status_name != "RUNNING":
+            break
+
+        print(f"\r[scout] waiting... ({elapsed}s)", file=sys.stderr, end="", flush=True)
+        time.sleep(10)
+
+    # Workflow finished — fetch logs via SSH
+    log_output = _fetch_log_text(workflow_id, client)
+    if log_output:
+        print(log_output)
+
+    if status_name == "COMPLETED":
+        return 0
+    return 1
 
 # ---------------------------------------------------------------------------
 # Cyclopts CLI
@@ -84,6 +191,8 @@ def list_cmd(
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"] | None = None,
     count: int = 50,
     since: Annotated[int | None, Parameter(name=["-s", "--since"])] = None,
+    pending: Annotated[bool, Parameter(name=["--pending"])] = False,
+    all_: Annotated[bool, Parameter(name=["--all"])] = False,
 ) -> None:
     """List recent workflows. --since N shows last N hours only."""
     cmd = "mtor list" + (f" --status {status}" if status else "") + f" --count {count}"
@@ -131,8 +240,18 @@ def list_cmd(
             return results
 
         executions = asyncio.run(_list())
+
+        # Load triage state
+        triage = load_triage()
+        reviewed_set = set(triage.get("reviewed", []))
+        archived_set = set(triage.get("archived", []))
+
         workflows = []
         next_actions = []
+        archived_hidden = 0
+        reviewed_count = 0
+        pending_count = 0
+
         for ex in executions:
             wf_id = ex.id
             status_val = ex.status.name if ex.status else "UNKNOWN"
@@ -145,6 +264,27 @@ def list_cmd(
                     for key, val in sa.items():
                         if "verdict" in str(key).lower() and val:
                             verdict = str(val[0])
+
+            is_reviewed = wf_id in reviewed_set
+            is_archived = wf_id in archived_set
+
+            if is_reviewed:
+                verdict = f"[R] {verdict}"
+                reviewed_count += 1
+
+            # --pending: only unreviewed completed workflows
+            if pending:
+                if is_reviewed or is_archived:
+                    continue
+                if status_val != "COMPLETED":
+                    continue
+                pending_count += 1
+            elif not all_:
+                # Default: hide archived
+                if is_archived:
+                    archived_hidden += 1
+                    continue
+
             workflows.append(
                 {
                     "workflow_id": wf_id,
@@ -156,7 +296,24 @@ def list_cmd(
             )
             next_actions.append(_action(f"mtor status {wf_id}", f"Get full status for {wf_id}"))
 
-        _ok(cmd, {"workflows": workflows, "count": len(workflows)}, next_actions, version=VERSION)
+        # Count pending (unreviewed completed) for envelope
+        if not pending:
+            for ex in executions:
+                wf_id = ex.id
+                status_val = ex.status.name if ex.status else "UNKNOWN"
+                if (status_val == "COMPLETED"
+                        and wf_id not in reviewed_set
+                        and wf_id not in archived_set):
+                    pending_count += 1
+
+        result: dict[str, Any] = {
+            "workflows": workflows,
+            "count": len(workflows),
+            "archived_hidden": archived_hidden,
+            "reviewed_count": reviewed_count,
+            "pending_count": pending_count,
+        }
+        _ok(cmd, result, next_actions, version=VERSION)
     except Exception as exc:
         sys.exit(
             _err(
@@ -224,6 +381,19 @@ def status(workflow_id: str) -> None:
                 satisfaction = task_result.get("review", {}).get("satisfaction")
                 if satisfaction is not None:
                     result_payload["satisfaction"] = satisfaction
+
+        # Add failure_reason for non-approved terminal states
+        if status_val in ("FAILED", "CANCELED", "TERMINATED") or (
+            status_val == "COMPLETED" and result_payload.get("verdict") not in ("approved", "approved_with_flags", None)
+        ):
+            failure_reason = "No diagnostic information available"
+            if wf_result and isinstance(wf_result, dict):
+                task_result = _extract_first_result(wf_result)
+                if task_result:
+                    err_msg = task_result.get("error") or task_result.get("stderr", "")
+                    if err_msg:
+                        failure_reason = str(err_msg).splitlines()[-1]
+            result_payload["failure_reason"] = failure_reason
 
         _ok(
             cmd,
@@ -506,9 +676,16 @@ def scout(
     *,
     provider: Annotated[str | None, Parameter(name=["-p", "--provider"])] = None,
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
+    wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
+    timeout: Annotated[int, Parameter(name=["--timeout"])] = 300,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
-    _dispatch_prompt(prompt, provider=provider, mode="scout", skip_sha_check=skip_sha_check)
+    workflow_id = _dispatch_prompt(
+        prompt, provider=provider, mode="scout",
+        skip_sha_check=skip_sha_check, wait=wait, timeout=timeout,
+    )
+    if wait and workflow_id:
+        sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
 
 
 @app.command
@@ -517,9 +694,16 @@ def research(
     *,
     provider: Annotated[str | None, Parameter(name=["-p", "--provider"])] = None,
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
+    wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
+    timeout: Annotated[int, Parameter(name=["--timeout"])] = 600,
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
-    _dispatch_prompt(prompt, provider=provider, mode="research", skip_sha_check=skip_sha_check)
+    workflow_id = _dispatch_prompt(
+        prompt, provider=provider, mode="research",
+        skip_sha_check=skip_sha_check, wait=wait, timeout=timeout,
+    )
+    if wait and workflow_id:
+        sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
 
 
 @app.command
@@ -788,3 +972,146 @@ def checkpoints() -> None:
         with contextlib.suppress(Exception):
             cps.append(_json.loads(f.read_text()))
     _ok("mtor checkpoints", {"checkpoints": cps, "count": len(cps)}, version=VERSION)
+
+
+@app.command
+def review(
+    workflow_id: str | None = None,
+    *,
+    all_: Annotated[bool, Parameter(name=["--all"])] = False,
+) -> None:
+    """Mark task(s) as reviewed — seen, verdict noted."""
+    if all_:
+        # review --all: mark all completed non-running tasks
+        client, err = _get_client()
+        if err:
+            sys.exit(
+                _err(
+                    "mtor review --all",
+                    f"Cannot connect: {err}",
+                    "TEMPORAL_UNREACHABLE",
+                    "mtor doctor",
+                    exit_code=3,
+                )
+            )
+
+        async def _list_completed():
+            results = []
+            async for execution in client.list_workflows(query=None):
+                results.append(execution)
+            return results
+
+        executions = asyncio.run(_list_completed())
+        ids_to_review = [
+            ex.id for ex in executions
+            if ex.status and ex.status.name not in ("RUNNING",)
+        ]
+        result = review_ids(ids_to_review)
+        _ok(
+            "mtor review --all",
+            result,
+            [_action("mtor list", "View updated list")],
+            version=VERSION,
+        )
+        return
+
+    if workflow_id is None:
+        sys.exit(
+            _err(
+                "mtor review",
+                "Missing workflow_id or --all",
+                "MISSING_ARGS",
+                "Provide a workflow ID or use --all",
+            )
+        )
+
+    result = review_ids([workflow_id])
+    _ok(
+        f"mtor review {workflow_id}",
+        result,
+        [_action("mtor list", "View updated list")],
+        version=VERSION,
+    )
+
+
+@app.command
+def archive(
+    workflow_id: Annotated[str | None, Parameter(name=["workflow_id"])] = None,
+    *,
+    before: Annotated[str | None, Parameter(name=["--before"])] = None,
+    all_reviewed: Annotated[bool, Parameter(name=["--all-reviewed"])] = False,
+) -> None:
+    """Archive task(s) — hide from default list."""
+    if all_reviewed:
+        triage = load_triage()
+        ids_to_archive = list(triage.get("reviewed", []))
+        result = archive_ids(ids_to_archive)
+        _ok(
+            "mtor archive --all-reviewed",
+            result,
+            [_action("mtor list", "View updated list")],
+            version=VERSION,
+        )
+        return
+
+    if before:
+        client, err = _get_client()
+        if err:
+            sys.exit(
+                _err(
+                    "mtor archive --before",
+                    f"Cannot connect: {err}",
+                    "TEMPORAL_UNREACHABLE",
+                    "mtor doctor",
+                    exit_code=3,
+                )
+            )
+
+        delta = parse_duration(before)
+        from datetime import UTC, datetime
+
+        cutoff = datetime.now(UTC) - delta
+
+        async def _list_all():
+            results = []
+            async for execution in client.list_workflows(query=None):
+                results.append(execution)
+            return results
+
+        executions = asyncio.run(_list_all())
+        ids_to_archive = []
+        for ex in executions:
+            if ex.status and ex.status.name == "COMPLETED" and ex.close_time:
+                close_time = ex.close_time
+                # Handle both aware and naive datetimes
+                if close_time.tzinfo is None:
+                    close_time = close_time.replace(tzinfo=UTC)
+                if close_time < cutoff:
+                    ids_to_archive.append(ex.id)
+
+        result = archive_ids(ids_to_archive)
+        _ok(
+            f"mtor archive --before {before}",
+            result,
+            [_action("mtor list", "View updated list")],
+            version=VERSION,
+        )
+        return
+
+    if workflow_id is None:
+        sys.exit(
+            _err(
+                "mtor archive",
+                "Missing workflow_id or filter flag",
+                "MISSING_ARGS",
+                "Provide a workflow ID, --before <duration>, or --all-reviewed",
+            )
+        )
+
+    result = archive_ids([workflow_id])
+    _ok(
+        f"mtor archive {workflow_id}",
+        result,
+        [_action("mtor list", "View updated list")],
+        version=VERSION,
+    )
