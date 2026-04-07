@@ -164,49 +164,55 @@ def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> 
     return wid
 
 
-def _check_worker_sha(*, skip: bool = False) -> str | None:
-    """Compare local HEAD with worker HEAD. Returns None if in sync, error message if not.
+def _check_worker_sha(*, skip: bool = False) -> bool:
+    """Compare local HEAD with worker HEAD. Returns True if in sync.
 
-    If out of sync and skip=False, auto-deploys before returning.
+    Raises RuntimeError on failures.  If out of sync and skip=False,
+    auto-deploys (push + merge + restart) before returning True.
     """
     if skip:
-        return None
+        return True
 
-    try:
-        local = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if local.returncode != 0:
-            return None  # Not a git repo — skip silently
+    local = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if local.returncode != 0:
+        raise RuntimeError(f"local git HEAD lookup failed: {local.stderr.strip()}")
 
-        remote = subprocess.run(
-            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if remote.returncode != 0:
-            return f"Cannot reach worker: {remote.stderr.strip()[:100]}"
+    remote = subprocess.run(
+        ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if remote.returncode != 0:
+        raise RuntimeError(f"worker git HEAD lookup failed: {remote.stderr.strip()}")
 
-        local_sha = local.stdout.strip()[:8]
-        remote_sha = remote.stdout.strip()[:8]
+    if local.stdout.strip() == remote.stdout.strip():
+        return True
 
-        if local_sha == remote_sha:
-            return None
+    # Auto-deploy: push + merge + restart
+    push = subprocess.run(
+        ["git", "push", WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if push.returncode != 0:
+        raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
-        # Auto-deploy: push + merge on worker
-        subprocess.run(
-            ["git", "push", WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
-            capture_output=True, text=True, timeout=15,
-        )
-        subprocess.run(
-            ["ssh", WORKER_HOST,
-             "cd ~/germline && git merge deploy-sync --no-edit 2>/dev/null; "
-             "git branch -d deploy-sync 2>/dev/null; true"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return None  # Synced
-    except (subprocess.TimeoutExpired, OSError):
-        return None  # Non-fatal — proceed with dispatch
+    subprocess.run(
+        ["ssh", WORKER_HOST,
+         "cd ~/germline && git merge deploy-sync --no-edit"],
+        capture_output=True, text=True, timeout=15,
+    )
+
+    restart = subprocess.run(
+        ["ssh", WORKER_HOST, "sudo systemctl restart temporal-worker"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if restart.returncode != 0:
+        raise RuntimeError(f"restart failed: {restart.stderr.strip()}")
+
+    time.sleep(3)
+    return True
 
 
 def _dispatch_prompt(
@@ -258,33 +264,6 @@ def _dispatch_prompt(
         spec_mode = "experiment"
     else:
         spec_mode = "build"
-
-    # Build tasks require --spec for dispatch.
-    if spec_mode == "build" and spec_path is None:
-        sys.exit(
-            _err(
-                cmd,
-                "Build tasks require --spec with tests. CC writes tests, ribosome executes.",
-                "NO_SPEC",
-                'Create spec: mtor init <name>, then mtor "prompt" --spec <spec.md>',
-                [_action("mtor init", "Create a new spec")],
-                exit_code=2,
-            )
-        )
-
-    # Build tasks require a CC-written test file reference in the prompt.
-    # Tests are judgment (CC writes), implementation is execution (ribosome).
-    if spec_mode == "build" and not re.search(r"test_\w+\.py|assays/", prompt):
-        sys.exit(
-            _err(
-                cmd,
-                "Build tasks require a test file. CC writes tests first, ribosome makes them pass.",
-                "NO_TEST_FILE",
-                'Write tests first: assays/test_<feature>.py, then mtor "Make ~/path/assays/test_feature.py pass."',
-                [_action("mtor", "Show command tree")],
-                exit_code=2,
-            )
-        )
 
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter
