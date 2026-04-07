@@ -224,7 +224,7 @@ class TestDispatch:
     def test_dispatch_with_prompt_returns_workflow_id(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["Test task prompt"])
+            exit_code, data = invoke(["Make assays/test_feature.py pass"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "workflow_id" in data["result"]
@@ -233,7 +233,7 @@ class TestDispatch:
     def test_dispatch_has_next_actions(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, data = invoke(["Test task"])
+            _, data = invoke(["Make assays/test_foo.py pass"])
         assert len(data["next_actions"]) > 0
         commands = [na["command"] for na in data["next_actions"]]
         assert any("status" in cmd for cmd in commands)
@@ -246,7 +246,7 @@ class TestDispatch:
 
     def test_dispatch_temporal_unreachable_exits_3(self):
         with _patch_client_error("Connection refused"):
-            exit_code, data = invoke(["Write tests for foo.py"])
+            exit_code, data = invoke(["Make assays/test_foo.py pass"])
         assert exit_code == 3
         assert data["ok"] is False
         assert data["error"]["code"] == "TEMPORAL_UNREACHABLE"
@@ -635,7 +635,7 @@ class TestExperimentMode:
         """Verify the spec has mode=build by default."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["Test task prompt"])
+            exit_code, data = invoke(["Make assays/test_feature.py pass"])
         assert exit_code == 0
         assert data["ok"] is True
         # Verify the workflow was started with build mode spec
@@ -648,7 +648,7 @@ class TestExperimentMode:
         """Verify experiment=True sets mode=experiment in spec and result."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["Test task prompt", "-x"])
+            exit_code, data = invoke(["Make assays/test_feature.py pass", "-x"])
         assert exit_code == 0
         assert data["ok"] is True
         # Verify the workflow was started with experiment mode spec

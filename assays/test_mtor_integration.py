@@ -364,7 +364,7 @@ class TestDispatchIntegration:
     def test_dispatch_starts_workflow(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["Write tests for foo.py"])
+            exit_code, data = invoke(["Make assays/test_foo.py pass"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "workflow_id" in data["result"]
@@ -373,7 +373,7 @@ class TestDispatchIntegration:
 
     def test_dispatch_prompt_preview_truncated(self):
         mock_client, _ = make_mock_client()
-        long_prompt = "A" * 200
+        long_prompt = "Make assays/test_long.py pass " + "A" * 170
         with _patch_client(mock_client):
             _, data = invoke([long_prompt])
         assert len(data["result"]["prompt_preview"]) <= 100
@@ -386,7 +386,7 @@ class TestDispatchIntegration:
 
     def test_dispatch_temporal_unreachable(self):
         with _patch_client_error("Connection refused"):
-            exit_code, data = invoke(["Do something"])
+            exit_code, data = invoke(["Make assays/test_something.py pass"])
         assert exit_code == 3
         assert data["ok"] is False
         assert data["error"]["code"] == "TEMPORAL_UNREACHABLE"
@@ -394,7 +394,7 @@ class TestDispatchIntegration:
     def test_dispatch_next_actions(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, data = invoke(["Build feature X"])
+            _, data = invoke(["Make assays/test_feature_x.py pass"])
         assert len(data["next_actions"]) >= 3
         commands = [na["command"] for na in data["next_actions"]]
         assert any("status" in c for c in commands)
@@ -410,16 +410,14 @@ class TestDispatchIntegration:
 class TestFilePathPrompt:
     def test_dispatch_reads_file_as_prompt(self):
         mock_client, _ = make_mock_client()
-        with (
-            tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f,
-            _patch_client(mock_client),
-        ):
-            f.write("Implement the authentication module with OAuth2 support")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Make assays/test_auth.py pass — implement authentication module with OAuth2 support")
             f.flush()
             prompt_path = f.name
 
         try:
-            exit_code, data = invoke([prompt_path])
+            with _patch_client(mock_client):
+                exit_code, data = invoke([prompt_path])
             assert exit_code == 0
             assert data["ok"] is True
             # prompt_preview should reflect file contents, not the path
@@ -431,7 +429,7 @@ class TestFilePathPrompt:
         """A path that doesn't exist is treated as a literal prompt string."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["/nonexistent/path/to/spec.txt"])
+            exit_code, data = invoke(["/nonexistent/path/to/assays/test_spec.py"])
         assert exit_code == 0
         assert data["ok"] is True
 
@@ -450,7 +448,7 @@ class TestCoachingInjection:
         """
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _, _data = invoke(["Do the thing"])
+            _, _data = invoke(["Make assays/test_thing.py pass"])
 
         # The spec sent to start_workflow should have task == original prompt,
         # not prepended with coaching content.
@@ -461,8 +459,8 @@ class TestCoachingInjection:
             if isinstance(first_spec, dict):
                 task = first_spec.get("task", "")
                 # Should not contain coaching markers
-                assert "coaching" not in task.lower() or task == "Do the thing"
-                assert task == "Do the thing"
+                assert "coaching" not in task.lower() or task == "Make assays/test_thing.py pass"
+                assert task == "Make assays/test_thing.py pass"
 
     def test_coaching_file_constant_path(self):
         from mtor import COACHING_PATH
@@ -500,7 +498,7 @@ class TestEnvelopeShapes:
                 ["list"],
                 ["status", "any-id"],
                 ["cancel", "any-id"],
-                ["Write code"],
+                ["Make assays/test_code.py pass"],
             ]:
                 outputs.append(invoke(args))
 
