@@ -47,7 +47,15 @@ from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, r
 from mtor.tree import tree
 from mtor.spec import scaffold_spec, update_spec_status
 from mtor.infra import check_health as _check_health, clean as _clean, deploy as _deploy
-from mtor.watch import is_paused as _is_paused, pause as _create_pause, resume as _remove_pause, run_watch
+from mtor.watch import (
+    freeze as _create_freeze,
+    is_frozen as _is_frozen,
+    is_paused as _is_paused,
+    pause as _create_pause,
+    resume as _remove_pause,
+    run_watch,
+    thaw as _remove_freeze,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +203,19 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
+        # Freeze check — block dispatch when frozen (deptor lock)
+        if _is_frozen():
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Dispatching is frozen. Use 'mtor thaw' to unfreeze.",
+                    "FROZEN",
+                    "Run: mtor thaw",
+                    [_action("mtor thaw", "Unfreeze dispatching")],
+                    exit_code=1,
+                )
+            )
         # Pause check — block dispatch when paused
         if _is_paused():
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
@@ -438,9 +459,6 @@ def status(workflow_id: str) -> None:
                 )
                 result_payload["merged"] = task_result.get("merged")
                 result_payload["verdict"] = task_result.get("review", {}).get("verdict")
-                satisfaction = task_result.get("review", {}).get("satisfaction")
-                if satisfaction is not None:
-                    result_payload["satisfaction"] = satisfaction
 
         # Add failure_reason for non-approved terminal states
         if status_val in ("FAILED", "CANCELED", "TERMINATED") or (
@@ -1664,6 +1682,38 @@ def resume() -> None:
         cmd,
         {"status": "resumed", "was_paused": was_paused},
         [_action("mtor pause", "Pause again if needed")],
+        version=VERSION,
+    )
+
+
+@app.command
+def freeze() -> None:
+    """Freeze all activity — blocks dispatch and watch sync (deptor lock)."""
+    cmd = "mtor freeze"
+    if _is_frozen():
+        _ok(cmd, {"status": "already_frozen"}, version=VERSION)
+        return
+    path = _create_freeze()
+    _ok(
+        cmd,
+        {"status": "frozen", "freeze_file": str(path)},
+        [_action("mtor thaw", "Unfreeze dispatching")],
+        version=VERSION,
+    )
+
+
+@app.command
+def thaw() -> None:
+    """Thaw (unfreeze) — resumes all dispatch and sync activity."""
+    cmd = "mtor thaw"
+    if not _is_frozen():
+        _ok(cmd, {"status": "not_frozen"}, version=VERSION)
+        return
+    was_frozen = _remove_freeze()
+    _ok(
+        cmd,
+        {"status": "thawed", "was_frozen": was_frozen},
+        [_action("mtor freeze", "Freeze again if needed")],
         version=VERSION,
     )
 

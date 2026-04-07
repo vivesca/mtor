@@ -52,6 +52,40 @@ def resume(repo_path: str | None = None) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Freeze / thaw mechanism (deptor)
+# ---------------------------------------------------------------------------
+
+
+def freeze_file_path(repo_path: str | None = None) -> Path:
+    """Return the path to the freeze marker file."""
+    from mtor import REPO_DIR
+
+    return Path(repo_path or REPO_DIR) / ".mtor-freeze"
+
+
+def is_frozen(repo_path: str | None = None) -> bool:
+    """Check if dispatching is frozen (deptor lock)."""
+    return freeze_file_path(repo_path).exists()
+
+
+def freeze(repo_path: str | None = None) -> Path:
+    """Create freeze marker file. Returns path to the freeze file."""
+    path = freeze_file_path(repo_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"frozen_at: {datetime.now(UTC).isoformat()}\n")
+    return path
+
+
+def thaw(repo_path: str | None = None) -> bool:
+    """Remove freeze marker file. Returns True if was frozen, False if not."""
+    path = freeze_file_path(repo_path)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
 @dataclass
 class WatchCycle:
     """Result of a single watch-sync cycle."""
@@ -268,7 +302,32 @@ def run_watch(
         while not stopped:
             cycle_num = stats.cycles + 1
 
-            # Skip sync cycle when paused
+            # Skip sync cycle when paused or frozen
+            if is_frozen(repo_path):
+                cycle = WatchCycle(
+                    cycle=cycle_num,
+                    fetched=0,
+                    merged=False,
+                    error="frozen",
+                    elapsed_s=0.0,
+                )
+                stats.record(cycle)
+
+                if on_cycle is not None:
+                    on_cycle(cycle)
+
+                if once:
+                    break
+
+                if max_cycles is not None and stats.cycles >= max_cycles:
+                    break
+
+                try:
+                    time.sleep(interval)
+                except KeyboardInterrupt:
+                    stopped = True
+                continue
+
             if is_paused(repo_path):
                 cycle = WatchCycle(
                     cycle=cycle_num,

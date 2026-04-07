@@ -379,6 +379,28 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
+    "freeze",
+    "Freeze all activity — blocks dispatch and watch sync (deptor lock).",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "result": {"status": "string", "freeze_file": "string"},
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
+    "thaw",
+    "Thaw (unfreeze) — resumes all dispatch and sync activity.",
+    params=[],
+    returns={
+        "ok": "boolean",
+        "result": {"status": "string", "was_frozen": "boolean"},
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "auto",
     "Scan for improvement opportunities and dispatch self-targeted tasks.",
     params=[
