@@ -36,6 +36,7 @@ urls.Homepage = "https://github.com/vivesca/mtor"
 urls.Issues = "https://github.com/vivesca/mtor/issues"
 urls.Repository = "https://github.com/vivesca/mtor"
 scripts.mtor = "mtor.cli:app"
+scripts.mtor-worker = "mtor.worker.translocase:main"
 
 [dependency-groups]
 dev = [
