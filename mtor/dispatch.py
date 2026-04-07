@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from porin import action as _action
@@ -169,8 +171,6 @@ def _check_worker_sha(*, skip: bool = False) -> str | None:
     """
     if skip:
         return None
-
-    import subprocess
 
     try:
         local = subprocess.run(
@@ -392,3 +392,47 @@ def _dispatch_prompt(
                 [_action("mtor doctor", "Run health check")],
             )
         )
+
+
+def _inject_spec_constraints(
+    prompt: str,
+    *,
+    spec_path: Path | None = None,
+    prompt_for_cmd: str = "",
+) -> str:
+    """Inject scope, tests, and repo context from a spec file into the prompt.
+
+    Returns the base prompt unchanged when *spec_path* is None.
+    """
+    if spec_path is None:
+        return prompt
+
+    from mtor.plan import parse_spec
+
+    spec = parse_spec(spec_path)
+    parts = [prompt]
+
+    # Scope constraint
+    scope = spec.get("scope", [])
+    if scope:
+        parts.append(f"CONSTRAINT: Only modify {', '.join(scope)}.")
+
+    # Exclude constraint
+    exclude = spec.get("exclude", [])
+    if exclude:
+        parts.append(f"Do NOT modify: {', '.join(exclude)}.")
+
+    # Repo context (only when non-default)
+    repo = spec.get("repo", "~")
+    if repo != "~":
+        parts.append(f"Working directory: {repo}")
+
+    # Test run command and function list
+    tests = spec.get("tests", {})
+    if tests.get("run"):
+        parts.append(f"Run: {tests['run']}")
+    if tests.get("functions"):
+        func_names = [f"test_{f}" for f in tests["functions"]]
+        parts.append(f"Verify test functions: {', '.join(func_names)}")
+
+    return "\n".join(parts)

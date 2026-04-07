@@ -12,6 +12,21 @@ from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
 from mtor.client import _get_client
 from mtor.envelope import _ok
 
+# Lazy import to avoid circular dependency
+_providers_module: object | None = None
+
+
+def _get_provider_module():
+    global _providers_module
+    if _providers_module is None:
+        try:
+            import mtor.worker.provider as _m
+
+            _providers_module = _m
+        except Exception:
+            _providers_module = None
+    return _providers_module
+
 
 def doctor() -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
@@ -161,6 +176,116 @@ def doctor() -> None:
         "task_queue": TASK_QUEUE,
         "checks": checks,
     }
+
+    # Check 5: Circuit-breaker health state for each provider
+    pm = _get_provider_module()
+    if pm is not None and WORKER_HOST != "localhost":
+        try:
+            health_result = subprocess.run(
+                [
+                    "ssh",
+                    WORKER_HOST,
+                    "python3 -c \""
+                    "import json; "
+                    "h=json.load(open('"
+                    + str(pm.HEALTH_FILE)
+                    + "')); "
+                    "print(json.dumps(h))\"",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if health_result.returncode == 0 and health_result.stdout.strip():
+                circuit_health = json.loads(health_result.stdout)
+                provider_states = {}
+                for prov in pm.PROVIDER_PRIORITY:
+                    entry = circuit_health.get(prov, {})
+                    state = entry.get("state", "closed")
+                    cooldown = entry.get("cooldown_until")
+                    failures = entry.get("consecutive_failures", 0)
+                    provider_states[prov] = {
+                        "state": state,
+                        "cooldown_until": cooldown,
+                        "consecutive_failures": failures,
+                    }
+                detail_parts = []
+                for p, d in provider_states.items():
+                    part = f"{p}={d['state']}"
+                    if d["state"] == "open" and d["cooldown_until"]:
+                        part += f" (cooldown={d['cooldown_until']})"
+                    detail_parts.append(part)
+                checks.append(
+                    {
+                        "name": "provider_circuit_breaker",
+                        "ok": True,
+                        "detail": ", ".join(detail_parts),
+                        "provider_states": provider_states,
+                    }
+                )
+                result["provider_circuit_breaker"] = provider_states
+            else:
+                checks.append(
+                    {
+                        "name": "provider_circuit_breaker",
+                        "ok": True,
+                        "detail": "No health records yet (all providers closed)",
+                    }
+                )
+        except (subprocess.TimeoutExpired, OSError):
+            checks.append(
+                {
+                    "name": "provider_circuit_breaker",
+                    "ok": True,
+                    "detail": "Health file not accessible via SSH",
+                }
+            )
+        except Exception:
+            checks.append(
+                {
+                    "name": "provider_circuit_breaker",
+                    "ok": True,
+                    "detail": "Could not read provider health state",
+                }
+            )
+    elif pm is not None and WORKER_HOST == "localhost":
+        # Local mode: read health file directly
+        try:
+            health = pm.load_health()
+            provider_states = {}
+            for prov in pm.PROVIDER_PRIORITY:
+                entry = health.get(prov, {})
+                state = entry.get("state", "closed")
+                cooldown = entry.get("cooldown_until")
+                failures = entry.get("consecutive_failures", 0)
+                provider_states[prov] = {
+                    "state": state,
+                    "cooldown_until": cooldown,
+                    "consecutive_failures": failures,
+                }
+            detail_parts = []
+            for p, d in provider_states.items():
+                part = f"{p}={d['state']}"
+                if d["state"] == "open" and d["cooldown_until"]:
+                    part += f" (cooldown={d['cooldown_until']})"
+                detail_parts.append(part)
+            checks.append(
+                {
+                    "name": "provider_circuit_breaker",
+                    "ok": True,
+                    "detail": ", ".join(detail_parts),
+                    "provider_states": provider_states,
+                }
+            )
+            result["provider_circuit_breaker"] = provider_states
+        except Exception:
+            checks.append(
+                {
+                    "name": "provider_circuit_breaker",
+                    "ok": True,
+                    "detail": "Could not read local provider health state",
+                }
+            )
 
     if all_ok:
         _ok(cmd, result, [], version=VERSION)

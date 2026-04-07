@@ -40,10 +40,11 @@ from mtor.client import _get_client
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
+from mtor.plan import CycleDetected, display_dag, resolve_dag, scan_specs
 from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree
-from mtor.spec import scaffold_spec
+from mtor.spec import scaffold_spec, update_spec_status
 
 
 # ---------------------------------------------------------------------------
@@ -1229,3 +1230,83 @@ def init(
                 exit_code=1,
             )
         )
+
+
+@app.command
+def plan(
+    *,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    pending: Annotated[bool, Parameter(name=["--pending"])] = False,
+) -> None:
+    """Display spec DAG — status, dependencies, and dispatchability."""
+    cmd = "mtor plan"
+    directory = dir.expanduser()
+
+    specs = scan_specs(directory)
+
+    if not specs:
+        _ok(
+            cmd,
+            {"specs": [], "counts": {"ready": 0}, "directory": str(directory)},
+            version=VERSION,
+        )
+        return
+
+    try:
+        resolved = resolve_dag(specs)
+    except CycleDetected as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "CIRCULAR_DEPENDENCY",
+                "Break the cycle by removing one depends_on entry",
+                [_action("mtor plan", "Re-run after fixing the cycle")],
+                exit_code=1,
+            )
+        )
+
+    dag = display_dag(resolved)
+
+    if pending:
+        ready_specs = dag["specs"].get("ready", [])
+        result = {
+            "specs": {"ready": ready_specs} if ready_specs else {},
+            "counts": {"ready": len(ready_specs)},
+            "directory": str(directory),
+        }
+    else:
+        result = {
+            "specs": dag["specs"],
+            "counts": dag["counts"],
+            "directory": str(directory),
+        }
+
+    _ok(cmd, result, version=VERSION)
+
+
+@app.command(name="plan_done")
+def plan_done(
+    name: str,
+    *,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+) -> None:
+    """Mark a spec as done."""
+    cmd = f"mtor plan done {name}"
+    directory = dir.expanduser()
+
+    spec_file = directory / f"{name}.md"
+    if not spec_file.is_file():
+        sys.exit(
+            _err(
+                cmd,
+                f"Spec not found: {name}",
+                "SPEC_NOT_FOUND",
+                f"List specs: mtor plan --dir {directory}",
+                exit_code=1,
+            )
+        )
+
+    update_spec_status(spec_file, "done")
+
+    _ok(cmd, {"name": name, "status": "done"}, version=VERSION)
