@@ -204,6 +204,14 @@ def default_handler(
 
     --then: follow-up prompts dispatched after this task completes with approved verdict.
     """
+    # Resolve prompt from --spec file
+    if spec is not None:
+        spec_contents = spec.read_text(encoding="utf-8").strip()
+        if prompt is None:
+            prompt = spec_contents
+        else:
+            prompt = spec_contents + "\n" + prompt
+
     if prompt is None:
         if sys.stdout.isatty():
             app.help_print()
