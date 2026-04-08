@@ -391,8 +391,8 @@ async def _heartbeat_stall_check(
     """
     import hashlib
 
-    stall_frozen_threshold = 5  # consecutive identical hashes (~2.5 min)
-    stall_oscillation_threshold = 6  # alternating between 2 hashes
+    stall_frozen_threshold = 10  # consecutive identical hashes (~5 min) — complex tasks need thinking time
+    stall_oscillation_threshold = 12  # alternating between 2 hashes
     recent_hashes: list[str] = []
     warnings_sent = 0
     empty_ticks = 0
@@ -493,7 +493,7 @@ async def _heartbeat_stall_check(
                 f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
                 file=sys.stderr,
             )
-            if warnings_sent >= 2:
+            if warnings_sent >= 3:
                 print(
                     f"[stall-detect] killing stalled process (pid={proc.pid})",
                     file=sys.stderr,
@@ -661,6 +661,24 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "task": task[:200],
                     "stdout": "",
                     "stderr": "timeout after 30m",
+                }
+            except asyncio.CancelledError:
+                # Temporal cancelled the activity (stall-detect kill or workflow cancel).
+                # Capture whatever output we can before re-raising.
+                proc.kill()
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(), timeout=5,
+                    )
+                except Exception:
+                    stdout_bytes, stderr_bytes = b"", b"cancelled"
+                return {
+                    "success": False,
+                    "exit_code": -1,
+                    "provider": provider,
+                    "task": task[:200],
+                    "stdout": stdout_bytes.decode(errors="replace")[:1000],
+                    "stderr": f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}",
                 }
         finally:
             hb_task.cancel()
