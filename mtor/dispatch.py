@@ -139,27 +139,29 @@ def _slugify(text: str) -> str:
 
 
 def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> str:
-    """Build a deterministic workflow ID: {harness}-{model}-{slug}-{hash}.
+    """Build a semi-deterministic workflow ID: {harness}-{model}-{slug}-{hash}-{ts}.
 
     - model: short name mapped from *provider*
     - slug: first 3 words of *prompt*, slugified
     - hash: 8-char hex from sha256 of *prompt*
+    - ts: hex unix epoch seconds (allows re-dispatch after archiving)
     - total length capped at 80 characters (slug truncated if needed)
     """
     model = PROVIDER_TO_MODEL.get(provider, provider)
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:8]
+    ts = format(int(time.time()), "x")
 
     words = prompt.split()
     slug = _slugify(" ".join(words[:3]))
 
     # Assemble and enforce 80-char limit
-    wid = f"{harness}-{model}-{slug}-{prompt_hash}"
+    wid = f"{harness}-{model}-{slug}-{prompt_hash}-{ts}"
     if len(wid) > 80:
-        # Truncate slug to fit: harness-model--hash + safety margin
-        overhead = len(harness) + 1 + len(model) + 1 + 1 + len(prompt_hash)
+        # Truncate slug to fit: harness-model--hash-ts + safety margin
+        overhead = len(harness) + 1 + len(model) + 1 + 1 + len(prompt_hash) + 1 + len(ts)
         max_slug = 80 - overhead
         slug = slug[: max(0, max_slug)].rstrip("-")
-        wid = f"{harness}-{model}-{slug}-{prompt_hash}"
+        wid = f"{harness}-{model}-{slug}-{prompt_hash}-{ts}"
 
     return wid
 
