@@ -422,6 +422,33 @@ tree.add_command(
     annotations={"readonly": False},
 )
 tree.add_command(
+    "verdict <workflow_id>",
+    "Override verdict for completed workflows — correct false positives.",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": False,
+            "description": "Temporal workflow ID (omit with --all-rejected)",
+        },
+        {
+            "name": "--set",
+            "type": "string",
+            "required": False,
+            "default": "false_positive",
+            "description": "New verdict value (default: false_positive)",
+        },
+        {
+            "name": "--all-rejected",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Override all currently-rejected workflows",
+        },
+    ],
+    annotations={"readonly": False},
+)
+tree.add_command(
     "mtor review <workflow_id>",
     "Mark a completed task as reviewed — seen, verdict noted.",
     params=[

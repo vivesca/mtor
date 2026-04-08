@@ -43,7 +43,15 @@ from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
 from mtor.scan import _run_checks
-from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
+from mtor.triage import (
+    TRIAGE_PATH,
+    archive_ids,
+    get_verdict_overrides,
+    load_triage,
+    override_verdict,
+    parse_duration,
+    review_ids,
+)
 from mtor.tree import tree
 from mtor.spec import scaffold_spec, update_spec_status
 from mtor.infra import check_health as _check_health, clean as _clean, deploy as _deploy
@@ -316,6 +324,7 @@ def list_cmd(
         triage = load_triage()
         reviewed_set = set(triage.get("reviewed", []))
         archived_set = set(triage.get("archived", []))
+        verdict_overrides = triage.get("verdict_overrides", {})
 
         workflows = []
         next_actions = []
@@ -338,6 +347,10 @@ def list_cmd(
                             sa_verdict = str(val[0])
                         if "provider" in str(key).lower() and val:
                             sa_provider = str(val[0])
+
+            # Apply local verdict override (false-positive corrections)
+            if wf_id in verdict_overrides:
+                sa_verdict = verdict_overrides[wf_id]
 
             # Filter by --provider / --verdict search attributes
             if provider_filter and sa_provider != provider_filter:
@@ -460,9 +473,14 @@ def status(workflow_id: str) -> None:
                 result_payload["merged"] = task_result.get("merged")
                 result_payload["verdict"] = task_result.get("review", {}).get("verdict")
 
+        # Apply local verdict override (false-positive corrections)
+        vo = get_verdict_overrides()
+        if workflow_id in vo:
+            result_payload["verdict"] = vo[workflow_id]
+
         # Add failure_reason for non-approved terminal states
         if status_val in ("FAILED", "CANCELED", "TERMINATED") or (
-            status_val == "COMPLETED" and result_payload.get("verdict") not in ("approved", "approved_with_flags", None)
+            status_val == "COMPLETED" and result_payload.get("verdict") not in ("approved", "approved_with_flags", "false_positive", None)
         ):
             failure_reason = "No diagnostic information available"
             if wf_result and isinstance(wf_result, dict):
@@ -1231,6 +1249,64 @@ def review(
     result = review_ids([workflow_id])
     _ok(
         f"mtor review {workflow_id}",
+        result,
+        [_action("mtor list", "View updated list")],
+        version=VERSION,
+    )
+
+
+@app.command
+def verdict(
+    workflow_id: str | None = None,
+    *,
+    new_verdict: Annotated[str, Parameter(name=["--set"])] = "false_positive",
+    all_rejected: Annotated[bool, Parameter(name=["--all-rejected"])] = False,
+) -> None:
+    """Override verdict for completed workflows. Stored locally in triage.json."""
+    cmd = "mtor verdict"
+
+    if all_rejected:
+        # Bulk: find all rejected workflows and override
+        client, err = _get_client()
+        if err:
+            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+
+        async def _list_rejected():
+            results = []
+            async for execution in client.list_workflows(query=None):
+                sa_verdict = "—"
+                with contextlib.suppress(Exception):
+                    sa = getattr(execution, "search_attributes", None)
+                    if sa:
+                        for key, val in sa.items():
+                            if "verdict" in str(key).lower() and val:
+                                sa_verdict = str(val[0])
+                if sa_verdict == "rejected":
+                    results.append(execution.id)
+            return results
+
+        rejected_ids = asyncio.run(_list_rejected())
+        # Exclude already-overridden
+        existing = get_verdict_overrides()
+        to_override = [wid for wid in rejected_ids if wid not in existing]
+        if not to_override:
+            _ok(cmd + " --all-rejected", {"overridden": 0, "message": "No rejected workflows to override"}, [], version=VERSION)
+            return
+        result = override_verdict(to_override, new_verdict)
+        _ok(
+            cmd + " --all-rejected",
+            result,
+            [_action("mtor list", "View updated verdicts")],
+            version=VERSION,
+        )
+        return
+
+    if workflow_id is None:
+        sys.exit(_err(cmd, "Missing workflow_id or --all-rejected", "MISSING_ARGS", "Provide a workflow ID or use --all-rejected"))
+
+    result = override_verdict([workflow_id], new_verdict)
+    _ok(
+        f"mtor verdict {workflow_id}",
         result,
         [_action("mtor list", "View updated list")],
         version=VERSION,

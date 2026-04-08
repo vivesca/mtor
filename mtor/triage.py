@@ -16,7 +16,7 @@ TRIAGE_PATH = Path.home() / ".config" / "mtor" / "triage.json"
 
 
 def _default_data() -> dict[str, Any]:
-    return {"reviewed": [], "archived": [], "updated": None}
+    return {"reviewed": [], "archived": [], "verdict_overrides": {}, "updated": None}
 
 
 def load_triage() -> dict[str, Any]:
@@ -28,6 +28,8 @@ def load_triage() -> dict[str, Any]:
             for key in ("reviewed", "archived"):
                 if key not in data:
                     data[key] = []
+            if "verdict_overrides" not in data:
+                data["verdict_overrides"] = {}
             if "updated" not in data:
                 data["updated"] = None
             return data
@@ -85,6 +87,23 @@ def parse_duration(duration_str: str) -> timedelta:
     elif unit == "m":
         return timedelta(minutes=amount)
     raise ValueError(f"Unknown unit: {unit}")
+
+
+def override_verdict(ids: list[str], verdict: str) -> dict[str, Any]:
+    """Set verdict override for workflow IDs. Stored locally, overlays Temporal SA."""
+    data = load_triage()
+    overrides = data.get("verdict_overrides", {})
+    for wid in ids:
+        overrides[wid] = verdict
+    data["verdict_overrides"] = overrides
+    save_triage(data)
+    return {"overridden": len(ids), "verdict": verdict}
+
+
+def get_verdict_overrides() -> dict[str, str]:
+    """Return {workflow_id: verdict} overrides."""
+    data = load_triage()
+    return data.get("verdict_overrides", {})
 
 
 def get_triage_sets() -> tuple[set[str], set[str]]:
