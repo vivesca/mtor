@@ -126,7 +126,7 @@ class TestModuleImports:
 
         assert TASK_QUEUE == "translation-queue"
         assert WORKFLOW_TYPE == "TranslationWorkflow"
-        assert WORKER_HOST == "localhost"
+        assert WORKER_HOST  # non-empty — "localhost" or "ganglion" depending on env
         assert COACHING_PATH is None  # Unset by default in test env
 
     def test_envelope_exports(self):

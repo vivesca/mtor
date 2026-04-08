@@ -407,7 +407,7 @@ def _inject_spec_constraints(
     if spec_path is None:
         return prompt
 
-    from mtor.plan import parse_spec
+    from mtor.rptor import parse_spec
 
     spec = parse_spec(spec_path)
     parts = [prompt]
@@ -448,7 +448,7 @@ def validate_spec(spec_path: Path, repo: Path) -> list[str]:
 
     Returns a list of error strings — empty means valid.
     """
-    from mtor.plan import parse_spec
+    from mtor.rptor import parse_spec
 
     errors: list[str] = []
     spec = parse_spec(spec_path)

@@ -131,7 +131,8 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
         if fallback:
             result["fallback"] = True
         return result
-    except Exception:
+    except Exception as exc:
+        print(f"WARNING: _git_snapshot failed in {work_dir}: {exc}", file=sys.stderr)
         return empty_result
 
 
@@ -171,8 +172,12 @@ def _git_push(repo_root: str) -> None:
         print(f"WARNING: git push error: {exc}", file=sys.stderr)
 
 
-def _create_worktree(repo_root: str, branch_name: str) -> str:
-    """Create a git worktree for isolated ribosome execution. Returns worktree path."""
+def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
+    """Create a git worktree for isolated ribosome execution. Returns worktree path.
+
+    Retries with exponential backoff to handle git index.lock contention
+    from concurrent ribosome dispatches on the same repo.
+    """
     worktree_base = os.path.join(repo_root, ".worktrees")
     os.makedirs(worktree_base, exist_ok=True)
     worktree_path = os.path.join(worktree_base, branch_name)
@@ -185,16 +190,35 @@ def _create_worktree(repo_root: str, branch_name: str) -> str:
             cwd=repo_root,
         )
 
-    result = _subprocess.run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+    # Delete stale branch if it exists from a prior failed attempt
+    _subprocess.run(
+        ["git", "branch", "-D", branch_name],
         capture_output=True,
-        text=True,
-        timeout=15,
+        timeout=5,
         cwd=repo_root,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"worktree add failed: {result.stderr}")
-    return worktree_path
+
+    last_err = ""
+    for attempt in range(retries):
+        result = _subprocess.run(
+            ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=repo_root,
+        )
+        if result.returncode == 0:
+            return worktree_path
+        last_err = result.stderr.strip()
+        if attempt < retries - 1:
+            delay = (attempt + 1) * 2  # 2s, 4s
+            print(
+                f"worktree add attempt {attempt + 1} failed ({last_err}), "
+                f"retrying in {delay}s",
+                file=sys.stderr,
+            )
+            _time.sleep(delay)
+    raise RuntimeError(f"worktree add failed after {retries} attempts: {last_err}")
 
 
 def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> bool:
@@ -697,6 +721,34 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
     post_diff = await asyncio.to_thread(_git_snapshot, work_dir, base_sha=pre_sha)
     commit_count = post_diff.get("commit_count", 0)
 
+    # Robust fallback: if diff-based detection found 0 commits but HEAD actually moved
+    # from pre_sha, the ribosome DID commit (likely on main, where main..HEAD is empty
+    # and _git_snapshot's except swallowed git lock contention errors).
+    if commit_count == 0 and pre_sha:
+        try:
+            head_r = _subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5, cwd=work_dir,
+            )
+            current_sha = head_r.stdout.strip() if head_r.returncode == 0 else None
+            if current_sha and current_sha != pre_sha:
+                # Count actual commits between pre_sha and HEAD
+                count_r = _subprocess.run(
+                    ["git", "rev-list", "--count", f"{pre_sha}..HEAD"],
+                    capture_output=True, text=True, timeout=5, cwd=work_dir,
+                )
+                real_count = int(count_r.stdout.strip()) if count_r.returncode == 0 else 1
+                post_diff["commit_count"] = real_count
+                post_diff["head_moved_fallback"] = True
+                commit_count = real_count
+                print(
+                    f"HEAD moved ({pre_sha[:8]}→{current_sha[:8]}, {real_count} commits) "
+                    f"but _git_snapshot missed them",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"WARNING: HEAD comparison failed: {exc}", file=sys.stderr)
+
     # Incomplete: non-zero exit but commits exist — preserve branch for re-dispatch
     is_incomplete = rc != 0 and commit_count > 0
     # Merge deferred to workflow after chaperone review approves.
@@ -866,7 +918,7 @@ async def watch_cycle(repo_path: str, plan_dir: str) -> dict:
     ready_specs: list[dict] = []
     if plan_dir:
         try:
-            from mtor.plan import resolve_dag, scan_specs, topological_sort
+            from mtor.rptor import resolve_dag, scan_specs, topological_sort
 
             specs = scan_specs(Path(plan_dir))
             if specs:

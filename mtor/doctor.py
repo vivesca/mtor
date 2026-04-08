@@ -97,18 +97,26 @@ def doctor() -> None:
         }
     )
 
-    # Check 3: Coaching file present (optional — skip if not configured)
+    # Check 3: Coaching file present + size cap (optional — skip if not configured)
+    from mtor import COACHING_MAX_KB
+
     if COACHING_PATH is not None:
         coaching_ok = COACHING_PATH.exists()
+        coaching_detail = str(COACHING_PATH) if coaching_ok else f"Missing: {COACHING_PATH}"
+        if coaching_ok:
+            size_kb = COACHING_PATH.stat().st_size / 1024
+            if size_kb > COACHING_MAX_KB:
+                coaching_ok = False
+                coaching_detail = (
+                    f"OVER BUDGET: {size_kb:.1f}KB > {COACHING_MAX_KB}KB cap. "
+                    f"GLM exits immediately when coaching + spec > 15KB. Trim now."
+                )
+            else:
+                coaching_detail = f"{coaching_detail} ({size_kb:.1f}KB / {COACHING_MAX_KB}KB)"
         checks.append(
-            {
-                "name": "coaching_file",
-                "ok": coaching_ok,
-                "detail": str(COACHING_PATH) if coaching_ok else f"Missing: {COACHING_PATH}",
-            }
+            {"name": "coaching_file", "ok": coaching_ok, "detail": coaching_detail}
         )
     else:
-        coaching_ok = True
         checks.append(
             {
                 "name": "coaching_file",

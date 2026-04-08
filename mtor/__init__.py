@@ -18,5 +18,6 @@ LOG_TAIL_LINES = 30
 # Optional coaching file — empty string means disabled
 _coaching = os.environ.get("MTOR_COACHING_PATH", "")
 COACHING_PATH = Path(_coaching) if _coaching else None
+COACHING_MAX_KB = 10  # Hard cap — coaching + spec must fit under 15KB or GLM exits immediately
 
 __version__ = VERSION

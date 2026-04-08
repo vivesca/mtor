@@ -41,7 +41,7 @@ from mtor.dedup import check_and_record as _check_dedup
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
-from mtor.plan import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
+from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
 from mtor.scan import _run_checks
 from mtor.triage import TRIAGE_PATH, archive_ids, load_triage, parse_duration, review_ids
 from mtor.tree import tree

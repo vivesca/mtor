@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mtor.cli import app
-from mtor.plan import (
+from mtor.rptor import (
     CycleDetected,
     display_dag,
     parse_spec,

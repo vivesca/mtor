@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.cli import app
-from mtor.plan import topological_sort
+from mtor.rptor import topological_sort
 
 
 # ---------------------------------------------------------------------------
