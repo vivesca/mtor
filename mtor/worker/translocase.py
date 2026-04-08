@@ -41,11 +41,11 @@ REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
 OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
 
 PROVIDER_LIMITS = {
-    "zhipu": 8,
-    "infini": 8,
-    "volcano": 16,
-    "gemini": 4,
-    "codex": 4,
+    "zhipu": 2,
+    "infini": 2,
+    "volcano": 2,
+    "gemini": 2,
+    "codex": 2,
 }
 
 # Serialize merges so concurrent ribosomes queue instead of racing
@@ -55,6 +55,9 @@ _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
 _LOCKFILE_NAMES = {"uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock"}
 
 _HEARTBEAT_INTERVAL = 30.0
+
+
+
 _ACTIVITY_TIMEOUT = timedelta(hours=2)  # generous circuit breaker; stall detection fires first
 
 
