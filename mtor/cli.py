@@ -280,9 +280,20 @@ def list_cmd(
     all_: Annotated[bool, Parameter(name=["--all"])] = False,
     provider_filter: Annotated[str | None, Parameter(name=["--provider"])] = None,
     verdict_filter: Annotated[str | None, Parameter(name=["--verdict"])] = None,
+    archived: Annotated[bool, Parameter(name=["--archived"])] = False,
 ) -> None:
-    """List recent workflows. --since N shows last N hours only."""
+    """List recent workflows. --since N shows last N hours only. --archived prints archived IDs from triage.json."""
     cmd = "mtor list" + (f" --status {status}" if status else "") + f" --count {count}"
+
+    if archived:
+        import json
+
+        triage_path = Path.home() / ".config" / "mtor" / "triage.json"
+        with open(triage_path) as f:
+            triage = json.load(f)
+        for workflow_id in triage.get("archived", []):
+            print(workflow_id)
+        return
 
     client, err = _get_client()
     if err:
