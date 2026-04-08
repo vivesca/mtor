@@ -262,7 +262,7 @@ def default_handler(
         )
 
 
-@app.command(name="list")
+@app.command(name="riboseq")
 def list_cmd(
     *,
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"] | None = None,
@@ -418,6 +418,26 @@ def list_cmd(
                 [_action("mtor doctor", "Run health check")],
             )
         )
+
+
+@app.command(name="list")
+def list_alias(
+    *,
+    archived: Annotated[bool, Parameter(name=["--archived"])] = False,
+    **kwargs,
+) -> None:
+    """Alias for 'riboseq'. List recent workflows."""
+    if archived:
+        import json
+
+        triage_file = Path(TRIAGE_PATH)
+        if triage_file.exists():
+            with open(triage_file) as f:
+                data = json.load(f)
+            for item in data.get("archived", []):
+                print(item)
+        return
+    list_cmd(**kwargs)
 
 
 @app.command
