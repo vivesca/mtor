@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -101,10 +102,10 @@ def doctor() -> None:
     from mtor import COACHING_MAX_KB
 
     if COACHING_PATH is not None:
-        coaching_ok = COACHING_PATH.exists()
-        coaching_detail = str(COACHING_PATH) if coaching_ok else f"Missing: {COACHING_PATH}"
+        coaching_ok = os.path.exists(COACHING_PATH)
+        coaching_detail = COACHING_PATH if coaching_ok else f"Missing: {COACHING_PATH}"
         if coaching_ok:
-            size_kb = COACHING_PATH.stat().st_size / 1024
+            size_kb = os.path.getsize(COACHING_PATH) / 1024
             if size_kb > COACHING_MAX_KB:
                 coaching_ok = False
                 coaching_detail = (

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 VERSION = "0.7.0"
 TEMPORAL_HOST = os.environ.get("MTOR_TEMPORAL_HOST", "localhost:7233")
@@ -11,13 +10,14 @@ TASK_QUEUE = os.environ.get("MTOR_TASK_QUEUE", "translation-queue")
 WORKFLOW_TYPE = os.environ.get("MTOR_WORKFLOW_TYPE", "TranslationWorkflow")
 WORKER_HOST = os.environ.get("MTOR_WORKER_HOST", "localhost")
 DEPLOY_REMOTE = os.environ.get("MTOR_DEPLOY_REMOTE", "ganglion")
-REPO_DIR = os.environ.get("MTOR_REPO_DIR", str(Path.home() / "germline"))
-OUTPUTS_DIR = os.environ.get("MTOR_OUTPUTS_DIR", str(Path.home() / ".mtor" / "outputs"))
+# Avoid pathlib at module level — Temporal workflow sandbox restricts Path.home()/Path.cwd()
+_HOME = os.environ.get("HOME", "/home/vivesca")
+REPO_DIR = os.environ.get("MTOR_REPO_DIR", os.path.join(_HOME, "germline"))
+OUTPUTS_DIR = os.environ.get("MTOR_OUTPUTS_DIR", os.path.join(_HOME, ".mtor", "outputs"))
 LOG_TAIL_LINES = 30
 
-# Optional coaching file — empty string means disabled
-_coaching = os.environ.get("MTOR_COACHING_PATH", "")
-COACHING_PATH = Path(_coaching) if _coaching else None
+# Optional coaching file path (string, not pathlib — Temporal sandbox restriction)
+COACHING_PATH: str | None = os.environ.get("MTOR_COACHING_PATH") or None
 COACHING_MAX_KB = 10  # Hard cap — coaching + spec must fit under 15KB or GLM exits immediately
 
 __version__ = VERSION
