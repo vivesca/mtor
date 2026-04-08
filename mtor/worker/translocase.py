@@ -61,6 +61,28 @@ _HEARTBEAT_INTERVAL = 30.0
 
 _ACTIVITY_TIMEOUT = timedelta(hours=2)  # generous circuit breaker; stall detection fires first
 
+# Capability gate: keywords indicating out-of-scope or dangerous operations.
+# Case-insensitive substring match against the task prompt.
+_CAPABILITY_BLOCKLIST: tuple[str, ...] = (
+    "sudo ",
+    "DROP TABLE",
+    "DROP DATABASE",
+    "rm -rf /",
+    "chmod -R 777",
+    "mkfs.",
+    "dd if=",
+    "format disk",
+    "crontab",
+    "npm publish",
+    "twine upload",
+    "docker push",
+    "scp ",
+    "rsync",
+    "> /dev/sd",
+    "delete all data",
+    "wipe disk",
+)
+
 
 def _detect_repo(task: str, default: str) -> str:
     """Detect target repo from task prompt, falling back to default."""
@@ -550,6 +572,21 @@ async def _heartbeat_stall_check(
 @activity.defn
 async def translate(task: str, provider: str, mode: str = "build") -> dict:
     """Execute a single ribosome task as a subprocess."""
+    # Capability gate: reject tasks containing blocked keywords
+    task_upper = task.upper()
+    for keyword in _CAPABILITY_BLOCKLIST:
+        if keyword.upper() in task_upper:
+            return {
+                "success": False,
+                "exit_code": -1,
+                "provider": provider,
+                "task": task[:200],
+                "stdout": "",
+                "stderr": f"CAPABILITY_GATE: blocked keyword '{keyword}' detected in task",
+                "gate": "capability",
+                "blocked_keyword": keyword,
+            }
+
     task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
     tid_str = task_id_match.group(1) if task_id_match else ""
     if tid_str:
