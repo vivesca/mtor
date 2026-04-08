@@ -1,6 +1,7 @@
 services:
   postgresql:
     image: postgres:16-alpine
+    restart: always
     environment:
       POSTGRES_USER: temporal
       POSTGRES_PASSWORD: temporal
@@ -17,6 +18,7 @@ services:
 
   temporal-server:
     image: temporalio/auto-setup:latest
+    restart: always
     depends_on:
       postgresql:
         condition: service_healthy
@@ -37,6 +39,7 @@ services:
 
   temporal-ui:
     image: temporalio/ui:latest
+    restart: always
     depends_on:
       temporal-server:
         condition: service_started
@@ -48,6 +51,7 @@ services:
 
   temporal-admin-tools:
     image: temporalio/admin-tools:latest
+    restart: always
     depends_on:
       temporal-server:
         condition: service_started
