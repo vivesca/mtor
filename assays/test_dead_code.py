@@ -23,9 +23,6 @@ ALLOWLIST = {
     "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",
     # triage (called from CLI)
     "get_triage_sets",
-    # Class methods (called via self.) and same-module internal
-    "should_throttle", "get_langfuse",
-    "record", "rejection_rate",
 }
 
 

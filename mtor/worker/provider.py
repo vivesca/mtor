@@ -127,3 +127,51 @@ def parse_rate_limit_window(stderr: str) -> float:
         return float(m.group(1))
     return 1.0
 
+
+def compute_dispatch_interval(tracker: object, base_interval: int) -> int:
+    """Compute dispatch interval, throttled when *tracker* reports high rejection.
+
+    Uses duck-typing: *tracker* must provide ``should_throttle()`` and
+    ``rejection_rate()`` (e.g. :class:`mtor.watch.RejectionTracker`).
+
+    When the rejection rate exceeds the tracker's threshold the interval
+    is scaled proportionally (up to 5× at 100 % rejection).  Otherwise
+    *base_interval* is returned unchanged.
+    """
+    if not hasattr(tracker, "should_throttle") or not hasattr(
+        tracker, "rejection_rate"
+    ):
+        return base_interval
+
+    if not tracker.should_throttle():
+        return base_interval
+
+    rate = tracker.rejection_rate()
+    multiplier = 1.0 + rate * 4.0
+    return int(base_interval * multiplier)
+
+
+# ---------------------------------------------------------------------------
+# AMPK sensing — dispatch gate based on ganglion load
+# ---------------------------------------------------------------------------
+
+# Default thresholds for dispatch blocking.
+DEFAULT_MAX_TASKS = 5
+DEFAULT_MAX_LOAD_AVG = 4.0
+
+
+def should_block_dispatch(
+    load: object,
+    *,
+    max_tasks: int = DEFAULT_MAX_TASKS,
+    max_load_avg: float = DEFAULT_MAX_LOAD_AVG,
+) -> bool:
+    """Return True when ganglion load is too high to accept new dispatches.
+
+    Uses duck-typing: *load* must have ``running_tasks`` (int) and
+    ``load_avg`` (float) attributes (e.g. :class:`mtor.watch.GanglionLoad`).
+    Returns False for inputs that lack these attributes.
+    """
+    if not hasattr(load, "running_tasks") or not hasattr(load, "load_avg"):
+        return False
+    return load.running_tasks >= max_tasks or load.load_avg >= max_load_avg
