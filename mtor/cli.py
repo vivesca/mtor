@@ -32,6 +32,7 @@ from mtor import (
     LOG_TAIL_LINES,
     OUTPUTS_DIR,
     REPO_DIR,
+    TASK_QUEUE,
     TEMPORAL_HOST,
     VERSION,
     WORKER_HOST,
@@ -44,7 +45,6 @@ from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
 from mtor.scan import _run_checks
 from mtor.triage import (
-    TRIAGE_PATH,
     archive_ids,
     get_verdict_overrides,
     load_triage,
@@ -1052,9 +1052,12 @@ def publish(
 
     major, minor, patch_v = int(match.group(1)), int(match.group(2)), int(match.group(3))
     if bump == "major":
-        major += 1; minor = 0; patch_v = 0
+        major += 1
+        minor = 0
+        patch_v = 0
     elif bump == "minor":
-        minor += 1; patch_v = 0
+        minor += 1
+        patch_v = 0
     else:
         patch_v += 1
     new_version = f"{major}.{minor}.{patch_v}"
@@ -1985,7 +1988,7 @@ def check() -> None:
 
 
 @rictor_app.command
-def deploy() -> None:
+def rictor_deploy() -> None:
     """Sync code to worker, restart services, verify health."""
     cmd = "mtor rictor deploy"
     result = _deploy()

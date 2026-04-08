@@ -70,7 +70,7 @@ def sync_from_ganglion(repo_path: str) -> dict:
         capture_output=True,
         text=True,
     )
-    new_commits = len([l for l in log_result.stdout.strip().splitlines() if l]) if log_result.stdout.strip() else 0
+    new_commits = len([line for line in log_result.stdout.strip().splitlines() if line]) if log_result.stdout.strip() else 0
 
     if new_commits == 0:
         return {"fetched": 0, "merged": True, "error": None}

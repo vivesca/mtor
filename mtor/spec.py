@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -139,7 +138,7 @@ def scaffold_spec(
     lines.append("---")
 
     # Template body with HTML comment placeholders
-    body = f"""\
+    body = """\
 ## Problem
 
 <!-- What specific problem does this solve? Who is affected? -->

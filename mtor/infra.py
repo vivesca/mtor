@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, REPO_DIR, VERSION, WORKER_HOST
+from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, REPO_DIR, WORKER_HOST
 
 
 @dataclass

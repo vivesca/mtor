@@ -30,7 +30,6 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
 
     i = 0
     active_list_key: str | None = None
-    current_indent = 0
 
     while i < len(lines):
         raw_line = lines[i]
@@ -61,7 +60,6 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
                 if next_stripped.startswith("-") and next_indent > raw_indent:
                     result[key] = ""
                     active_list_key = key
-                    current_indent = raw_indent
                     i += 1
                     continue
 

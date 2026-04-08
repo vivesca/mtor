@@ -26,7 +26,6 @@ from temporalio.worker import Worker
 
 from mtor.worker.provider import (
     EXIT_RATE_LIMITED,
-    HEALTH_FILE,
     PROVIDER_PRIORITY,
     load_health,
     parse_rate_limit_window,
