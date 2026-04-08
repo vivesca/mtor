@@ -699,6 +699,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     timeout=_ACTIVITY_TIMEOUT.total_seconds(),
                 )
                 stdout_bytes, stderr_bytes = results
+                await proc.wait()  # ensure returncode is set (communicate() does this implicitly)
             except TimeoutError:
                 proc.kill()
                 await proc.communicate()
