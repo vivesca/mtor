@@ -725,6 +725,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         ]
 
         start_time = _time.time()
+        _run_start = _time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -829,6 +830,39 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         rc = proc.returncode or 0
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
+
+        # Write per-attempt JSON summary to logs/<workflow_id>.jsonl
+        try:
+            _duration = _time.monotonic() - _run_start
+            _ds_r = _subprocess.run(
+                ["git", "diff", "--shortstat", "main..HEAD"],
+                capture_output=True, text=True, timeout=10, cwd=work_dir,
+            )
+            _ds_text = _ds_r.stdout.strip() if _ds_r.returncode == 0 else ""
+            _added, _removed = 0, 0
+            for _part in _ds_text.split(","):
+                _part = _part.strip()
+                _m = _re.search(r"(\d+) insertion", _part)
+                if _m:
+                    _added = int(_m.group(1))
+                _m = _re.search(r"(\d+) deletion", _part)
+                if _m:
+                    _removed = int(_m.group(1))
+            _wf_id = activity.info().workflow_id
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(LOG_DIR / f"{_wf_id}.jsonl", "a") as _f:
+                _f.write(json.dumps({
+                    "workflow_id": _wf_id,
+                    "provider": resolved_provider,
+                    "exit_code": rc,
+                    "duration_seconds": round(_duration, 2),
+                    "diff_stat": {"added": _added, "removed": _removed},
+                    "stdout_bytes": len(stdout_bytes),
+                    "stderr_bytes": len(stderr_bytes),
+                    "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }) + "\n")
+        except Exception:
+            pass
 
         # Update provider health state and persist
         window_hours = parse_rate_limit_window(stderr)
