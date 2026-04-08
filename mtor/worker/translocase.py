@@ -34,11 +34,13 @@ from mtor.worker.provider import (
     select_provider,
     update_health,
 )
+from mtor.worker.stall_trace import create_task_trace, finalize_trace
 
 TASK_QUEUE = "translation-queue"
 RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
 OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
+LOG_DIR = Path.home() / "code" / "mtor" / "logs"
 
 PROVIDER_LIMITS = {
     "zhipu": 2,
@@ -543,6 +545,10 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
     except _subprocess.TimeoutExpired:
         pass
 
+    # Create Langfuse trace for this task execution (no-op if langfuse not installed)
+    workflow_id = activity.info().workflow_id
+    _trace = create_task_trace(task, provider, workflow_id)
+
     # Run from repo root, not polysome subdir
     repo_root = _detect_repo(task, str(Path.home() / "germline"))
 
@@ -630,6 +636,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             effective_task,
         ]
 
+        start_time = _time.time()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -654,7 +661,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             except TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                return {
+                _r = {
                     "success": False,
                     "exit_code": -1,
                     "provider": provider,
@@ -662,6 +669,8 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "stdout": "",
                     "stderr": "timeout after 30m",
                 }
+                finalize_trace(_trace, _r)
+                return _r
             except asyncio.CancelledError:
                 # Temporal cancelled the activity (stall-detect kill or workflow cancel).
                 # Capture whatever output we can before re-raising.
@@ -672,7 +681,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     )
                 except Exception:
                     stdout_bytes, stderr_bytes = b"", b"cancelled"
-                return {
+                _r = {
                     "success": False,
                     "exit_code": -1,
                     "provider": provider,
@@ -680,6 +689,8 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "stdout": stdout_bytes.decode(errors="replace")[:1000],
                     "stderr": f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}",
                 }
+                finalize_trace(_trace, _r)
+                return _r
         finally:
             hb_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -694,6 +705,39 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         update_health(resolved_provider, rc, health, window_hours)
         save_health(health)
 
+        # Write per-attempt JSON summary
+        try:
+            diff_stat = {"added": 0, "removed": 0}
+            numstat_r = _subprocess.run(
+                ["git", "diff", "--numstat", "main..HEAD"],
+                capture_output=True, text=True, timeout=10, cwd=work_dir,
+            )
+            for _line in numstat_r.stdout.strip().splitlines():
+                _parts = _line.split("\t")
+                if len(_parts) >= 2:
+                    try:
+                        diff_stat["added"] += int(_parts[0]) if _parts[0] != "-" else 0
+                        diff_stat["removed"] += int(_parts[1]) if _parts[1] != "-" else 0
+                    except ValueError:
+                        pass
+
+            summary = {
+                "workflow_id": workflow_id,
+                "provider": resolved_provider,
+                "exit_code": rc,
+                "duration_seconds": round(_time.time() - start_time, 2),
+                "diff_stat": diff_stat,
+                "stdout_bytes": len(stdout_bytes),
+                "stderr_bytes": len(stderr_bytes),
+                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            log_file = LOG_DIR / f"{workflow_id}.jsonl"
+            with open(log_file, "a") as f:
+                f.write(json.dumps(summary) + "\n")
+        except Exception as exc:
+            print(f"WARNING: failed to write attempt summary: {exc}", file=sys.stderr)
+
         # Retry on rate-limit exit: circuit-trip this provider, select next, re-run
         if rc == EXIT_RATE_LIMITED:
             print(
@@ -703,7 +747,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             )
             if _attempted.issuperset(PROVIDER_PRIORITY):
                 # All providers exhausted
-                return {
+                _r = {
                     "success": False,
                     "exit_code": rc,
                     "provider": resolved_provider,
@@ -711,6 +755,8 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "stdout": stdout[:1000],
                     "stderr": f"All providers rate-limited: {sorted(_attempted)}",
                 }
+                finalize_trace(_trace, _r)
+                return _r
             continue
 
     # SRP defer detection: supervised mode returns JSON with stop_reason
@@ -720,7 +766,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
 
             output_json = _json.loads(stdout)
             if output_json.get("stop_reason") == "tool_deferred":
-                return {
+                _r = {
                     "success": False,
                     "exit_code": 0,
                     "provider": provider,
@@ -738,6 +784,8 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     "branch_name": branch_name if worktree_path else "",
                     "merged": False,
                 }
+                finalize_trace(_trace, _r)
+                return _r
 
     post_diff = await asyncio.to_thread(_git_snapshot, work_dir, base_sha=pre_sha)
     commit_count = post_diff.get("commit_count", 0)
@@ -815,7 +863,7 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
     except OSError:
         pass
 
-    return {
+    _r = {
         "success": rc == 0,
         "exit_code": rc,
         "provider": provider,
@@ -830,6 +878,8 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         "merged": merged,
         "mode": mode,
     }
+    finalize_trace(_trace, _r)
+    return _r
 
 
 _DESTRUCTION_PATTERNS = _re.compile(

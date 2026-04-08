@@ -38,6 +38,9 @@ urls.Repository = "https://github.com/vivesca/mtor"
 scripts.mtor = "mtor.cli:app"
 scripts.mtor-worker = "mtor.worker.translocase:main"
 
+[project.optional-dependencies]
+langfuse = ["langfuse>=2"]
+
 [dependency-groups]
 dev = [
   "pytest>=9.0.2",
