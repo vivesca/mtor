@@ -471,12 +471,20 @@ async def _heartbeat_stall_check(
         if tick < 4:
             continue
 
-        # Track empty diff ticks — agent may be stuck in read-only exploration
+        # Track empty diff ticks — but only when stdout is also stagnant.
+        # If stdout is growing, the agent is still active (reading/thinking).
         if diff_hash == empty_diff_hash:
+            stdout_growing = (
+                len(recent_stdout_bytes) >= 2
+                and recent_stdout_bytes[-1] > recent_stdout_bytes[-2]
+            )
+            if stdout_growing:
+                empty_ticks = 0  # stdout is active, agent is not stalled
+                continue
             empty_ticks += 1
             if empty_ticks >= 30:
                 print(
-                    f"[stall-detect] empty diff timeout at tick {tick} "
+                    f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
@@ -485,7 +493,7 @@ async def _heartbeat_stall_check(
                 return
             if empty_ticks >= 20:
                 print(
-                    f"[stall-detect] empty diff warning at tick {tick} "
+                    f"[stall-detect] empty diff + stagnant stdout warning at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",
                     file=sys.stderr,
                 )
