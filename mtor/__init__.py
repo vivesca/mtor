@@ -11,7 +11,7 @@ TASK_QUEUE = os.environ.get("MTOR_TASK_QUEUE", "translation-queue")
 WORKFLOW_TYPE = os.environ.get("MTOR_WORKFLOW_TYPE", "TranslationWorkflow")
 WORKER_HOST = os.environ.get("MTOR_WORKER_HOST", "localhost")
 DEPLOY_REMOTE = os.environ.get("MTOR_DEPLOY_REMOTE", "ganglion")
-REPO_DIR = os.environ.get("MTOR_REPO_DIR", str(Path.cwd()))
+REPO_DIR = os.environ.get("MTOR_REPO_DIR", str(Path.home() / "germline"))
 OUTPUTS_DIR = os.environ.get("MTOR_OUTPUTS_DIR", str(Path.home() / ".mtor" / "outputs"))
 LOG_TAIL_LINES = 30
 
