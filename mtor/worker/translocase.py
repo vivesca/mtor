@@ -377,14 +377,32 @@ def _detect_prior_commits(
         return []
 
 
-async def _heartbeat_stall_check(
-    proc, work_dir: str, provider: str, task: str, *, skip_stall: bool = False
-) -> None:
-    """Progress-based stall detection instead of dumb turn/time limits.
+async def _read_counting(
+    stream: asyncio.StreamReader | None, counter: list[int]
+) -> bytes:
+    """Read *stream* to EOF, accumulating total bytes into *counter*[0]."""
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        counter[0] += len(chunk)
+    return b"".join(chunks)
 
-    Every 30s, hash the git diff in the worktree. If the hash is unchanged
-    for 3 consecutive checks (frozen) or alternates between 2 values
-    (edit/revert oscillation), the agent is stalled.
+
+async def _heartbeat_stall_check(
+    proc, work_dir: str, provider: str, task: str, *,
+    skip_stall: bool = False, stdout_counter: list[int] | None = None,
+) -> None:
+    """Dual-signal stall detection: git diff hash + stdout byte growth.
+
+    Every 30s, hash the git diff in the worktree AND read the cumulative
+    stdout byte count.  The agent is considered stalled **only** when BOTH
+    the diff hash is static AND stdout hasn't grown.  If either signal is
+    changing the agent is still active.
 
     Graduated response: first stall detection logs a warning; second kills.
     Empty-diff blindness: if diff stays empty for 20+ ticks (~10min), warn;
@@ -395,6 +413,7 @@ async def _heartbeat_stall_check(
     stall_frozen_threshold = 10  # consecutive identical hashes (~5 min) — complex tasks need thinking time
     stall_oscillation_threshold = 12  # alternating between 2 hashes
     recent_hashes: list[str] = []
+    recent_stdout_bytes: list[int] = []
     warnings_sent = 0
     empty_ticks = 0
     empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
@@ -430,12 +449,19 @@ async def _heartbeat_stall_check(
         except Exception:
             pass
 
+        # Read cumulative stdout byte count (monotonically non-decreasing)
+        current_stdout_bytes = stdout_counter[0] if stdout_counter else -1
+
         recent_hashes.append(diff_hash)
+        recent_stdout_bytes.append(current_stdout_bytes)
         if len(recent_hashes) > stall_oscillation_threshold + 1:
             recent_hashes.pop(0)
+            recent_stdout_bytes.pop(0)
 
         with contextlib.suppress(Exception):
-            activity.heartbeat(f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash}")
+            activity.heartbeat(
+                f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash} out:{current_stdout_bytes}"
+            )
 
         # Skip stall checks for scout/research modes
         if skip_stall:
@@ -469,29 +495,39 @@ async def _heartbeat_stall_check(
         # Non-empty diff — reset empty counter
         empty_ticks = 0
 
-        # Detect frozen: last N hashes identical
-        is_frozen = (
+        # Check whether stdout has grown over the frozen window
+        stdout_grew = (
+            len(recent_stdout_bytes) >= stall_frozen_threshold
+            and recent_stdout_bytes[-1] > recent_stdout_bytes[-stall_frozen_threshold]
+        )
+
+        # Detect frozen: last N diff hashes identical AND stdout static
+        diff_frozen = (
             len(recent_hashes) >= stall_frozen_threshold
             and len(set(recent_hashes[-stall_frozen_threshold:])) == 1
         )
+        is_frozen = diff_frozen and not stdout_grew
 
-        # Detect oscillation: alternating between exactly 2 hashes
+        # Detect oscillation: alternating between exactly 2 hashes AND stdout static
         is_oscillating = False
         if len(recent_hashes) >= stall_oscillation_threshold:
             tail = recent_hashes[-stall_oscillation_threshold:]
             unique = set(tail)
             if len(unique) == 2:
-                # Check if it's truly alternating (ABAB pattern)
-                is_oscillating = all(
+                is_alternating = all(
                     tail[idx] != tail[idx + 1] for idx in range(len(tail) - 1)
                 )
+                if is_alternating:
+                    stdout_tail = recent_stdout_bytes[-stall_oscillation_threshold:]
+                    is_oscillating = stdout_tail[-1] == stdout_tail[0]
 
         if is_frozen or is_oscillating:
             stall_type = "frozen" if is_frozen else "oscillating"
             warnings_sent += 1
             print(
                 f"[stall-detect] {stall_type} at tick {tick} "
-                f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]})",
+                f"(warnings={warnings_sent}, hashes={recent_hashes[-4:]}, "
+                f"stdout={current_stdout_bytes})",
                 file=sys.stderr,
             )
             if warnings_sent >= 3:
@@ -644,19 +680,25 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
         )
 
+        stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
         _skip_stall = mode in ("scout", "research")
         hb_task = asyncio.create_task(
             _heartbeat_stall_check(
                 proc, work_dir, provider, task,
                 skip_stall=_skip_stall,
+                stdout_counter=stdout_counter,
             )
         )
         try:
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        _read_counting(proc.stdout, stdout_counter),
+                        proc.stderr.read(),
+                    ),
                     timeout=_ACTIVITY_TIMEOUT.total_seconds(),
                 )
+                stdout_bytes, stderr_bytes = results
             except TimeoutError:
                 proc.kill()
                 await proc.communicate()
