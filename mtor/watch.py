@@ -7,7 +7,6 @@ Reports each sync cycle and cumulative statistics.
 from __future__ import annotations
 
 import signal
-import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -174,36 +173,6 @@ _DAYTIME_RATE = 0.2
 _PEAK_RATE = 1.0
 
 
-def circadian_dispatch_rate(hour: int | None = None) -> float:
-    """Return the dispatch rate (0.0–1.0) for the given hour (UTC).
-
-    Overnight hours peak at 1.0.  The rate tapers before morning, stays low
-    during daytime, then ramps back up in the evening.
-
-    Args:
-        hour: Hour of day (0–23).  ``None`` uses the current UTC hour.
-    """
-    if hour is None:
-        hour = datetime.now(UTC).hour
-
-    # Overnight peak: 22–05
-    if hour >= _RAMP_END or hour < _TAPER_START:
-        return _PEAK_RATE
-
-    # Morning taper: 06–07  (linear from 1.0 → 0.2)
-    if _TAPER_START <= hour < _TAPER_END:
-        fraction = (hour - _TAPER_START) / (_TAPER_END - _TAPER_START)
-        return round(_PEAK_RATE - (_PEAK_RATE - _DAYTIME_RATE) * fraction, 2)
-
-    # Evening ramp: 18–21  (linear from 0.2 → 1.0)
-    if _RAMP_START <= hour < _RAMP_END:
-        fraction = (hour - _RAMP_START) / (_RAMP_END - _RAMP_START)
-        return round(_DAYTIME_RATE + (_PEAK_RATE - _DAYTIME_RATE) * fraction, 2)
-
-    # Daytime low: 08–17
-    return _DAYTIME_RATE
-
-
 # ---------------------------------------------------------------------------
 # AMPK sensing — ganglion load monitoring
 # ---------------------------------------------------------------------------
@@ -227,45 +196,6 @@ _HIGH_TASKS = 5
 _HIGH_LOAD = 4.0
 _MEDIUM_TASKS = 3
 _MEDIUM_LOAD = 2.0
-
-
-def check_ganglion_load(worker_host: str | None = None) -> GanglionLoad:
-    """Check load on the ganglion remote via SSH.
-
-    Runs ``pgrep -f ribosome | wc -l`` and ``cat /proc/loadavg`` over SSH.
-    Returns a high-load sentinel on any SSH failure (fail-closed).
-    """
-    from mtor import WORKER_HOST
-
-    host = worker_host or WORKER_HOST
-
-    try:
-        result = subprocess.run(
-            [
-                "ssh", host,
-                "pgrep -f ribosome | wc -l; awk '{print $1}' /proc/loadavg",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return GanglionLoad(running_tasks=0, load_avg=99.0, load_level="high")
-
-        lines = result.stdout.strip().split("\n")
-        running_tasks = int(lines[0].strip())
-        load_avg = float(lines[1].strip())
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        return GanglionLoad(running_tasks=0, load_avg=99.0, load_level="high")
-
-    if running_tasks >= _HIGH_TASKS or load_avg >= _HIGH_LOAD:
-        level = "high"
-    elif running_tasks >= _MEDIUM_TASKS or load_avg >= _MEDIUM_LOAD:
-        level = "medium"
-    else:
-        level = "low"
-
-    return GanglionLoad(running_tasks=running_tasks, load_avg=load_avg, load_level=level)
 
 
 def run_watch(

@@ -14,35 +14,6 @@ from porin import action as _action
 from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST, WORKFLOW_TYPE
 from mtor.client import _get_client
 from mtor.envelope import _err, _ok
-from mtor.spec import update_spec_status
-
-
-def decompose_spec(prompt: str) -> list[str] | None:
-    """Split a multi-task spec into individual task prompts.
-
-    Returns None if the prompt is a single task (no ## Task sections).
-    """
-    task_pattern = re.compile(r"^## Task \d+", re.MULTILINE)
-    matches = list(task_pattern.finditer(prompt))
-
-    if len(matches) < 2:
-        return None  # Single task or no task sections
-
-    preamble_end = matches[0].start()
-    preamble = prompt[:preamble_end].strip()
-
-    tasks = []
-    for idx, match in enumerate(matches):
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(prompt)
-        task_text = prompt[start:end].strip()
-        # Prepend preamble to each task
-        if preamble:
-            tasks.append(f"{preamble}\n\n{task_text}")
-        else:
-            tasks.append(task_text)
-
-    return tasks
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +76,6 @@ ROUTE_TO_PROVIDER: dict[str, str] = {
 def _resolve_default_provider(spec_mode: str) -> str:
     """Return the default provider for a spec mode."""
     return ROUTE_TO_PROVIDER.get(spec_mode, "zhipu")
-
-
-def detect_task_type(prompt: str) -> str:
-    """Classify a prompt into a task type for routing."""
-    lower = prompt.lower()
-    for task_type, patterns in ROUTE_PATTERNS.items():
-        if any(p in lower for p in patterns):
-            return task_type
-    return "build"
 
 
 # ---------------------------------------------------------------------------

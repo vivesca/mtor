@@ -247,6 +247,18 @@ def default_handler(
             )
         # Dedup check — block identical dispatches within 5-minute window
         # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
+        # Spec validation gate
+        if spec is not None:
+            from mtor.dispatch import validate_spec as _validate_spec
+            _repo = Path.home() / "code" / "mtor"
+            _spec_errors = _validate_spec(spec, _repo)
+            if _spec_errors:
+                cmd = f"mtor --spec {spec}"
+                msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _spec_errors)
+                sys.exit(
+                    _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+                )
+
         dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
         if dup_key is not None:
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"

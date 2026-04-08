@@ -542,38 +542,6 @@ class TestEnvelopeInvariants:
 # ---------------------------------------------------------------------------
 
 
-class TestDecomposeSpec:
-    def test_single_task_returns_none(self):
-        from mtor.dispatch import decompose_spec
-
-        assert decompose_spec("Just do this one thing") is None
-
-    def test_two_tasks_splits(self):
-        from mtor.dispatch import decompose_spec
-
-        spec = "# Preamble\nShared context.\n\n## Task 1\nDo A.\n\n## Task 2\nDo B."
-        tasks = decompose_spec(spec)
-        assert len(tasks) == 2
-        assert "Shared context." in tasks[0]
-        assert "Do A." in tasks[0]
-        assert "Shared context." in tasks[1]
-        assert "Do B." in tasks[1]
-
-    def test_preamble_prepended_to_each(self):
-        from mtor.dispatch import decompose_spec
-
-        spec = "Important context.\n\n## Task 1\nFirst.\n\n## Task 2\nSecond."
-        tasks = decompose_spec(spec)
-        assert all("Important context." in t for t in tasks)
-
-    def test_no_preamble(self):
-        from mtor.dispatch import decompose_spec
-
-        spec = "## Task 1\nFirst.\n\n## Task 2\nSecond."
-        tasks = decompose_spec(spec)
-        assert len(tasks) == 2
-
-
 # ---------------------------------------------------------------------------
 # Experiment mode tests
 # ---------------------------------------------------------------------------
