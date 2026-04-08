@@ -6,13 +6,23 @@ from pathlib import Path
 REPO = Path.home() / "code" / "mtor"
 SOURCE_DIRS = [REPO / "mtor"]
 
-# Entrypoints called by frameworks, not by our code
+# Framework-called entrypoints (Temporal activities/workflows, cyclopts CLI handlers, rptor)
 ALLOWLIST = {
-    "main",           # worker entrypoint
-    "translate",      # Temporal activity
-    "merge_approved", # Temporal activity  
-    "watch_cycle",    # Temporal activity
-    "chaperone",      # Temporal activity
+    # Temporal activities and workflows
+    "main", "translate", "merge_approved", "watch_cycle", "chaperone",
+    "spec_completed", "run", "approve_task", "reject_task", "stop",
+    # cyclopts CLI command handlers
+    "default_handler", "list_cmd", "list_alias", "status", "logs",
+    "terminate", "cancel", "doctor", "probe", "history", "scan",
+    "scout", "research", "auto", "schema", "approve", "deny",
+    "reactivate", "publish", "deploy", "stats", "checkpoints",
+    "review", "verdict", "archive", "init", "plan", "plan_done",
+    "watch", "rapa", "derapa", "deptor", "dedeptor", "autophagy",
+    "dispatch_all",
+    # rptor DAG functions (called from CLI via import)
+    "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",
+    # triage (called from CLI)
+    "get_triage_sets",
 }
 
 
@@ -41,7 +51,6 @@ def _count_calls(func_name: str) -> int:
     count = 0
     for line in result.stdout.splitlines():
         stripped = line.split(":", 1)[1].strip() if ":" in line else line
-        # Skip definitions and comments
         if stripped.startswith("def ") or stripped.startswith("async def ") or stripped.startswith("#"):
             continue
         count += 1
