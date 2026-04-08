@@ -17,45 +17,6 @@ from mtor.envelope import _err, _ok
 from mtor.spec import update_spec_status
 
 
-def decompose_spec(prompt: str) -> list[str] | None:
-    """Split a multi-task spec into individual task prompts.
-
-    Returns None if the prompt is a single task (no ## Task sections).
-    """
-    task_pattern = re.compile(r"^## Task \d+", re.MULTILINE)
-    matches = list(task_pattern.finditer(prompt))
-
-    if len(matches) < 2:
-        return None  # Single task or no task sections
-
-    preamble_end = matches[0].start()
-    preamble = prompt[:preamble_end].strip()
-
-    tasks = []
-    for idx, match in enumerate(matches):
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(prompt)
-        task_text = prompt[start:end].strip()
-        # Prepend preamble to each task
-        if preamble:
-            tasks.append(f"{preamble}\n\n{task_text}")
-        else:
-            tasks.append(task_text)
-
-    return tasks
-
-
-# ---------------------------------------------------------------------------
-# Task risk classification
-# ---------------------------------------------------------------------------
-
-RISK_PATTERNS: dict[str, list[str]] = {
-    "high": ["delete", "remove", "drop", "config", "infra", "deploy", "migrate", "rename"],
-    "low": ["test", "doc", "readme", "comment", "add test", "write test", "new file"],
-}
-# Default: "medium"
-
-
 def classify_risk(prompt: str) -> str:
     """Classify a task prompt by risk level for merge gating."""
     lower = prompt.lower()
@@ -105,32 +66,6 @@ ROUTE_TO_PROVIDER: dict[str, str] = {
 def _resolve_default_provider(spec_mode: str) -> str:
     """Return the default provider for a spec mode."""
     return ROUTE_TO_PROVIDER.get(spec_mode, "zhipu")
-
-
-def detect_task_type(prompt: str) -> str:
-    """Classify a prompt into a task type for routing."""
-    lower = prompt.lower()
-    for task_type, patterns in ROUTE_PATTERNS.items():
-        if any(p in lower for p in patterns):
-            return task_type
-    return "build"
-
-
-# ---------------------------------------------------------------------------
-# Workflow ID generation
-# ---------------------------------------------------------------------------
-
-PROVIDER_TO_MODEL: dict[str, str] = {
-    "zhipu": "glm51",
-    "infini": "mm27",
-    "volcano": "doubao",
-    "gemini": "gem31",
-    "codex": "gpt54",
-    "goose": "glm51g",
-    "droid": "glm51d",
-}
-
-_SLUG_WORD_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _slugify(text: str) -> str:
