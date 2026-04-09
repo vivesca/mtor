@@ -7,12 +7,125 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 
 from porin import action as _action
 
 from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
 from mtor.client import _get_client
 from mtor.envelope import _ok
+
+
+# ---------------------------------------------------------------------------
+# Provider API probe
+# ---------------------------------------------------------------------------
+
+_API_KEY_ENVVARS = {
+    "zhipu": "ZHIPU_API_KEY",
+    "volcano": "VOLCANO_API_KEY",
+    "infini": "INFINI_API_KEY",
+}
+
+
+@dataclass
+class ProbeResult:
+    provider: str
+    ok: bool
+    latency_ms: float | None
+    detail: str
+
+
+def _probe_provider(provider: str) -> ProbeResult:
+    """Send a real HTTP request to the provider's Anthropic Messages API.
+
+    Args:
+        provider: One of "zhipu", "volcano", "infini".
+
+    Returns:
+        ProbeResult with ok, latency, and detail.
+    """
+    endpoints = {
+        "zhipu": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+        "volcano": "https://ark.cn-beijing.volces.com/api/coding/v1/messages",
+        "infini": "https://cloud.infini-ai.com/maas/coding/v1/messages",
+    }
+    models = {
+        "zhipu": "glm-5.1",
+        "volcano": "doubao-seed-2-0-code",
+        "infini": "minimax-m2.7",
+    }
+
+    endpoint = endpoints[provider]
+    model = models[provider]
+    key_envvar = _API_KEY_ENVVARS[provider]
+    api_key = os.environ.get(key_envvar)
+
+    if not api_key:
+        return ProbeResult(
+            provider=provider,
+            ok=False,
+            latency_ms=None,
+            detail=f"{key_envvar} not set",
+        )
+
+    payload = {
+        "model": model,
+        "max_tokens": 5,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    try:
+        start = time.perf_counter()
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            _ = resp.read()
+        latency_ms = (time.perf_counter() - start) * 1000
+        return ProbeResult(
+            provider=provider,
+            ok=True,
+            latency_ms=round(latency_ms, 1),
+            detail=f"OK ({latency_ms:.0f}ms)",
+        )
+    except urllib.error.HTTPError as exc:
+        return ProbeResult(
+            provider=provider,
+            ok=False,
+            latency_ms=None,
+            detail=f"HTTP {exc.code}: {exc.reason}",
+        )
+    except urllib.error.URLError as exc:
+        return ProbeResult(
+            provider=provider,
+            ok=False,
+            latency_ms=None,
+            detail=f"Network error: {exc.reason}",
+        )
+    except TimeoutError:
+        return ProbeResult(
+            provider=provider,
+            ok=False,
+            latency_ms=None,
+            detail="Timeout (15s)",
+        )
+    except Exception as exc:
+        return ProbeResult(
+            provider=provider,
+            ok=False,
+            latency_ms=None,
+            detail=str(exc),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +362,46 @@ def doctor() -> None:
         "checks": checks,
     }
 
-    # Check 5: Circuit-breaker health state for each provider
+    # Check 5: Real API probe — fire all three providers concurrently
+    probe_providers = []
+    probe_threads_results: list[ProbeResult] = []
+
+    def _run_probe(p: str) -> None:
+        probe_threads_results.append(_probe_provider(p))
+
+    import threading
+
+    for p in ("zhipu", "volcano", "infini"):
+        t = threading.Thread(target=_run_probe, args=(p,))
+        t.start()
+        probe_providers.append((p, t))
+
+    for p, t in probe_providers:
+        t.join()
+
+    provider_probe_states: dict[str, dict] = {}
+    for pr in probe_threads_results:
+        provider_probe_states[pr.provider] = {
+            "ok": pr.ok,
+            "latency_ms": pr.latency_ms,
+            "detail": pr.detail,
+        }
+    all_probes_ok = all(pr.ok for pr in probe_threads_results)
+    if not all_probes_ok:
+        all_ok = False
+    probe_detail = ", ".join(
+        f"{pr.provider}: {pr.detail}" for pr in probe_threads_results
+    )
+    checks.append(
+        {
+            "name": "provider_api_probe",
+            "ok": all_probes_ok,
+            "detail": probe_detail,
+            "provider_probe_states": provider_probe_states,
+        }
+    )
+
+    # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
     if pm is not None and WORKER_HOST != "localhost":
         try:
