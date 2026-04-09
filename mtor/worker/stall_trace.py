@@ -1,14 +1,28 @@
 """stall_trace — Langfuse trace integration for stall events (v3)."""
 
+import sys
 
 
 def get_langfuse():
-    """Return Langfuse client or None if unavailable."""
+    """Return Langfuse client or None if unavailable.
+
+    Checks whether the module-level ``get_langfuse`` has been patched
+    (e.g. by tests) and delegates to the replacement so that callers
+    holding a direct reference still observe the patch.
+    """
+    _module = sys.modules.get(__name__)
+    _current = getattr(_module, "get_langfuse", None) if _module else None
+    if _current is not None and _current is not _original_fn:
+        return _current()
     try:
         import langfuse
+
         return langfuse
     except ImportError:
         return None
+
+
+_original_fn = get_langfuse
 
 
 def create_task_trace(task: str, provider: str, workflow_id: str = "") -> object | None:
