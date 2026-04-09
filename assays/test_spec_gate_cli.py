@@ -3,9 +3,8 @@
 Validates:
   1. Build mode without --spec exits SPEC_REQUIRED (code 2)
   2. Build mode with --spec dispatches normally
-  3. --no-tests skips spec validation
-  4. --no-tests without --spec still exits SPEC_REQUIRED
-  5. No prompt (bare invocation) still shows help/tree
+  3. Spec without tests field is always rejected (no bypass)
+  4. No prompt (bare invocation) still shows help/tree
 
 Runs via: cd ~/code/mtor && uv run pytest assays/test_spec_gate_cli.py -v
 """
@@ -172,51 +171,11 @@ class TestBuildWithSpecAccepted:
         assert data["ok"] is True
 
 
-class TestNoTestsFlag:
-    """--no-tests skips spec validation but still requires --spec."""
+class TestSpecValidationAlwaysEnforced:
+    """Spec validation is mandatory — no bypass flag exists."""
 
-    def test_no_tests_without_spec_rejected(self):
-        """--no-tests alone does NOT bypass the --spec requirement."""
-        exit_code, data = invoke(["--no-tests", "Fix the bug"])
-        assert exit_code == 2
-        assert data["error"]["code"] == "SPEC_REQUIRED"
-
-    def test_no_tests_skips_validation(self, tmp_path: Path):
-        """--no-tests + --spec skips validate_spec even if spec is invalid."""
-        # Write a spec with NO tests: field (would normally fail validation)
-        spec_file = _write_spec(tmp_path, (
-            "status: ready\n"
-            f"repo: {tmp_path}\n"
-            "files:\n"
-            "  - mtor/foo.py\n"
-        ))
-
-        client, handle = _make_mock_client()
-        with _patch_dispatch(client):
-            exit_code, data = invoke(
-                ["--spec", str(spec_file), "--no-tests", "Implement foo"]
-            )
-
-        assert exit_code == 0, data
-        assert data["ok"] is True
-
-    def test_no_tests_spec_file_path_does_not_exist(self, tmp_path: Path):
-        """--no-tests with nonexistent spec file still errors (file read failure)."""
-        nonexistent = tmp_path / "no-such-file.md"
-        # Should fail when trying to read the spec file, not at validation
-        try:
-            exit_code, data = invoke(
-                ["--spec", str(nonexistent), "--no-tests", "Fix stuff"]
-            )
-        except (FileNotFoundError, OSError):
-            pass  # Expected — file doesn't exist
-        else:
-            # If it returns, it should NOT be SPEC_REQUIRED
-            if exit_code != 0 and isinstance(data, dict):
-                assert data.get("error", {}).get("code") != "SPEC_REQUIRED"
-
-    def test_without_no_tests_invalid_spec_rejected(self, tmp_path: Path):
-        """Without --no-tests, invalid spec still fails validation."""
+    def test_invalid_spec_missing_tests_rejected(self, tmp_path: Path):
+        """Spec without tests field is rejected."""
         spec_file = _write_spec(tmp_path, (
             "status: ready\n"
             f"repo: {tmp_path}\n"

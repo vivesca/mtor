@@ -199,12 +199,10 @@ def default_handler(
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
     spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
-    no_tests: Annotated[bool, Parameter(name=["--no-tests"])] = False,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
     --then: follow-up prompts dispatched after this task completes with approved verdict.
-    --no-tests: skip spec validation (tests field check).
     """
     # Resolve prompt from --spec file
     if spec is not None:
@@ -263,8 +261,8 @@ def default_handler(
                     exit_code=1,
                 )
             )
-        # Spec validation gate (skipped with --no-tests)
-        if spec is not None and not no_tests:
+        # Spec validation gate — tests field required, no bypass
+        if spec is not None:
             from mtor.dispatch import validate_spec as _validate_spec
             _repo = Path.home() / "code" / "mtor"
             _spec_errors = _validate_spec(spec, _repo)
