@@ -199,10 +199,12 @@ def default_handler(
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
     spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
+    no_tests: Annotated[bool, Parameter(name=["--no-tests"])] = False,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
     --then: follow-up prompts dispatched after this task completes with approved verdict.
+    --no-tests: skip spec validation (tests field check).
     """
     # Resolve prompt from --spec file
     if spec is not None:
@@ -219,6 +221,22 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
+        # Build mode requires --spec
+        if spec is None:
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Build mode requires --spec. Provide a spec file to dispatch a build task.",
+                    "SPEC_REQUIRED",
+                    "Create a spec: mtor init <name>, then: mtor --spec <spec.md> \"prompt\"",
+                    [
+                        _action("mtor init <name>", "Scaffold a new spec file"),
+                        _action("mtor plan", "View spec DAG"),
+                    ],
+                    exit_code=2,
+                )
+            )
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
@@ -245,10 +263,8 @@ def default_handler(
                     exit_code=1,
                 )
             )
-        # Dedup check — block identical dispatches within 5-minute window
-        # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
-        # Spec validation gate
-        if spec is not None:
+        # Spec validation gate (skipped with --no-tests)
+        if spec is not None and not no_tests:
             from mtor.dispatch import validate_spec as _validate_spec
             _repo = Path.home() / "code" / "mtor"
             _spec_errors = _validate_spec(spec, _repo)
@@ -259,6 +275,8 @@ def default_handler(
                     _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
                 )
 
+        # Dedup check — block identical dispatches within 5-minute window
+        # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
         dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
         if dup_key is not None:
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
