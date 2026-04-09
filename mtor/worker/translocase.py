@@ -890,6 +890,8 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     log_fh.close()
 
         rc = proc.returncode or 0
+        if rc == 0 and work_dir:
+            _auto_commit(str(work_dir), wf_id)
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
 
