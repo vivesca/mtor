@@ -70,6 +70,21 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
             proc.kill()
 
 
+async def _graceful_kill(
+    proc: asyncio.subprocess.Process, timeout: float = 5.0
+) -> None:
+    """Terminate *proc* gracefully, escalating to SIGKILL on timeout."""
+    if proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+
+
 def _auto_commit(repo_dir: str, workflow_id: str) -> bool:
     """Stage and commit pending changes in *repo_dir*.
 
