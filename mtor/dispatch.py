@@ -273,12 +273,13 @@ def _dispatch_prompt(
         import asyncio
 
         # Deterministic ID — Temporal rejects if already running (dedup)
-        workflow_id = _make_workflow_id(full_prompt, provider or "zhipu")
+        workflow_id = _make_workflow_id(full_prompt, provider or "zhipu", harness=harness)
         spec = {
             "task": full_prompt,
             "provider": provider,
             "mode": spec_mode,
             "risk": classify_risk(full_prompt),
+            "harness": harness,
         }
         if spec_mode == "experiment":
             spec["experiment"] = True

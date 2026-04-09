@@ -63,6 +63,7 @@ class TranslationWorkflow:
         provider = spec.get("provider", "zhipu")
         dispatch_mode = spec.get("mode", "raw")
         repo = spec.get("repo")
+        harness = spec.get("harness", "")
 
         # #3: Version guard — new code paths gated behind patched()
         use_review_v2 = workflow.patched("review-v2-slim-payload")
@@ -71,7 +72,7 @@ class TranslationWorkflow:
             # Raw subprocess mode (default)
             result = await workflow.execute_activity(
                 translate,
-                args=[task, provider, dispatch_mode, repo],
+                args=[task, provider, dispatch_mode, repo, harness],
                 start_to_close_timeout=timedelta(hours=2),
                 heartbeat_timeout=timedelta(minutes=15),
                 retry_policy=_RETRY_POLICY,

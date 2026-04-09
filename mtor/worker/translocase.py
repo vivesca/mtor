@@ -650,7 +650,7 @@ async def _heartbeat_stall_check(
 
 
 @activity.defn
-async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None) -> dict:
+async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None, harness: str = "") -> dict:
     """Execute a single ribosome task as a subprocess."""
     _proc_count = int(_subprocess.run(["pgrep", "-cf", "ribosome"], capture_output=True, text=True, timeout=5).stdout.strip() or "0")
     if _proc_count > 4:
@@ -809,7 +809,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
-            env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
+            env={**os.environ, "RIBOSOME_PROVIDER": harness or resolved_provider, "HOME": str(Path.home())},
             start_new_session=True,  # process group kill — prevents orphan ribosome processes
         )
 
