@@ -6,12 +6,75 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 from porin import action as _action
 
 from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
 from mtor.client import _get_client
 from mtor.envelope import _ok
+
+
+# ---------------------------------------------------------------------------
+# Human-readable health display
+# ---------------------------------------------------------------------------
+
+_OK_MARK = "✔"
+_FAIL_MARK = "✘"
+_WARN_MARK = "⚠"
+
+
+def format_health_display(checks: list[dict], provider_states: dict | None = None) -> str:
+    """Render health checks as a human-readable table.
+
+    Args:
+        checks: List of check dicts with keys name, ok, detail.
+        provider_states: Optional per-provider circuit-breaker state dict.
+
+    Returns:
+        Multi-line string suitable for terminal output.
+    """
+    lines: list[str] = []
+    lines.append("")
+    lines.append("mtor doctor — health report")
+    lines.append("─" * 40)
+
+    for check in checks:
+        mark = _OK_MARK if check.get("ok") else _FAIL_MARK
+        name = check.get("name", "unknown")
+        detail = check.get("detail", "")
+        lines.append(f"  {mark} {name}: {detail}")
+
+    # Provider detail table
+    if provider_states:
+        lines.append("")
+        lines.append("provider circuit-breaker states:")
+        lines.append(f"  {'provider':<12} {'state':<12} {'failures':<10} {'cooldown'}")
+        lines.append(f"  {'─' * 12} {'─' * 12} {'─' * 10} {'─' * 20}")
+        now = time.time()
+        for prov, info in provider_states.items():
+            state = info.get("state", "closed")
+            failures = info.get("consecutive_failures", 0)
+            cooldown_epoch = info.get("cooldown_until")
+            if cooldown_epoch and state == "open":
+                remaining = max(0.0, cooldown_epoch - now)
+                if remaining < 60:
+                    cooldown_str = f"{remaining:.0f}s remaining"
+                elif remaining < 3600:
+                    cooldown_str = f"{remaining / 60:.1f}m remaining"
+                else:
+                    cooldown_str = f"{remaining / 3600:.1f}h remaining"
+            else:
+                cooldown_str = "—"
+            mark = _OK_MARK if state == "closed" else (_WARN_MARK if state == "half_open" else _FAIL_MARK)
+            lines.append(f"  {mark} {prov:<10} {state:<12} {failures:<10} {cooldown_str}")
+
+    lines.append("─" * 40)
+    all_ok = all(c.get("ok", False) for c in checks)
+    status_word = "ALL CHECKS PASSED" if all_ok else "SOME CHECKS FAILED"
+    lines.append(f"  {status_word}")
+    lines.append("")
+    return "\n".join(lines)
 
 # Lazy import to avoid circular dependency
 _providers_module: object | None = None
@@ -295,6 +358,11 @@ def doctor() -> None:
                     "detail": "Could not read local provider health state",
                 }
             )
+
+    # Emit human-readable health report to stderr so JSON on stdout stays clean
+    display = format_health_display(checks, result.get("provider_circuit_breaker"))
+    sys.stderr.write(display)
+    sys.stderr.flush()
 
     if all_ok:
         _ok(cmd, result, [], version=VERSION)
