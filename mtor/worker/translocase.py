@@ -399,20 +399,28 @@ def _detect_prior_commits(
         return []
 
 
-async def _read_counting(
-    stream: asyncio.StreamReader | None, counter: list[int]
+async def _tee_stream(
+    stream: asyncio.StreamReader | None,
+    log_fh,
+    label: str,
+    counter: list[int] | None = None,
 ) -> bytes:
-    """Read *stream* to EOF, accumulating total bytes into *counter*[0]."""
+    """Read from async stream, tee chunks to *log_fh*, track byte count in *counter*."""
     if stream is None:
         return b""
-    chunks: list[bytes] = []
+    buf = bytearray()
     while True:
-        chunk = await stream.read(65536)
+        chunk = await stream.read(8192)
         if not chunk:
             break
-        chunks.append(chunk)
-        counter[0] += len(chunk)
-    return b"".join(chunks)
+        buf.extend(chunk)
+        if counter is not None:
+            counter[0] += len(chunk)
+        if log_fh is not None:
+            with contextlib.suppress(OSError):
+                log_fh.write(f"[{label}] ".encode() + chunk)
+                log_fh.flush()
+    return bytes(buf)
 
 
 async def _heartbeat_stall_check(
@@ -726,6 +734,33 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         )
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
+
+        # Open workflow-scoped log file for real-time observability
+        log_fh = None
+        wf_id = ""
+        with contextlib.suppress(Exception):
+            wf_id = activity.info().workflow_id
+        if wf_id:
+            with contextlib.suppress(OSError):
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                log_fh = open(LOG_DIR / f"{wf_id}.log", "ab")
+                _hdr = (
+                    "\n" + "=" * 60 + "\n"
+                    + "[" + _time.strftime("%Y-%m-%dT%H:%M:%S") + "] "
+                    + "provider=" + resolved_provider + "\n"
+                    + "task=" + task[:120] + "\n"
+                    + "=" * 60 + "\n"
+                )
+                log_fh.write(_hdr.encode())
+                log_fh.flush()
+
+        stdout_task = asyncio.create_task(
+            _tee_stream(proc.stdout, log_fh, "stdout", counter=stdout_counter)
+        )
+        stderr_task = asyncio.create_task(
+            _tee_stream(proc.stderr, log_fh, "stderr")
+        )
+
         _skip_stall = mode in ("scout", "research")
         hb_task = asyncio.create_task(
             _heartbeat_stall_check(
@@ -736,18 +771,18 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
         )
         try:
             try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(
-                        _read_counting(proc.stdout, stdout_counter),
-                        proc.stderr.read(),
-                    ),
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task),
                     timeout=_ACTIVITY_TIMEOUT.total_seconds(),
                 )
-                stdout_bytes, stderr_bytes = results
-                await proc.wait()  # ensure returncode is set (communicate() does this implicitly)
+                await proc.wait()  # ensure returncode is set
             except TimeoutError:
                 proc.kill()
-                await proc.communicate()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                        timeout=5,
+                    )
                 _r = {
                     "success": False,
                     "exit_code": -1,
@@ -764,8 +799,13 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                 proc.kill()
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        proc.communicate(), timeout=5,
+                        asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                        timeout=5,
                     )
+                    if isinstance(stdout_bytes, BaseException):
+                        stdout_bytes = b""
+                    if isinstance(stderr_bytes, BaseException):
+                        stderr_bytes = b"cancelled"
                 except Exception:
                     stdout_bytes, stderr_bytes = b"", b"cancelled"
                 _r = {
@@ -782,6 +822,9 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
             hb_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hb_task
+            if log_fh:
+                with contextlib.suppress(OSError):
+                    log_fh.close()
 
         rc = proc.returncode or 0
         stdout = stdout_bytes.decode(errors="replace")
