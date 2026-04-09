@@ -68,6 +68,45 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
+
+def _auto_commit(repo_dir: str, workflow_id: str) -> bool:
+    """Stage and commit pending changes in *repo_dir*.
+
+    Returns True if a commit was created, False if the working tree was clean
+    or the staged diff was empty (e.g. only whitespace changes).
+    """
+    run = _subprocess.run
+
+    # 1. Check for dirty working tree
+    status = run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    if not status.stdout.strip():
+        return False
+
+    # 2. Stage everything
+    run(["git", "add", "-A"], cwd=repo_dir, check=True)
+
+    # 3. Check if staged diff is empty (no substantive changes)
+    diff = run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=repo_dir,
+    )
+    if diff.returncode == 0:
+        return False
+
+    # 4. Commit
+    run(
+        ["git", "commit", "-m", f"feat(translocase): {workflow_id}"],
+        cwd=repo_dir,
+        check=True,
+    )
+    return True
+
+
 # Accept branch version on conflict -- lockfiles get regenerated
 _LOCKFILE_NAMES = {"uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock"}
 
