@@ -320,11 +320,10 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
 
 
 def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> bool:
-    """Merge worktree branch into main under exclusive file lock.
+    """Push worktree branch to origin for CC review. No auto-merge to main.
 
-    FF when possible, 3-way merge otherwise. Lockfile conflicts auto-resolved
-    (accept branch version). Code conflicts abort cleanly, leaving the branch.
-    Worktree always removed; branch deleted only on success.
+    Previously merged to main directly. Now pushes the branch so CC can
+    review and merge via securin. Worktree always removed after push.
     """
     _MERGE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = open(_MERGE_LOCK_PATH, "w")
@@ -343,90 +342,27 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
             delete_branch = True
             return True
 
-        # Try FF first (zero overhead when no contention)
-        merge = _subprocess.run(
-            ["git", "merge", "--ff-only", branch_name],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=repo_root,
-        )
-        if merge.returncode == 0:
-            delete_branch = True
-            return True
-
-        # FF failed -- real 3-way merge
-        merge = _subprocess.run(
-            ["git", "merge", "--no-ff", "--no-edit", branch_name],
+        # Push branch to origin for CC review — no auto-merge
+        push = _subprocess.run(
+            ["git", "push", "origin", branch_name],
             capture_output=True,
             text=True,
             timeout=30,
             cwd=repo_root,
         )
-        if merge.returncode == 0:
-            delete_branch = True
+        if push.returncode == 0:
+            print(f"[merge] pushed branch {branch_name} to origin for review", file=sys.stderr)
+            # Don't delete branch — CC will merge and clean up
             return True
 
-        # Categorise conflicts
-        conflicted = _subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=repo_root,
+        print(
+            f"[merge] push failed for {branch_name}: {push.stderr.strip()[:200]}",
+            file=sys.stderr,
         )
-        conflicted_files = [f.strip() for f in conflicted.stdout.splitlines() if f.strip()]
-        lockfiles = [f for f in conflicted_files if Path(f).name in _LOCKFILE_NAMES]
-        code_files = [f for f in conflicted_files if Path(f).name not in _LOCKFILE_NAMES]
-
-        for lockfile in lockfiles:
-            _subprocess.run(
-                ["git", "checkout", "--theirs", lockfile],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
-            )
-            _subprocess.run(
-                ["git", "add", lockfile],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
-            )
-
-        if not code_files:
-            commit = _subprocess.run(
-                ["git", "commit", "--no-edit"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                cwd=repo_root,
-            )
-            if commit.returncode == 0:
-                delete_branch = True
-                return True
-            _subprocess.run(
-                ["git", "merge", "--abort"], capture_output=True, timeout=10, cwd=repo_root
-            )
-            print(
-                f"ERROR: merge commit failed for {branch_name}: {commit.stderr.strip()}",
-                file=sys.stderr,
-            )
-            return False
-
-        # Code conflicts -- abort, leave branch for inspection
-        _subprocess.run(
-            ["git", "merge", "--abort"], capture_output=True, timeout=10, cwd=repo_root
-        )
-        conflict_list = ", ".join(code_files[:5])
-        print(f"CONFLICT: {branch_name} has code conflicts: {conflict_list}", file=sys.stderr)
         return False
 
     except Exception as exc:
-        print(f"ERROR: merge error for {branch_name}: {exc}", file=sys.stderr)
-        with contextlib.suppress(Exception):
-            _subprocess.run(
-                ["git", "merge", "--abort"], capture_output=True, timeout=10, cwd=repo_root
-            )
+        print(f"ERROR: push error for {branch_name}: {exc}", file=sys.stderr)
         return False
     finally:
         _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
