@@ -27,7 +27,9 @@ def create_task_trace(task: str, provider: str, workflow_id: str = "") -> object
                 "provider": provider,
                 "task": task[:200],
                 "workflow_id": workflow_id,
+                "input": task,
             },
+            tags=[provider],
         )
     except Exception:
         return None
@@ -44,11 +46,20 @@ def finalize_trace(trace, result: dict) -> None:
     try:
         trace.generation(
             name="ribosome-execution",
+            model=result.get("provider", ""),
+            input=result.get("task", ""),
             output=result.get("stdout", "")[:10000],
+            status_message=result.get("stderr", ""),
             metadata={
                 "exit_code": result.get("exit_code", -1),
                 "cost_info": result.get("cost_info", "")[:500],
                 "provider": result.get("provider", ""),
+                "success": result.get("success"),
+                "stderr": result.get("stderr", ""),
+                "mode": result.get("mode", ""),
+                "branch_name": result.get("branch_name", ""),
+                "merged": result.get("merged"),
+                "diff_stat": result.get("post_diff", {}).get("stat", ""),
             },
         )
         lf = get_langfuse()
