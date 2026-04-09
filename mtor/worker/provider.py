@@ -19,6 +19,9 @@ EXIT_RATE_LIMITED = 42
 # Priority order for provider selection (highest first).
 PROVIDER_PRIORITY = ["zhipu", "infini", "volcano"]
 
+# Health-dict key used to persist the round-robin index across calls.
+RR_KEY = "_rr_index"
+
 # Persisted health state file.
 HEALTH_FILE = Path("~/.config/mtor/provider_health.json").expanduser()
 
@@ -43,15 +46,16 @@ def save_health(health: dict[str, Any]) -> None:
 
 
 def select_provider(health: dict[str, Any], override: str | None = None) -> str:
-    """Select a provider based on priority and circuit-breaker state.
+    """Select a provider using round-robin across available providers.
 
     If *override* is given it is returned directly (bypasses routing).
-    Otherwise each provider in PROVIDER_PRIORITY is checked in order:
-      - "closed"  -> return immediately
-      - "open"    -> if cooldown has expired, transition to "half_open" and return
-      - "half_open" -> return immediately
+    Otherwise, available providers are collected (closed, half_open, or open
+    with expired cooldown) and the round-robin index determines which one is
+    chosen.  The index is advanced and stored back into *health* under
+    :data:`RR_KEY` so that successive calls cycle through providers evenly.
+
     If all providers are "open" and still in cooldown, the one with the
-    earliest cooldown_until timestamp is returned.
+    earliest cooldown_until timestamp is returned (no round-robin).
     """
     if override:
         return override
@@ -59,21 +63,28 @@ def select_provider(health: dict[str, Any], override: str | None = None) -> str:
     now = time.time()
     earliest_open: tuple[float, str] | None = None
 
+    # Collect providers that are currently available.
+    available: list[str] = []
     for prov in PROVIDER_PRIORITY:
         state = health.get(prov, {}).get("state", "closed")
         if state == "closed":
-            return prov
-        if state == "open":
+            available.append(prov)
+        elif state == "open":
             cooldown_until = health[prov].get("cooldown_until")
             if cooldown_until is not None and now >= cooldown_until:
-                # Cooldown expired — try it in half_open state
-                return prov
-            # Track earliest open for fallback
-            if cooldown_until is not None:
-                if earliest_open is None or cooldown_until < earliest_open[0]:
-                    earliest_open = (cooldown_until, prov)
+                available.append(prov)
+            else:
+                if cooldown_until is not None:
+                    if earliest_open is None or cooldown_until < earliest_open[0]:
+                        earliest_open = (cooldown_until, prov)
         elif state == "half_open":
-            return prov
+            available.append(prov)
+
+    if available:
+        idx = health.get(RR_KEY, 0) % len(available)
+        chosen = available[idx]
+        health[RR_KEY] = health.get(RR_KEY, 0) + 1
+        return chosen
 
     # All open and in cooldown — fall back to earliest cooldown
     if earliest_open is not None:
