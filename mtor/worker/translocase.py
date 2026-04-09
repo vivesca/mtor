@@ -14,6 +14,7 @@ import fcntl as _fcntl
 import json
 import os
 import re as _re
+import signal as _signal
 import subprocess as _subprocess
 import sys
 import time as _time
@@ -51,6 +52,21 @@ PROVIDER_LIMITS = {
 
 # Serialize merges so concurrent ribosomes queue instead of racing
 _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill the entire process group (ribosome + claude + children).
+
+    Requires start_new_session=True on the subprocess.
+    Falls back to proc.kill() if pgid lookup fails.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        with contextlib.suppress(ProcessLookupError):
+            _kill_process_group(proc)
 
 # Accept branch version on conflict -- lockfiles get regenerated
 _LOCKFILE_NAMES = {"uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock"}
@@ -460,7 +476,7 @@ async def _heartbeat_stall_check(
                 f"killing process (pid={proc.pid})",
                 file=sys.stderr,
             )
-            proc.kill()
+            _kill_process_group(proc)
             return
 
         # Compute diff content hash
@@ -512,16 +528,16 @@ async def _heartbeat_stall_check(
                 empty_ticks = 0  # stdout is active, agent is not stalled
                 continue
             empty_ticks += 1
-            if empty_ticks >= 60:
+            if empty_ticks >= 120:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                proc.kill()
+                _kill_process_group(proc)
                 return
-            if empty_ticks >= 40:
+            if empty_ticks >= 80:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout warning at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",
@@ -573,7 +589,7 @@ async def _heartbeat_stall_check(
                     f"[stall-detect] killing stalled process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                proc.kill()
+                _kill_process_group(proc)
                 return
 
 
@@ -735,6 +751,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
             env={**os.environ, "RIBOSOME_PROVIDER": resolved_provider, "HOME": str(Path.home())},
+            start_new_session=True,  # process group kill — prevents orphan ribosome processes
         )
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
@@ -782,9 +799,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=10)
                 except TimeoutError:
-                    proc.kill()
+                    _kill_process_group(proc)
             except TimeoutError:
-                proc.kill()
+                _kill_process_group(proc)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
@@ -803,7 +820,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             except asyncio.CancelledError:
                 # Temporal cancelled the activity (stall-detect kill or workflow cancel).
                 # Capture whatever output we can before re-raising.
-                proc.kill()
+                _kill_process_group(proc)
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
                         asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
@@ -1554,7 +1571,11 @@ async def main() -> None:
 
     host = os.getenv("TEMPORAL_HOST", "ganglion:7233")
     client = await Client.connect(host)
-    max_concurrent = sum(PROVIDER_LIMITS.values())
+    # Only count providers that have API keys configured
+    max_concurrent = sum(
+        limit for provider, limit in PROVIDER_LIMITS.items()
+        if os.environ.get(f"{provider.upper()}_API_KEY")
+    ) or 2  # default to 2 if no keys detected (op injects them later)
 
     worker = Worker(
         client=client,
