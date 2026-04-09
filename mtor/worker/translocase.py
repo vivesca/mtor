@@ -776,7 +776,10 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
                     asyncio.gather(stdout_task, stderr_task),
                     timeout=_ACTIVITY_TIMEOUT.total_seconds(),
                 )
-                await proc.wait()  # ensure returncode is set
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+                except TimeoutError:
+                    proc.kill()
             except TimeoutError:
                 proc.kill()
                 with contextlib.suppress(Exception):
