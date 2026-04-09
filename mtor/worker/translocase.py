@@ -532,7 +532,7 @@ async def _heartbeat_stall_check(
                 f"killing process (pid={proc.pid})",
                 file=sys.stderr,
             )
-            _kill_process_group(proc)
+            await _graceful_kill(proc)
             return
 
         # Compute diff content hash
@@ -591,7 +591,7 @@ async def _heartbeat_stall_check(
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                _kill_process_group(proc)
+                await _graceful_kill(proc)
                 return
             if empty_ticks >= 80:
                 print(
@@ -645,7 +645,7 @@ async def _heartbeat_stall_check(
                     f"[stall-detect] killing stalled process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                _kill_process_group(proc)
+                await _graceful_kill(proc)
                 return
 
 
@@ -858,9 +858,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=10)
                 except TimeoutError:
-                    _kill_process_group(proc)
+                    await _graceful_kill(proc)
             except TimeoutError:
-                _kill_process_group(proc)
+                await _graceful_kill(proc)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
@@ -879,7 +879,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             except asyncio.CancelledError:
                 # Temporal cancelled the activity (stall-detect kill or workflow cancel).
                 # Capture whatever output we can before re-raising.
-                _kill_process_group(proc)
+                await _graceful_kill(proc)
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
                         asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
