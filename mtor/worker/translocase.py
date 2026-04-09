@@ -1143,6 +1143,114 @@ async def merge_approved(args: dict) -> dict:
     return {"merged": merged, "branch_name": branch_name}
 
 
+def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, body: str | None = None) -> dict:
+    """Push branch to remote and create a GitHub PR.
+
+    Returns dict with:
+        created     – True if PR was created
+        pr_url      – URL of the created PR (empty on failure)
+        pr_number   – integer PR number (0 on failure)
+        branch_name – the branch name
+        error       – error message on failure (empty on success)
+        skipped     – True if branch has no new commits (no PR needed)
+    """
+    pr_title = title or branch_name
+    pr_body = body or f"Automated PR from ribosome branch `{branch_name}`."
+
+    # Check if branch has commits ahead of main
+    log_result = _subprocess.run(
+        ["git", "log", "--oneline", f"main..{branch_name}"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=repo_root,
+    )
+    if log_result.returncode == 0 and not log_result.stdout.strip():
+        return {
+            "created": False,
+            "pr_url": "",
+            "pr_number": 0,
+            "branch_name": branch_name,
+            "error": "No commits on branch ahead of main",
+            "skipped": True,
+        }
+
+    # Push branch to remote
+    push_result = _subprocess.run(
+        ["git", "push", "origin", branch_name],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=repo_root,
+    )
+    if push_result.returncode != 0:
+        return {
+            "created": False,
+            "pr_url": "",
+            "pr_number": 0,
+            "branch_name": branch_name,
+            "error": f"push failed: {push_result.stderr.strip()[:200]}",
+        }
+
+    # Create PR via gh CLI
+    pr_cmd = [
+        "gh", "pr", "create",
+        "--head", branch_name,
+        "--base", "main",
+        "--title", pr_title,
+        "--body", pr_body,
+    ]
+    pr_result = _subprocess.run(
+        pr_cmd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=repo_root,
+    )
+    if pr_result.returncode != 0:
+        return {
+            "created": False,
+            "pr_url": "",
+            "pr_number": 0,
+            "branch_name": branch_name,
+            "error": f"gh pr create failed: {pr_result.stderr.strip()[:200]}",
+        }
+
+    pr_url = pr_result.stdout.strip()
+    # Extract PR number from URL (e.g. https://github.com/org/repo/pull/42)
+    pr_number = 0
+    pr_number_match = _re.search(r"/pull/(\d+)", pr_url)
+    if pr_number_match:
+        pr_number = int(pr_number_match.group(1))
+
+    return {
+        "created": True,
+        "pr_url": pr_url,
+        "pr_number": pr_number,
+        "branch_name": branch_name,
+    }
+
+
+@activity.defn
+async def create_pr(args: dict) -> dict:
+    """Push branch and create a GitHub PR. Called by workflow when pr mode is active.
+
+    Args:
+        repo_root: path to git repo
+        branch_name: branch to create PR from
+        title: PR title (default: branch name)
+        body: PR body text
+
+    Returns:
+        {"created": bool, "pr_url": str, "pr_number": int, "branch_name": str}
+    """
+    repo_root = args["repo_root"]
+    branch_name = args["branch_name"]
+    title = args.get("title")
+    body = args.get("body")
+    return await asyncio.to_thread(_create_pr_impl, repo_root, branch_name, title, body)
+
+
 @activity.defn
 async def watch_cycle(repo_path: str, plan_dir: str) -> dict:
     """Single watch cycle: sync from ganglion, scan for ready specs.
