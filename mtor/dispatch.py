@@ -285,6 +285,15 @@ def _dispatch_prompt(
         if chain:
             spec["chain"] = chain
 
+        # Extract repo from spec frontmatter (structured parameter for workflow)
+        if spec_path is not None:
+            from mtor.rptor import parse_spec
+
+            parsed = parse_spec(spec_path)
+            repo = parsed.get("repo", "~")
+            if repo != "~":
+                spec["repo"] = repo
+
         async def _start():
             from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
