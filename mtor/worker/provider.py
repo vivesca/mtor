@@ -17,7 +17,7 @@ from typing import Any
 EXIT_RATE_LIMITED = 42
 
 # Priority order for provider selection (highest first).
-PROVIDER_PRIORITY = ["zhipu", "infini", "volcano"]
+PROVIDER_PRIORITY = ["zhipu", "infini", "volcano", "gemini"]
 
 # Health-dict key used to persist the round-robin index across calls.
 RR_KEY = "_rr_index"
