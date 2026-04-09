@@ -440,7 +440,7 @@ async def _heartbeat_stall_check(
     """
     import hashlib
 
-    stall_frozen_threshold = 10  # consecutive identical hashes (~5 min) — complex tasks need thinking time
+    stall_frozen_threshold = 20  # consecutive identical hashes (~5 min) — complex tasks need thinking time
     stall_oscillation_threshold = 12  # alternating between 2 hashes
     recent_hashes: list[str] = []
     recent_stdout_bytes: list[int] = []
@@ -512,7 +512,7 @@ async def _heartbeat_stall_check(
                 empty_ticks = 0  # stdout is active, agent is not stalled
                 continue
             empty_ticks += 1
-            if empty_ticks >= 30:
+            if empty_ticks >= 60:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
@@ -521,7 +521,7 @@ async def _heartbeat_stall_check(
                 )
                 proc.kill()
                 return
-            if empty_ticks >= 20:
+            if empty_ticks >= 40:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout warning at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",
@@ -578,7 +578,7 @@ async def _heartbeat_stall_check(
 
 
 @activity.defn
-async def translate(task: str, provider: str, mode: str = "build") -> dict:
+async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None) -> dict:
     """Execute a single ribosome task as a subprocess."""
     # Capability gate: reject tasks containing blocked keywords
     task_upper = task.upper()
@@ -637,8 +637,11 @@ async def translate(task: str, provider: str, mode: str = "build") -> dict:
     workflow_id = activity.info().workflow_id
     _trace = create_task_trace(task, provider, workflow_id)
 
-    # Run from repo root, not polysome subdir
-    repo_root = _detect_repo(task, str(Path.home() / "germline"))
+    # Use structured repo parameter when provided; fall back to prompt mining
+    if repo:
+        repo_root = repo
+    else:
+        repo_root = _detect_repo(task, str(Path.home() / "germline"))
 
     branch_name = f"ribosome-{tid_str or _time.strftime('%H%M%S')}"
     worktree_path = None

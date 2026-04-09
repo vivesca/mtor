@@ -62,6 +62,7 @@ class TranslationWorkflow:
         task = spec.get("task", "")
         provider = spec.get("provider", "zhipu")
         dispatch_mode = spec.get("mode", "raw")
+        repo = spec.get("repo")
 
         # #3: Version guard — new code paths gated behind patched()
         use_review_v2 = workflow.patched("review-v2-slim-payload")
@@ -70,9 +71,9 @@ class TranslationWorkflow:
             # Raw subprocess mode (default)
             result = await workflow.execute_activity(
                 translate,
-                args=[task, provider, dispatch_mode],
+                args=[task, provider, dispatch_mode, repo],
                 start_to_close_timeout=timedelta(hours=2),
-                heartbeat_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(minutes=15),
                 retry_policy=_RETRY_POLICY,
             )
             # SRP defer: if activity returned deferred, wait for approval signal
@@ -267,11 +268,16 @@ class WatchWorkflow:
     async def _dispatch_spec(self, spec: dict, provider: str, cycle: int, task_queue: str) -> dict:
         """Dispatch a single spec as a child TranslationWorkflow."""
         name = spec.get("name", "unnamed")
-        child_input = [{
+        child_spec = {
             "task": spec.get("body", "") or spec.get("name", ""),
             "provider": spec.get("provider", provider),
             "mode": spec.get("mode", "raw"),
-        }]
+        }
+        # Pass repo from parsed spec frontmatter when available and non-default
+        spec_repo = spec.get("repo", "~")
+        if spec_repo != "~":
+            child_spec["repo"] = spec_repo
+        child_input = [child_spec]
 
         result = await workflow.execute_child_workflow(
             TranslationWorkflow.run,
