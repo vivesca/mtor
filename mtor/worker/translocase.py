@@ -66,7 +66,7 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         os.killpg(proc.pid, _signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         with contextlib.suppress(ProcessLookupError):
-            _kill_process_group(proc)
+            proc.kill()
 
 # Accept branch version on conflict -- lockfiles get regenerated
 _LOCKFILE_NAMES = {"uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock"}
