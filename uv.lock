@@ -306,6 +306,7 @@ name = "mtor"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
+    { name = "langfuse" },
     { name = "porin" },
     { name = "temporalio" },
 ]
@@ -323,6 +324,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cyclopts" },
+    { name = "langfuse", specifier = ">=4.0.6" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=2" },
     { name = "porin" },
     { name = "temporalio", specifier = ">=1.7" },
