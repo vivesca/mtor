@@ -135,6 +135,21 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
     return result
 
 
+def _as_list(value: Any) -> list[Any]:
+    """Normalize a frontmatter value to a list.
+
+    The regex-based YAML parser returns a bare string when a list field is
+    written inline (e.g. ``scope: mtor`` instead of ``scope:\\n  - mtor``).
+    Without this wrapper, downstream ``', '.join(value)`` would iterate over
+    individual characters, turning ``"mtor"`` into ``"m, t, o, r"``.
+    """
+    if isinstance(value, list):
+        return value
+    if value is None or value == "":
+        return []
+    return [value]
+
+
 def parse_spec(path: Path) -> dict[str, Any]:
     """Read a .md spec file and extract YAML frontmatter fields.
 
@@ -161,12 +176,19 @@ def parse_spec(path: Path) -> dict[str, Any]:
 
     name = resolved.stem  # filename without extension
 
+    # Normalize list fields: frontmatter parser may return a bare string
+    # (e.g. ``scope: mtor``) which must be wrapped so downstream consumers
+    # never accidentally iterate over individual characters.
+    scope = _as_list(fm.get("scope", []))
+    exclude = _as_list(fm.get("exclude", []))
+    depends_on = _as_list(fm.get("depends_on", []))
+
     # Extract tests dict
     tests_raw = fm.get("tests", {})
     if isinstance(tests_raw, dict):
         tests = {
             "run": tests_raw.get("run", ""),
-            "functions": tests_raw.get("functions", []),
+            "functions": _as_list(tests_raw.get("functions", [])),
         }
         # Only include functions if non-empty
         if not tests["functions"]:
@@ -185,9 +207,9 @@ def parse_spec(path: Path) -> dict[str, Any]:
         "status": fm.get("status", "ready"),
         "priority": fm.get("priority", "medium"),
         "repo": fm.get("repo", "~"),
-        "depends_on": fm.get("depends_on", []),
-        "scope": fm.get("scope", []),
-        "exclude": fm.get("exclude", []),
+        "depends_on": depends_on,
+        "scope": scope,
+        "exclude": exclude,
         "tests": tests,
         "path": str(resolved),
         "body": body,
