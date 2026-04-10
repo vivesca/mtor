@@ -190,6 +190,7 @@ def _dispatch_prompt(
     wait: bool = False,
     timeout: int = 300,
     spec_path: Path | None = None,
+    harness: str = "ribosome",
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -372,6 +373,7 @@ def _inject_spec_constraints(
     prompt: str,
     *,
     spec_path: Path | None = None,
+    harness: str = "ribosome",
     prompt_for_cmd: str = "",
 ) -> str:
     """Inject scope, tests, and repo context from a spec file into the prompt.
@@ -432,10 +434,13 @@ def validate_spec(spec_path: Path, repo: Path) -> list[str]:
     if status != "ready":
         errors.append(f"Spec status is '{status}', expected 'ready'")
 
-    # Tests field is required for build dispatch
+    # Tests field is required for build dispatch and must be populated
     tests = spec.get("tests", {})
     if not tests:
         errors.append("Spec is missing 'tests' field")
+        return errors
+    if isinstance(tests, dict) and not tests.get("run") and not tests.get("functions"):
+        errors.append("Spec 'tests' field is not populated — provide 'run' command or 'functions' list")
         return errors
 
     # Verify test files referenced in tests.run exist
