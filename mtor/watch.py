@@ -236,6 +236,39 @@ _DAYTIME_RATE = 0.2
 _PEAK_RATE = 1.0
 
 
+def circadian_dispatch_rate(hour_utc: int) -> float:
+    """Return the dispatch rate multiplier for the given UTC hour (0–23).
+
+    Rate schedule:
+
+    * **22–05** Overnight peak  → 1.0
+    * **06–07** Morning taper   → linear 1.0 → 0.2
+    * **08–17** Daytime low     → 0.2
+    * **18–21** Evening ramp    → linear 0.2 → 1.0
+
+    The *hour_utc* must be an integer in ``[0, 23]``.
+    """
+    if not isinstance(hour_utc, int) or hour_utc < 0 or hour_utc > 23:
+        raise ValueError(f"hour_utc must be an integer 0-23, got {hour_utc!r}")
+
+    # Daytime floor: 08–17
+    if _TAPER_END <= hour_utc < _RAMP_START:
+        return _DAYTIME_RATE
+
+    # Evening ramp: 18–21 → linear 0.2 → 1.0
+    if _RAMP_START <= hour_utc < _RAMP_END:
+        progress = (hour_utc - _RAMP_START) / (_RAMP_END - _RAMP_START)
+        return _DAYTIME_RATE + progress * (_PEAK_RATE - _DAYTIME_RATE)
+
+    # Morning taper: 06–07 → linear 1.0 → 0.2
+    if _TAPER_START <= hour_utc < _TAPER_END:
+        progress = (hour_utc - _TAPER_START) / (_TAPER_END - _TAPER_START)
+        return _PEAK_RATE - progress * (_PEAK_RATE - _DAYTIME_RATE)
+
+    # Overnight peak: 22–05
+    return _PEAK_RATE
+
+
 # ---------------------------------------------------------------------------
 # AMPK sensing — ganglion load monitoring
 # ---------------------------------------------------------------------------
