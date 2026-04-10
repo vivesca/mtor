@@ -294,6 +294,17 @@ _MEDIUM_TASKS = 3
 _MEDIUM_LOAD = 2.0
 
 
+def check_ganglion_load(running_tasks: int, load_avg: float) -> GanglionLoad:
+    """Classify ganglion load level from task count and load average."""
+    if running_tasks >= _HIGH_TASKS or load_avg >= _HIGH_LOAD:
+        level = "high"
+    elif running_tasks >= _MEDIUM_TASKS or load_avg >= _MEDIUM_LOAD:
+        level = "medium"
+    else:
+        level = "low"
+    return GanglionLoad(running_tasks=running_tasks, load_avg=load_avg, load_level=level)
+
+
 def run_watch(
     repo_path: str,
     *,

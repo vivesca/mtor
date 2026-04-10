@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -146,3 +147,44 @@ def parse_rate_limit_window(stderr: str) -> float:
 # Default thresholds for dispatch blocking.
 DEFAULT_MAX_TASKS = 5
 DEFAULT_MAX_LOAD_AVG = 4.0
+
+
+class ProviderFeedbackTracker:
+    """Sliding-window tracker for provider dispatch rejection rate."""
+
+    def __init__(
+        self, window_size: int = 10, rejection_threshold: float = 0.5
+    ) -> None:
+        self._window_size = window_size
+        self._threshold = rejection_threshold
+        self._outcomes: deque[bool] = deque()
+
+    def record(self, rejected: bool) -> None:
+        """Record a single dispatch outcome."""
+        self._outcomes.append(rejected)
+        while len(self._outcomes) > self._window_size:
+            self._outcomes.popleft()
+
+    def should_throttle(self) -> bool:
+        """Return True when rejection ratio meets or exceeds threshold."""
+        if not self._outcomes:
+            return False
+        return sum(self._outcomes) / len(self._outcomes) >= self._threshold
+
+
+def dispatch_blocked(running_tasks: int, load_avg: float) -> bool:
+    """Return True when ganglion load exceeds safe dispatch thresholds."""
+    return running_tasks >= DEFAULT_MAX_TASKS or load_avg >= DEFAULT_MAX_LOAD_AVG
+
+
+def feedback_dispatch_blocked(
+    running_tasks: int,
+    load_avg: float,
+    feedback: ProviderFeedbackTracker | None = None,
+) -> bool:
+    """Return True when load-blocked OR feedback tracker signals throttle."""
+    if dispatch_blocked(running_tasks, load_avg):
+        return True
+    if feedback is not None and feedback.should_throttle():
+        return True
+    return False
