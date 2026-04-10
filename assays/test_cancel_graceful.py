@@ -21,6 +21,7 @@ class TestGracefulKill:
         from mtor.worker.translocase import _graceful_kill
 
         proc = AsyncMock()
+        proc.returncode = None
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
         proc.wait = AsyncMock(return_value=0)
@@ -34,6 +35,7 @@ class TestGracefulKill:
         from mtor.worker.translocase import _graceful_kill
 
         proc = AsyncMock()
+        proc.returncode = None
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
         proc.wait = AsyncMock(side_effect=asyncio.TimeoutError)
@@ -48,6 +50,7 @@ class TestGracefulKill:
         from mtor.worker.translocase import _graceful_kill
 
         proc = AsyncMock()
+        proc.returncode = None
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
         proc.wait = AsyncMock(return_value=0)
