@@ -1888,7 +1888,7 @@ def dispatch_all(
     """Dispatch all ready (dispatchable) specs from a plan directory."""
     import io as _io
 
-    from mtor.dispatch import _inject_spec_constraints
+    from mtor.dispatch import _inject_spec_constraints, validate_spec as _validate_spec
 
     cmd = "mtor dispatch-all"
     directory = dir.expanduser()
@@ -1929,6 +1929,16 @@ def dispatch_all(
     for spec in dispatchable:
         base_prompt = spec.get("body", "") or spec.get("name", "")
         spec_path = Path(spec["path"])
+
+        # Pre-dispatch validation — tests field must be populated
+        _repo = Path.home() / "code" / "mtor"
+        spec_errors = _validate_spec(spec_path, _repo)
+        if spec_errors:
+            errors.append({
+                "name": spec["name"],
+                "error": "Spec validation failed: " + "; ".join(spec_errors),
+            })
+            continue
 
         prompt = _inject_spec_constraints(
             base_prompt,
