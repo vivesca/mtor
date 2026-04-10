@@ -659,7 +659,18 @@ async def _heartbeat_stall_check(
 @activity.defn
 async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None, harness: str = "") -> dict:
     """Execute a single ribosome task as a subprocess."""
-    _proc_count = int(_subprocess.run(["pgrep", "-cf", "ribosome"], capture_output=True, text=True, timeout=5).stdout.strip() or "0")
+    # Match the actual ribosome effector invocation, not any process containing
+    # "ribosome" in argv (e.g. rsync of ribosome-outputs/ paths). The bash effector
+    # is always invoked with `--provider`, so that's the precise marker.
+    _proc_count = int(
+        _subprocess.run(
+            ["pgrep", "-cf", "ribosome --provider"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        or "0"
+    )
     if _proc_count > 4:
         raise ApplicationError(f"Concurrency gate: {_proc_count} ribosome processes", non_retryable=False)
     # Capability gate: reject tasks containing blocked keywords
