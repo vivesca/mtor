@@ -18,6 +18,69 @@ from mtor.sync import sync_from_ganglion
 
 
 # ---------------------------------------------------------------------------
+# Preferential dispatch ordering — priority specs first
+# ---------------------------------------------------------------------------
+
+# Lower number = higher priority (dispatches first).
+PRIORITY_RANK: dict[str, int] = {
+    "high": 0,
+    "medium": 1,
+    "low": 2,
+}
+
+# Substrings that mark a spec as self-improvement (test infrastructure, CI,
+# tooling).  Under stress these specs are promoted ahead of production work
+# so the system heals its own scaffolding first.
+SELF_IMPROVEMENT_KEYWORDS: tuple[str, ...] = (
+    "assays/",
+    "tests/",
+    "test_",
+    ".github/",
+    "ci.yml",
+    "Makefile",
+    "conftest.py",
+    "pytest",
+)
+
+
+def is_self_improvement(spec: dict) -> bool:
+    """Return True when a spec targets test/CI/tooling infrastructure.
+
+    Matches against the spec's ``scope`` list and ``tests.run`` command.
+    """
+    scope: list[str] = spec.get("scope", [])
+    tests: dict = spec.get("tests", {})
+    run_cmd: str = tests.get("run", "") if isinstance(tests, dict) else ""
+
+    candidates = list(scope) + ([run_cmd] if run_cmd else [])
+    joined = " ".join(candidates)
+    return any(kw in joined for kw in SELF_IMPROVEMENT_KEYWORDS)
+
+
+def prioritize_specs(
+    specs: list[dict],
+    *,
+    stress: bool = False,
+) -> list[dict]:
+    """Return a new list of specs sorted for dispatch priority.
+
+    Without stress the ordering is purely by ``PRIORITY_RANK`` (high first).
+    When *stress* is True, self-improvement specs are promoted ahead of all
+    production specs.  Within each tier (SI / non-SI) specs are sorted by
+    priority rank, then alphabetically by name for determinism.
+
+    The input list is **not** mutated.
+    """
+    def _sort_key(s: dict) -> tuple:
+        rank = PRIORITY_RANK.get(s.get("priority", "medium"), 1)
+        si_boost = 0 if (stress and is_self_improvement(s)) else 1
+        name = s.get("name", "")
+        return (si_boost, rank, name)
+
+    return sorted(specs, key=_sort_key)
+
+
+# ---------------------------------------------------------------------------
 # Pause / resume mechanism
 # ---------------------------------------------------------------------------
 
