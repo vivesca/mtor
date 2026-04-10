@@ -13,6 +13,7 @@ import contextlib
 import fcntl as _fcntl
 import json
 import os
+import random as _random
 import re as _re
 import signal as _signal
 import subprocess as _subprocess
@@ -53,6 +54,76 @@ PROVIDER_LIMITS = {
 
 # Serialize merges so concurrent ribosomes queue instead of racing
 _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
+
+# Rate-limit detection: patterns that signal 429/quota errors in provider output
+_RATE_LIMIT_PATTERNS = _re.compile(
+    r"429\b"
+    r"|rate.?\s*limit"
+    r"|rate.?\s*limited"
+    r"|quota.?\s*(?:exceeded|exhausted|reached)"
+    r"|resource.?\s*(?:exhausted|depleted)"
+    r"|too.?\s*many.?\s*requests"
+    r"|api.?\s*(?:rate|throttl)"
+    r"|request.?\s*was.?\s*throttled"
+    r"|requests.?\s*per.?\s*(?:minute|second)",
+    _re.IGNORECASE,
+)
+
+# Auto-throttle configuration
+_THROTTLE_BASE_SECONDS = 30.0
+_THROTTLE_MAX_SECONDS = 300.0  # 5 minutes max wait
+_THROTTLE_JITTER_FRACTION = 0.1  # ±10% jitter
+
+
+def _detect_rate_limit_error(text: str) -> tuple[bool, float | None]:
+    """Scan text for 429/quota error signals from provider APIs.
+
+    Returns ``(is_rate_limited, suggested_wait_seconds)``.
+    *suggested_wait_seconds* is ``None`` when no explicit wait time is found.
+    """
+    if not _RATE_LIMIT_PATTERNS.search(text):
+        return (False, None)
+    return (True, _extract_wait_seconds(text))
+
+
+def _extract_wait_seconds(text: str) -> float | None:
+    """Extract retry-after duration in seconds from error text.
+
+    Handles patterns like ``Retry-After: 30``, ``retry after 60 seconds``,
+    ``retry in 2 minutes``, ``cooldown: 1h``.
+    """
+    for pattern in (
+        r"retry.?\s*after[:\s]+(\d+(?:\.\d+)?)\s*(s|sec|seconds?|m|min|minutes?|h|hours?)?",
+        r"retry.?\s*in[:\s]+(\d+(?:\.\d+)?)\s*(s|sec|seconds?|m|min|minutes?|h|hours?)?",
+        r"cooldown[:\s]+(\d+(?:\.\d+)?)\s*(s|sec|seconds?|m|min|minutes?|h|hours?)?",
+        r"wait[:\s]+(\d+(?:\.\d+)?)\s*(s|sec|seconds?|m|min|minutes?|h|hours?)?",
+    ):
+        m = _re.search(pattern, text, _re.IGNORECASE)
+        if m:
+            value = float(m.group(1))
+            unit = (m.group(2) or "s").lower()
+            if unit.startswith("h"):
+                return value * 3600
+            if unit.startswith("m"):
+                return value * 60
+            return value
+    return None
+
+
+def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> float:
+    """Calculate auto-throttle wait with exponential backoff + jitter.
+
+    Uses *suggested_seconds* (e.g. from ``Retry-After`` header) when
+    available, capped at ``_THROTTLE_MAX_SECONDS``.  Falls back to
+    exponential backoff starting from ``_THROTTLE_BASE_SECONDS``.
+    """
+    if suggested_seconds is not None and suggested_seconds > 0:
+        wait = min(suggested_seconds, _THROTTLE_MAX_SECONDS)
+    else:
+        wait = min(_THROTTLE_BASE_SECONDS * (2 ** attempt), _THROTTLE_MAX_SECONDS)
+
+    jitter = wait * _THROTTLE_JITTER_FRACTION * (_random.random() * 2 - 1)
+    return max(1.0, wait + jitter)
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -851,6 +922,18 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
 
+        # Detect rate-limit errors from stderr on non-zero, non-42 exits
+        suggested_wait: float | None = None
+        if rc != 0:
+            _is_rl, suggested_wait = _detect_rate_limit_error(stderr)
+            if _is_rl and rc != EXIT_RATE_LIMITED:
+                print(
+                    f"[translocase] rate-limit detected in output (exit={rc}), "
+                    f"treating as rate-limited (provider={resolved_provider})",
+                    file=sys.stderr,
+                )
+                rc = EXIT_RATE_LIMITED
+
         # Write per-attempt JSON summary to logs/<workflow_id>.jsonl
         try:
             _duration = _time.monotonic() - _run_start
@@ -924,6 +1007,15 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
         # Retry on rate-limit exit: circuit-trip this provider, select next, re-run
         if rc == EXIT_RATE_LIMITED:
+            # Auto-throttle: exponential backoff + jitter before retry
+            _wait_secs = _throttle_wait(len(_attempted) - 1, suggested_wait)
+            print(
+                f"[translocase] auto-throttling {_wait_secs:.1f}s before retry "
+                f"(provider={resolved_provider}, attempt={len(_attempted)})",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(_wait_secs)
+
             print(
                 f"[translocase] rate-limited provider {resolved_provider}, "
                 f"retrying with fallback (attempted={sorted(_attempted)})",
