@@ -204,9 +204,22 @@ def default_handler(
 
     --then: follow-up prompts dispatched after this task completes with approved verdict.
     """
-    # Resolve prompt from --spec file
+    # Resolve prompt from --spec file. Strip YAML frontmatter at ingest so
+    # downstream harnesses never see `---` as a leading token — claude CLI
+    # interprets `---` as a flag and exits with "Unknown flag: ---", which
+    # the ribosome bash retry loop then misclassifies as empty-output =
+    # rate-limit and retries thousands of times. Incident 2026-04-11: a
+    # single recombinase dispatch produced 59k retries and a 208 MB log
+    # before the worker was restarted. The same regex lives at
+    # dispatch.py:201 but only fires when the positional prompt arg is
+    # itself a file path, which is not the case on the `--spec` code path.
     if spec is not None:
+        import re as _re
+
         spec_contents = spec.read_text(encoding="utf-8").strip()
+        spec_contents = _re.sub(
+            r"\A---\n.*?\n---\n*", "", spec_contents, count=1, flags=_re.DOTALL
+        ).strip()
         if prompt is None:
             prompt = spec_contents
         else:

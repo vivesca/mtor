@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import json
 import sys
-import tempfile
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -79,6 +78,87 @@ def _patch_client(mock_client):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class TestFrontmatterStripping:
+    """--spec must strip YAML frontmatter before handing prompt to harness.
+
+    Incident 2026-04-11: a spec with standard YAML frontmatter
+    (`---\\ntitle: ...\\n---`) was passed through to the claude CLI harness
+    by the ribosome bash effector. claude interpreted `---` as a flag,
+    exited with `Unknown flag: ---`, and the ribosome retry loop
+    misclassified the empty output as rate-limited and retried 59,356
+    times, generating a 208 MB log before the worker was restarted.
+
+    Frontmatter stripping already exists at dispatch.py:201, but only
+    when the positional prompt arg is a file path. On the `--spec <path>`
+    code path the spec is read in cli.py first and never passes through
+    that check. Strip at cli.py:209 so the invariant is: anything that
+    reaches downstream from here has NO leading `---` line.
+    """
+
+    def test_spec_with_frontmatter_strips_before_dispatch(self, tmp_path: Path):
+        spec_file = tmp_path / "with-fm.md"
+        spec_file.write_text(
+            "---\n"
+            "title: test task\n"
+            "status: ready\n"
+            "repo: /tmp/fake\n"
+            "tests:\n"
+            '  run: "pytest"\n'
+            "---\n"
+            "\n"
+            "# Task\n"
+            "\n"
+            "Do the real work here.\n"
+        )
+
+        client, handle = _make_mock_client()
+        with _patch_client(client):
+            exit_code, data = invoke(["--spec", str(spec_file)])
+
+        assert exit_code == 0, data
+        # The dispatched task must NOT start with `---`. Any leading `---`
+        # would be reinterpreted as a CLI flag by the downstream claude
+        # harness and trigger the retry-loop runaway.
+        dispatched_task = client.start_workflow.call_args.kwargs["args"][0][0]["task"]
+        assert not dispatched_task.lstrip().startswith("---"), (
+            f"frontmatter leaked into dispatched task: {dispatched_task[:100]!r}"
+        )
+        # And the body should still be present.
+        assert "Do the real work here" in dispatched_task
+        # Frontmatter field names themselves should not appear as leading tokens
+        # in the task body — if they do, the strip regex was too narrow.
+        assert not dispatched_task.lstrip().startswith("title:")
+        assert not dispatched_task.lstrip().startswith("status:")
+
+    def test_strip_preserves_body_after_frontmatter(self, tmp_path: Path):
+        """The regex must not eat past the closing `---` into the body."""
+        spec_file = tmp_path / "boundary.md"
+        spec_file.write_text(
+            "---\n"
+            "status: ready\n"
+            "repo: /tmp/fake\n"
+            "tests:\n"
+            '  run: "pytest"\n'
+            "---\n"
+            "\n"
+            "First paragraph of the task body.\n"
+            "\n"
+            "Second paragraph with --- a triple-dash mid-sentence that the "
+            "regex must not treat as a new frontmatter block.\n"
+        )
+
+        client, handle = _make_mock_client()
+        with _patch_client(client):
+            exit_code, data = invoke(["--spec", str(spec_file)])
+
+        assert exit_code == 0, data
+        dispatched_task = client.start_workflow.call_args.kwargs["args"][0][0]["task"]
+        assert "First paragraph of the task body." in dispatched_task
+        assert "Second paragraph" in dispatched_task
+        assert "triple-dash mid-sentence" in dispatched_task
+        assert not dispatched_task.lstrip().startswith("---")
 
 
 class TestSpecOnly:
