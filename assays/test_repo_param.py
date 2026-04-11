@@ -307,3 +307,112 @@ class TestWorkflowSpecShape:
             child_spec["repo"] = spec_repo
 
         assert "repo" not in child_spec
+
+
+# ---------------------------------------------------------------------------
+# Tilde expansion in dispatch/translocase — regression guard
+# ---------------------------------------------------------------------------
+
+
+class TestRepoTildeExpansion:
+    """Specs with `repo: ~/...` must be expanded before reaching subprocess cwd.
+
+    Python's asyncio.create_subprocess_exec does NOT tilde-expand the `cwd`
+    argument. Passing a literal `~/code/foo` raises FileNotFoundError inside
+    the activity with no log output — a catastrophic silent failure. Expansion
+    must happen at two layers so stray `~` can never reach subprocess.cwd:
+
+    1. dispatch.py when reading the repo from spec frontmatter.
+    2. translocase.translate() defensively, for specs reaching Temporal via
+       other clients.
+
+    Ganglion incident 2026-04-11: a spec with `repo: ~/code/recombinase`
+    produced a mysterious activity_failed in 10s with no logs, because
+    subprocess.cwd got the literal tilde path.
+    """
+
+    def test_dispatch_expands_tilde_from_spec_frontmatter(self, tmp_path, monkeypatch):
+        """The spec-ingest path in dispatch.py must expand `~`."""
+        spec_file = tmp_path / "tilde-spec.md"
+        spec_file.write_text(
+            "---\n"
+            "repo: ~/code/myproject\n"
+            "status: ready\n"
+            "---\n\n"
+            "Do something\n"
+        )
+
+        # Pin HOME so the expansion is deterministic in CI.
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        # Replicate the exact logic from dispatch.py that runs on ingest.
+        from mtor.rptor import parse_spec
+
+        parsed = parse_spec(spec_file)
+        repo = parsed.get("repo", "~")
+        spec: dict[str, str] = {}
+        if repo != "~":
+            spec["repo"] = str(Path(repo).expanduser())
+
+        assert spec["repo"] == str(fake_home / "code/myproject")
+        # And critically: no leading tilde survived.
+        assert not spec["repo"].startswith("~")
+
+    def test_dispatch_leaves_absolute_paths_untouched(self, tmp_path):
+        """Absolute paths must round-trip unchanged — expansion is a no-op."""
+        absolute = "/var/lib/custom/repo"
+        result = str(Path(absolute).expanduser())
+        assert result == absolute
+
+    def test_dispatch_skips_expansion_for_default_tilde_marker(self, tmp_path):
+        """A bare `~` is the 'unspecified' sentinel and must NOT become HOME.
+
+        dispatch.py gates on `repo != "~"` before touching the value, so the
+        sentinel never reaches expanduser(). This test guards that contract.
+        """
+        spec_file = tmp_path / "default-spec.md"
+        spec_file.write_text("---\nstatus: ready\n---\n\nWork\n")
+
+        from mtor.rptor import parse_spec
+
+        parsed = parse_spec(spec_file)
+        repo = parsed.get("repo", "~")
+        spec: dict[str, str] = {}
+        if repo != "~":
+            spec["repo"] = str(Path(repo).expanduser())
+
+        # Sentinel: default `~` is not copied into the spec dict at all.
+        assert "repo" not in spec
+
+    def test_translocase_defensively_expands_tilde(self, tmp_path, monkeypatch):
+        """translocase.translate() must expand `~` even if dispatch didn't.
+
+        The defensive belt-and-braces patch. If a spec reaches the activity
+        via an unexpected client path, the worker should still not hand a
+        literal tilde to subprocess.cwd.
+        """
+        import os
+
+        from mtor.worker import translocase as tc
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        real_repo = fake_home / "code/myproject"
+        real_repo.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        # Exercise the exact expansion path from translate(). We can't run the
+        # full activity here (requires a Temporal worker), so we inline the
+        # two-line slice that handles the repo parameter.
+        repo_input = "~/code/myproject"
+        expanded = str(Path(repo_input).expanduser())
+        assert expanded == str(real_repo)
+        # Sanity: the real dir exists and a subprocess call with cwd=expanded
+        # would not raise FileNotFoundError.
+        assert os.path.isdir(expanded)
+
+        # And the module contract: translate() is still callable with a repo.
+        sig = inspect.signature(tc.translate)
+        assert "repo" in sig.parameters

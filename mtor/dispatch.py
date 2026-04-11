@@ -294,7 +294,13 @@ def _dispatch_prompt(
             parsed = parse_spec(spec_path)
             repo = parsed.get("repo", "~")
             if repo != "~":
-                spec["repo"] = repo
+                # Expand `~` in spec repo fields so translocase can pass the
+                # value straight to subprocess cwd. Python's subprocess does
+                # NOT tilde-expand; passing `~/code/foo` literally raises
+                # FileNotFoundError and crashes the activity before any log
+                # is written. Expand here, at the spec-ingest boundary, so
+                # downstream code sees an absolute path.
+                spec["repo"] = str(Path(repo).expanduser())
 
         async def _start():
             from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -398,9 +404,12 @@ def _inject_spec_constraints(
     if exclude:
         parts.append(f"Do NOT modify: {', '.join(exclude)}.")
 
-    # Repo context (only when non-default)
+    # Repo context (only when non-default). Expand `~` defensively — the
+    # spec-ingest path above already expands, but prompts can reach this
+    # function via other callers.
     repo = spec.get("repo", "~")
     if repo != "~":
+        repo = str(Path(repo).expanduser())
         parts.append(f"Working directory: {repo}")
 
     # Test run command and function list

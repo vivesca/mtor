@@ -730,9 +730,14 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     workflow_id = activity.info().workflow_id
     _trace = create_task_trace(task, provider, workflow_id)
 
-    # Use structured repo parameter when provided; fall back to prompt mining
+    # Use structured repo parameter when provided; fall back to prompt mining.
+    # Expand `~` defensively — dispatch.py already expands, but specs arriving
+    # via the Temporal workflow from other clients could still contain a raw
+    # `~/...` path. Python's subprocess does NOT tilde-expand cwd, so an
+    # unexpanded value here crashes the activity with FileNotFoundError before
+    # any log is written.
     if repo:
-        repo_root = repo
+        repo_root = str(Path(repo).expanduser())
     else:
         repo_root = _detect_repo(task, str(Path.home() / "germline"))
 
