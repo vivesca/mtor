@@ -255,3 +255,69 @@ class TestRateLimitPatternNoFalsePositives:
 
         assert _RATE_LIMIT_PATTERNS.search("RATE LIMIT EXCEEDED")
         assert _RATE_LIMIT_PATTERNS.search("Rate Limit Exceeded")
+
+
+# ---------------------------------------------------------------------------
+# Retry-loop control flow (regression guard for 2026-04-11 runaway)
+# ---------------------------------------------------------------------------
+
+
+class TestRetryLoopExit:
+    """translocase.translate()'s while-True retry loop must exit on non-rate-limit.
+
+    Incident 2026-04-11: a single bad spec input (claude CLI rejecting a
+    leading `---` as an unknown flag) caused translocase's retry loop to run
+    59,356 iterations in 10 minutes, writing a 208 MB log. Root cause: the
+    while True: loop had no unconditional break on the non-rate-limited
+    path — only `continue` on rate-limit. Every fast subprocess failure
+    looped at full CPU speed.
+
+    These tests are structural — they read the translocase source directly
+    and assert that the fix is present. They do not run the full workflow
+    (which would require a live Temporal activity context).
+    """
+
+    def _read_translate_source(self) -> str:
+        import inspect
+
+        from mtor.worker import translocase
+
+        return inspect.getsource(translocase.translate)
+
+    def test_retry_loop_has_unconditional_break(self):
+        """There must be at least one `break` at indent 8 in translate()."""
+        source = self._read_translate_source()
+        lines = source.splitlines()
+        # Source from inspect.getsource is indented so that `async def` is at col 0
+        # and the while-loop body is at col 8. An unconditional break on the
+        # normal-exit path lives at col 8 (same indent as the while body).
+        found_break = False
+        in_while = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("while True:"):
+                in_while = True
+                continue
+            if in_while and line.startswith("    ") and not line.startswith("        "):
+                # De-indented past the while body — loop ended
+                break
+            if in_while and line.startswith("        break") and not line.startswith("            "):
+                found_break = True
+                break
+        assert found_break, (
+            "translocase.translate()'s `while True:` loop is missing an "
+            "unconditional break for the non-rate-limited exit path. Any "
+            "fast-failing subprocess will loop at full CPU speed. See the "
+            "2026-04-11 runaway incident."
+        )
+
+    def test_retry_loop_still_has_rate_limit_continue(self):
+        """The rate-limit `continue` must still exist — the fix must not
+        regress the circuit-breaker retry path."""
+        source = self._read_translate_source()
+        assert "continue" in source, (
+            "rate-limit continue is missing — circuit-breaker retry path broken"
+        )
+        assert "EXIT_RATE_LIMITED" in source, (
+            "EXIT_RATE_LIMITED gate missing — retry-on-rate-limit disabled"
+        )

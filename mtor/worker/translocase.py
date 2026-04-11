@@ -1051,6 +1051,15 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 return _r
             continue
 
+        # All other exit codes (success, non-retryable failure) exit the retry
+        # loop immediately. Prior to 2026-04-11 there was no break here — a
+        # fast-failing subprocess (e.g. `Unknown flag: ---` from claude CLI
+        # parsing YAML frontmatter) would loop at full CPU speed writing
+        # header blocks to logs/<workflow_id>.log until an external timeout
+        # killed it. One incident produced 59,356 retries and a 208 MB log
+        # in 10 minutes from a single bad spec.
+        break
+
     # SRP defer detection: supervised mode returns JSON with stop_reason
     if is_supervised and rc == 0:
         with contextlib.suppress(Exception):
