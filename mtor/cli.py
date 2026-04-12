@@ -232,22 +232,6 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
-        # Build mode requires --spec
-        if spec is None:
-            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
-            sys.exit(
-                _err(
-                    cmd,
-                    "Build mode requires --spec. Provide a spec file to dispatch a build task.",
-                    "SPEC_REQUIRED",
-                    "Create a spec: mtor init <name>, then: mtor --spec <spec.md> \"prompt\"",
-                    [
-                        _action("mtor init <name>", "Scaffold a new spec file"),
-                        _action("mtor plan", "View spec DAG"),
-                    ],
-                    exit_code=2,
-                )
-            )
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
