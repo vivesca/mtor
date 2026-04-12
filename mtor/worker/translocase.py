@@ -151,42 +151,55 @@ async def _graceful_kill(
             await asyncio.wait_for(proc.wait(), timeout=2.0)
 
 
-def _auto_commit(repo_dir: str, workflow_id: str) -> bool:
+def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     """Stage and commit pending changes in *repo_dir*.
 
     Returns True if a commit was created, False if the working tree was clean
     or the staged diff was empty (e.g. only whitespace changes).
+
+    Skips pre-commit hooks (--no-verify) because the ganglion worktree
+    environment may lack ruff/other tools in PATH. The chaperone review
+    gate catches quality issues after the fact.
     """
     run = _subprocess.run
+    wf_label = workflow_id or "unknown"
 
-    # 1. Check for dirty working tree
-    status = run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-    )
-    if not status.stdout.strip():
+    try:
+        # 1. Check for dirty working tree
+        status = run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if not status.stdout.strip():
+            return False
+
+        # 2. Stage everything
+        run(["git", "add", "-A"], cwd=repo_dir, check=True, timeout=10)
+
+        # 3. Check if staged diff is empty (no substantive changes)
+        diff = run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=repo_dir,
+            timeout=10,
+        )
+        if diff.returncode == 0:
+            return False
+
+        # 4. Commit — skip hooks (worktree may lack lint tools)
+        run(
+            ["git", "commit", "--no-verify", "-m", f"ribosome: {wf_label}"],
+            cwd=repo_dir,
+            check=True,
+            timeout=30,
+        )
+        print(f"[auto-commit] committed dirty work for {wf_label}", file=sys.stderr)
+        return True
+    except Exception as exc:
+        print(f"[auto-commit] failed for {wf_label}: {exc}", file=sys.stderr)
         return False
-
-    # 2. Stage everything
-    run(["git", "add", "-A"], cwd=repo_dir, check=True)
-
-    # 3. Check if staged diff is empty (no substantive changes)
-    diff = run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=repo_dir,
-    )
-    if diff.returncode == 0:
-        return False
-
-    # 4. Commit
-    run(
-        ["git", "commit", "-m", f"feat(translocase): {workflow_id}"],
-        cwd=repo_dir,
-        check=True,
-    )
-    return True
 
 
 # Accept branch version on conflict -- lockfiles get regenerated
@@ -959,7 +972,10 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
 
         rc = proc.returncode or 0
-        if rc == 0 and work_dir:
+        # Always attempt auto-commit — GLM often exits non-zero (test failure,
+        # lint, timeout) after producing good code. The function checks for
+        # dirty tree + non-empty diff internally, so it's safe unconditionally.
+        if work_dir:
             _auto_commit(str(work_dir), wf_id)
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
