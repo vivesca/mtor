@@ -817,38 +817,6 @@ def doctor() -> None:
     _doctor()
 
 
-@app.command
-def probe() -> None:
-    """Show provider circuit-breaker state and recommended selection."""
-    from mtor.worker.provider import (
-        PROVIDER_PRIORITY,
-        load_health,
-        select_provider,
-    )
-
-    cmd = "mtor probe"
-    health = load_health()
-    recommended = select_provider(health)
-
-    providers = []
-    for name in PROVIDER_PRIORITY:
-        entry = health.get(name, {})
-        providers.append({
-            "name": name,
-            "state": entry.get("state", "closed"),
-            "cooldown_until": entry.get("cooldown_until"),
-            "consecutive_failures": entry.get("consecutive_failures", 0),
-        })
-
-    _ok(
-        cmd,
-        {
-            "providers": providers,
-            "recommended": recommended,
-        },
-        [_action("mtor doctor", "Full health check")],
-        version=VERSION,
-    )
 
 
 @app.command
