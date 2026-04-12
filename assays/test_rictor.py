@@ -68,7 +68,7 @@ class TestCheckHealth:
             assert "detail" in check
 
     def test_check_health_cli_command(self):
-        """mtor infra check returns valid JSON envelope."""
+        """mtor rictor check returns valid JSON envelope."""
         with patch("mtor.cli._check_health") as mock_ch:
             from mtor.infra import HealthReport
 
@@ -157,7 +157,7 @@ class TestDeploy:
         assert all(s["ok"] for s in result.steps)
 
     def test_deploy_cli_command(self):
-        """mtor infra deploy returns valid JSON envelope."""
+        """mtor rictor deploy returns valid JSON envelope."""
         with patch("mtor.cli._deploy") as mock_deploy:
             from mtor.infra import DeployResult
 
@@ -285,7 +285,7 @@ class TestClean:
         assert result.errors == []
 
     def test_clean_cli_command(self, tmp_path):
-        """mtor infra clean returns valid JSON envelope."""
+        """mtor rictor clean returns valid JSON envelope."""
         with patch("mtor.cli._clean") as mock_clean:
             from mtor.infra import CleanResult
 

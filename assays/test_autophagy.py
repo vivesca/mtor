@@ -2,17 +2,42 @@
 
 from __future__ import annotations
 
+import io
+import json
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch, call
 
-import pytest
-
 from mtor.autophagy import SalvageResult, salvage
+from mtor.cli import app
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def invoke(args: list[str] | None = None) -> tuple[int, dict]:
+    """Invoke CLI and return (exit_code, parsed_json)."""
+    captured = io.StringIO()
+    old_stdout = sys.stdout
+    exit_code = 0
+    try:
+        sys.stdout = captured
+        app(args or [])
+    except SystemExit as exc:
+        exit_code = exc.code if isinstance(exc.code, int) else 1
+    finally:
+        sys.stdout = old_stdout
+
+    output = captured.getvalue()
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"Output is not valid JSON. Exit={exit_code}\nOutput: {output!r}\nException: {exc}"
+        ) from exc
+    return exit_code, data
 
 def _run_mock(returncode=0, stdout="", stderr="") -> MagicMock:
     m = MagicMock(spec=subprocess.CompletedProcess)
@@ -190,3 +215,28 @@ class TestSalvageRunsTests:
         assert result.cherry_picked == []
         assert result.error is None
         assert result.tests_passed is True
+
+
+# ---------------------------------------------------------------------------
+# CLI integration test
+# ---------------------------------------------------------------------------
+
+
+def test_test_autophagy():
+    """mtor autophagy CLI command returns valid JSON envelope."""
+    with patch("mtor.autophagy.salvage") as mock_salvage:
+        mock_salvage.return_value = SalvageResult(
+            fetched=2,
+            cherry_picked=["a" * 40],
+            skipped=[],
+            tests_passed=True,
+            error=None,
+            test_output="1 passed",
+        )
+        exit_code, data = invoke(["autophagy"])
+
+    assert exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["fetched"] == 2
+    assert data["result"]["cherry_picked"] == ["a" * 40]
+    assert data["result"]["tests_passed"] is True

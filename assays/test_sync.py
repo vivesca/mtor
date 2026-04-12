@@ -1,7 +1,7 @@
-"""Tests for ganglion→soma auto-sync on mtor list/status.
+"""Tests for ganglion→soma auto-sync on mtor riboseq/status.
 
 After a task completes on ganglion, soma should auto-pull new commits
-when running `mtor list` or `mtor status`.
+when running `mtor riboseq` or `mtor status`.
 
 Runs via: cd ~/code/mtor && uv run pytest assays/test_sync.py -v
 """

@@ -126,13 +126,13 @@ class TestTopologicalSort:
 class TestDispatchAllTopologicalOrder:
     def test_test_dispatch_all_topological_order(self, tmp_path):
         """dispatch-all --dry-run returns specs in topological (dependency) order."""
-        _write_spec(tmp_path, "a", "status: done")
-        _write_spec(tmp_path, "b", "status: done\ndepends_on:\n  - a")
-        _write_spec(tmp_path, "d", "status: done")
+        _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
+        _write_spec(tmp_path, "b", "status: done\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
+        _write_spec(tmp_path, "d", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
         # e depends on d (done) → dispatchable
-        _write_spec(tmp_path, "e", "status: ready\ndepends_on:\n  - d", body="Build e.")
+        _write_spec(tmp_path, "e", "status: ready\ndepends_on:\n  - d\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build e.")
         # c depends on b (done) → dispatchable
-        _write_spec(tmp_path, "c", "status: ready\ndepends_on:\n  - b", body="Build c.")
+        _write_spec(tmp_path, "c", "status: ready\ndepends_on:\n  - b\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build c.")
 
         exit_code, data = invoke(["dispatch-all", "--dry-run", "--dir", str(tmp_path)])
 
@@ -144,8 +144,8 @@ class TestDispatchAllTopologicalOrder:
 
     def test_test_dispatch_all_dry_run(self, tmp_path):
         """dispatch-all --dry-run lists specs without connecting to Temporal."""
-        _write_spec(tmp_path, "a", "status: done")
-        _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a", body="Build b.")
+        _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
+        _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build b.")
 
         exit_code, data = invoke(["dispatch-all", "--dry-run", "--dir", str(tmp_path)])
 
@@ -160,8 +160,8 @@ class TestDispatchAllTopologicalOrder:
 class TestSearchAttributeSetOnDispatch:
     def test_test_search_attribute_set_on_dispatch(self, tmp_path):
         """dispatch-all passes provider to each dispatched workflow spec."""
-        _write_spec(tmp_path, "a", "status: done")
-        _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a", body="Build b.")
+        _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
+        _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build b.")
 
         with patch("mtor.cli._dispatch_prompt", return_value="wf-123") as mock_dispatch:
             exit_code, data = invoke(
