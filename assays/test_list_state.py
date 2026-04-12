@@ -1,4 +1,4 @@
-"""Tests for execution state display in mtor riboseq.
+"""Tests for execution state display in mtor list.
 
 Runs via: cd ~/code/mtor && uv run pytest assays/test_list_state.py -x
 """
@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class TestListExecutionState:
-    """mtor riboseq shows queued vs executing for RUNNING workflows."""
+    """mtor list shows queued vs executing for RUNNING workflows."""
 
     def test_recent_heartbeat_shows_executing(self):
         """Workflow with heartbeat within 60s → execution_state='executing'."""

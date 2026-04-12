@@ -232,6 +232,22 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
     else:
+        # Build mode requires --spec
+        if spec is None:
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Build mode requires --spec. Provide a spec file to dispatch a build task.",
+                    "SPEC_REQUIRED",
+                    "Create a spec: mtor init <name>, then: mtor --spec <spec.md> \"prompt\"",
+                    [
+                        _action("mtor init <name>", "Scaffold a new spec file"),
+                        _action("mtor plan", "View spec DAG"),
+                    ],
+                    exit_code=2,
+                )
+            )
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
@@ -256,22 +272,6 @@ def default_handler(
                     "Run: mtor derapa",
                     [_action("mtor derapa", "Resume dispatching")],
                     exit_code=1,
-                )
-            )
-        # Build mode requires --spec
-        if spec is None:
-            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
-            sys.exit(
-                _err(
-                    cmd,
-                    "Build mode requires --spec. Provide a spec file to dispatch a build task.",
-                    "SPEC_REQUIRED",
-                    "Create a spec: mtor init <name>, then: mtor --spec <spec.md> \"prompt\"",
-                    [
-                        _action("mtor init <name>", "Scaffold a new spec file"),
-                        _action("mtor plan", "View spec DAG"),
-                    ],
-                    exit_code=2,
                 )
             )
         # Spec validation gate — tests field required, no bypass
@@ -566,7 +566,7 @@ def status(workflow_id: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor riboseq",
+                    "Verify the workflow ID with: mtor list",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
@@ -793,7 +793,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor riboseq",
+                    "Verify the workflow ID with: mtor list",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
@@ -1049,7 +1049,7 @@ def reactivate(workflow_id: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor riboseq",
+                    "Verify the workflow ID with: mtor list",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
@@ -2026,7 +2026,7 @@ def check() -> None:
     _ok(cmd, result, next_actions, version=VERSION)
 
 
-@rictor_app.command(name="deploy")
+@rictor_app.command
 def rictor_deploy() -> None:
     """Sync code to worker, restart services, verify health."""
     cmd = "mtor rictor deploy"

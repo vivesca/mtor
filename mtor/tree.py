@@ -599,19 +599,6 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "polysome",
-    "Show dispatch statistics: running count, today's verdicts, weekly totals.",
-    params=[],
-    returns={
-        "ok": "boolean",
-        "command": "string",
-        "result": {
-            "counts": "object (running, today_total, today_completed, week_total, week_completed)",
-        },
-    },
-    annotations={"readonly": True},
-)
-tree.add_command(
     "rictor check",
     "Infrastructure health check — worker SSH, repo, git, disk",
     params=[],
