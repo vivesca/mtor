@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 
 
-from mtor.worker.stall_trace import create_task_trace, finalize_trace, get_langfuse
+from mtor.worker.stall_trace import create_span, create_task_trace, finalize_trace, get_langfuse
 
 
 # ---------------------------------------------------------------------------
@@ -20,14 +20,39 @@ from mtor.worker.stall_trace import create_task_trace, finalize_trace, get_langf
 class TestGetLangfuse:
     """Langfuse client acquisition."""
 
-    def test_returns_module_when_installed(self):
-        mock_langfuse = MagicMock()
-        with patch("mtor.worker.stall_trace.get_langfuse", return_value=mock_langfuse):
-            assert get_langfuse() is mock_langfuse
+    def setup_method(self):
+        """Reset the cached client before each test."""
+        import mtor.worker.stall_trace as mod
+
+        mod._langfuse_client = None
+
+    def test_returns_client_when_installed(self):
+        """get_langfuse() should return a Langfuse() client, not the module."""
+        mock_client = MagicMock(name="LangfuseClient")
+        with patch("langfuse.Langfuse", return_value=mock_client):
+            assert get_langfuse() is mock_client
 
     @patch("mtor.worker.stall_trace.get_langfuse", return_value=None)
     def test_returns_none_when_missing(self, _mock):
         assert get_langfuse() is None
+
+    def test_cached_client_only_constructs_once(self):
+        """Repeated calls should reuse the cached Langfuse() instance."""
+        mock_client = MagicMock(name="LangfuseClient")
+        with patch("langfuse.Langfuse", return_value=mock_client) as ctor:
+            first = get_langfuse()
+            second = get_langfuse()
+        assert first is second is mock_client
+        ctor.assert_called_once()
+
+    def test_returns_none_on_import_error(self):
+        """Should gracefully return None when Langfuse constructor fails."""
+        import mtor.worker.stall_trace as mod
+
+        mod._langfuse_client = None
+        with patch("langfuse.Langfuse", side_effect=ImportError("no langfuse")):
+            result = get_langfuse()
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -334,3 +359,94 @@ class TestFinalizeTrace:
 
         meta = mock_trace.generation.call_args[1]["metadata"]
         assert "3 files changed" in meta.get("diff_stat", "")
+
+    @patch("mtor.worker.stall_trace.get_langfuse")
+    def test_generation_metadata_captures_verdict(self, mock_lf):
+        """Verdict string should appear in trace metadata."""
+        mock_trace = MagicMock()
+        mock_lf.return_value.flush = MagicMock()
+
+        finalize_trace(mock_trace, {
+            "stdout": "ok",
+            "exit_code": 0,
+            "provider": "glm-5.1",
+            "cost_info": "",
+            "success": True,
+            "stderr": "",
+            "verdict": "DONE",
+        })
+
+        meta = mock_trace.generation.call_args[1]["metadata"]
+        assert meta["verdict"] == "DONE"
+
+    @patch("mtor.worker.stall_trace.get_langfuse")
+    def test_generation_metadata_captures_flags(self, mock_lf):
+        """Flags list should appear in trace metadata."""
+        mock_trace = MagicMock()
+        mock_lf.return_value.flush = MagicMock()
+
+        finalize_trace(mock_trace, {
+            "stdout": "ok",
+            "exit_code": 0,
+            "provider": "glm-5.1",
+            "cost_info": "",
+            "success": True,
+            "stderr": "",
+            "flags": ["timeout_risk", "large_diff"],
+        })
+
+        meta = mock_trace.generation.call_args[1]["metadata"]
+        assert meta["flags"] == ["timeout_risk", "large_diff"]
+
+    @patch("mtor.worker.stall_trace.get_langfuse")
+    def test_generation_metadata_captures_satisfaction(self, mock_lf):
+        """Satisfaction score should appear in trace metadata."""
+        mock_trace = MagicMock()
+        mock_lf.return_value.flush = MagicMock()
+
+        finalize_trace(mock_trace, {
+            "stdout": "ok",
+            "exit_code": 0,
+            "provider": "glm-5.1",
+            "cost_info": "",
+            "success": True,
+            "stderr": "",
+            "satisfaction": 0.85,
+        })
+
+        meta = mock_trace.generation.call_args[1]["metadata"]
+        assert meta["satisfaction"] == 0.85
+
+
+# ---------------------------------------------------------------------------
+# create_span
+# ---------------------------------------------------------------------------
+
+class TestCreateSpan:
+    """Intermediate span creation."""
+
+    def test_noop_when_trace_is_none(self):
+        """Should not raise when trace is None."""
+        create_span(None, "test-span")
+
+    def test_creates_span_with_name(self):
+        """Should call trace.span() with the given name."""
+        mock_trace = MagicMock()
+        create_span(mock_trace, "setup-worktree")
+        mock_trace.span.assert_called_once()
+        call_kwargs = mock_trace.span.call_args[1]
+        assert call_kwargs["name"] == "setup-worktree"
+
+    def test_span_metadata_passed_through(self):
+        """Extra kwargs become span metadata."""
+        mock_trace = MagicMock()
+        create_span(mock_trace, "retry", attempt=2, reason="rate_limit")
+        call_kwargs = mock_trace.span.call_args[1]
+        assert call_kwargs["metadata"]["attempt"] == 2
+        assert call_kwargs["metadata"]["reason"] == "rate_limit"
+
+    def test_graceful_on_span_exception(self):
+        """Exceptions from trace.span() should not propagate."""
+        mock_trace = MagicMock()
+        mock_trace.span.side_effect = RuntimeError("span failed")
+        create_span(mock_trace, "test")  # should not raise

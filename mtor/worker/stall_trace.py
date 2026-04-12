@@ -3,22 +3,29 @@
 import sys
 
 
+_langfuse_client = None
+
+
 def get_langfuse():
-    """Return Langfuse client or None if unavailable.
+    """Return a cached Langfuse client, or None if unavailable.
 
     Checks whether the module-level ``get_langfuse`` has been patched
     (e.g. by tests) and delegates to the replacement so that callers
     holding a direct reference still observe the patch.
     """
+    global _langfuse_client
     _module = sys.modules.get(__name__)
     _current = getattr(_module, "get_langfuse", None) if _module else None
     if _current is not None and _current is not _original_fn:
         return _current()
+    if _langfuse_client is not None:
+        return _langfuse_client
     try:
-        import langfuse
+        from langfuse import Langfuse
 
-        return langfuse
-    except ImportError:
+        _langfuse_client = Langfuse()
+        return _langfuse_client
+    except Exception:
         return None
 
 
@@ -58,6 +65,10 @@ def finalize_trace(trace, result: dict) -> None:
     if trace is None:
         return
     try:
+        verdict = result.get("verdict", "")
+        flags = result.get("flags", [])
+        exit_code = result.get("exit_code", -1)
+
         trace.generation(
             name="ribosome-execution",
             model=result.get("provider", ""),
@@ -65,7 +76,7 @@ def finalize_trace(trace, result: dict) -> None:
             output=result.get("stdout", "")[:10000],
             status_message=result.get("stderr", ""),
             metadata={
-                "exit_code": result.get("exit_code", -1),
+                "exit_code": exit_code,
                 "cost_info": result.get("cost_info", "")[:500],
                 "provider": result.get("provider", ""),
                 "success": result.get("success"),
@@ -74,6 +85,9 @@ def finalize_trace(trace, result: dict) -> None:
                 "branch_name": result.get("branch_name", ""),
                 "merged": result.get("merged"),
                 "diff_stat": result.get("post_diff", {}).get("stat", ""),
+                "verdict": verdict,
+                "flags": flags,
+                "satisfaction": result.get("satisfaction", 0),
             },
         )
         lf = get_langfuse()
@@ -81,4 +95,14 @@ def finalize_trace(trace, result: dict) -> None:
             lf.flush()
     except Exception:
         pass  # graceful no-op
+
+
+def create_span(trace, name: str, **metadata) -> None:
+    """Add a span to an existing trace. No-op if trace is None."""
+    if trace is None:
+        return
+    try:
+        trace.span(name=name, metadata=metadata)
+    except Exception:
+        pass
 
