@@ -20,6 +20,18 @@ EXIT_RATE_LIMITED = 42
 # Priority order for provider selection (highest first).
 PROVIDER_PRIORITY = ["zhipu", "infini", "volcano", "gemini"]
 
+# Per-provider concurrency limits (max simultaneous tasks).
+PROVIDER_LIMITS: dict[str, int] = {
+    "zhipu": 2,
+    "infini": 2,
+    "volcano": 2,
+    "gemini": 2,
+    "codex": 2,
+}
+
+# Active task count per provider — incremented in translate(), decremented on completion.
+_active_count: dict[str, int] = {p: 0 for p in PROVIDER_PRIORITY}
+
 # Health-dict key used to persist the round-robin index across calls.
 RR_KEY = "_rr_index"
 
@@ -46,53 +58,72 @@ def save_health(health: dict[str, Any]) -> None:
     HEALTH_FILE.write_text(json.dumps(health, indent=2))
 
 
+def _is_available(provider: str, health: dict[str, Any]) -> bool:
+    """Check if a provider is available (closed, half_open, or open with expired cooldown)."""
+    state = health.get(provider, {}).get("state", "closed")
+    if state in ("closed", "half_open"):
+        return True
+    if state == "open":
+        cooldown_until = health.get(provider, {}).get("cooldown_until")
+        if cooldown_until is not None and time.time() >= cooldown_until:
+            return True
+    return False
+
+
+def _earliest_cooldown_provider(health: dict[str, Any]) -> str:
+    """Return the provider with the earliest cooldown_until among open providers.
+
+    Falls back to the first provider in PROVIDER_PRIORITY when no open
+    providers have a cooldown_until timestamp.
+    """
+    earliest: tuple[float, str] | None = None
+    for prov in PROVIDER_PRIORITY:
+        entry = health.get(prov, {})
+        if entry.get("state") == "open":
+            cooldown_until = entry.get("cooldown_until")
+            if cooldown_until is not None:
+                if earliest is None or cooldown_until < earliest[0]:
+                    earliest = (cooldown_until, prov)
+    if earliest is not None:
+        return earliest[1]
+    return PROVIDER_PRIORITY[0]
+
+
 def select_provider(health: dict[str, Any], override: str | None = None) -> str:
-    """Select a provider using round-robin across available providers.
+    """Select a provider using concurrency-aware round-robin.
 
-    If *override* is given it is returned directly (bypasses routing).
-    Otherwise, available providers are collected (closed, half_open, or open
-    with expired cooldown) and the round-robin index determines which one is
-    chosen.  The index is advanced and stored back into *health* under
-    :data:`RR_KEY` so that successive calls cycle through providers evenly.
-
-    If all providers are "open" and still in cooldown, the one with the
-    earliest cooldown_until timestamp is returned (no round-robin).
+    1. If *override* is given, return it directly (bypasses routing).
+    2. Collect healthy providers (closed, half_open, open with expired cooldown).
+    3. Among healthy, filter to those under their concurrency limit.
+    4. If available, pick the least-loaded (lowest active count),
+       breaking ties with the round-robin index stored in *health*.
+    5. All at limit: fall back to least-loaded healthy provider.
+    6. All unhealthy: return the one with earliest cooldown.
     """
     if override:
         return override
 
-    now = time.time()
-    earliest_open: tuple[float, str] | None = None
+    # Filter to healthy providers
+    healthy = [p for p in PROVIDER_PRIORITY if _is_available(p, health)]
 
-    # Collect providers that are currently available.
-    available: list[str] = []
-    for prov in PROVIDER_PRIORITY:
-        state = health.get(prov, {}).get("state", "closed")
-        if state == "closed":
-            available.append(prov)
-        elif state == "open":
-            cooldown_until = health[prov].get("cooldown_until")
-            if cooldown_until is not None and now >= cooldown_until:
-                available.append(prov)
-            else:
-                if cooldown_until is not None:
-                    if earliest_open is None or cooldown_until < earliest_open[0]:
-                        earliest_open = (cooldown_until, prov)
-        elif state == "half_open":
-            available.append(prov)
+    # Filter to providers under their concurrency limit
+    available = [p for p in healthy if _active_count.get(p, 0) < PROVIDER_LIMITS.get(p, 2)]
 
     if available:
-        idx = health.get(RR_KEY, 0) % len(available)
-        chosen = available[idx]
+        # Pick least-loaded; break ties with round-robin index
+        min_count = min(_active_count.get(p, 0) for p in available)
+        least_loaded = [p for p in available if _active_count.get(p, 0) == min_count]
+        idx = health.get(RR_KEY, 0) % len(least_loaded)
+        chosen = least_loaded[idx]
         health[RR_KEY] = health.get(RR_KEY, 0) + 1
         return chosen
 
-    # All open and in cooldown — fall back to earliest cooldown
-    if earliest_open is not None:
-        return earliest_open[1]
+    # All at limit — fall back to least-loaded healthy
+    if healthy:
+        return min(healthy, key=lambda p: _active_count.get(p, 0))
 
-    # No health record for any provider — return first in priority
-    return PROVIDER_PRIORITY[0]
+    # All unhealthy — earliest cooldown
+    return _earliest_cooldown_provider(health)
 
 
 def update_health(

@@ -29,7 +29,9 @@ from temporalio.worker import Worker
 
 from mtor.worker.provider import (
     EXIT_RATE_LIMITED,
+    PROVIDER_LIMITS,
     PROVIDER_PRIORITY,
+    _active_count,
     load_health,
     parse_rate_limit_window,
     save_health,
@@ -43,14 +45,6 @@ RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
 OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
 LOG_DIR = Path.home() / "code" / "mtor" / "logs"
-
-PROVIDER_LIMITS = {
-    "zhipu": 2,
-    "infini": 2,
-    "volcano": 2,
-    "gemini": 2,
-    "codex": 2,
-}
 
 # Serialize merges so concurrent ribosomes queue instead of racing
 _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
@@ -841,6 +835,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             resolved_provider = select_provider(tmp_health, override=None)
 
         _attempted.add(resolved_provider)
+        _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
         print(
             f"[translocase] selected: {resolved_provider} "
             f"(health: {health.get(resolved_provider, {}).get('state', 'closed')})",
@@ -961,6 +956,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             if log_fh:
                 with contextlib.suppress(OSError):
                     log_fh.close()
+            _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
 
         rc = proc.returncode or 0
         if rc == 0 and work_dir:
