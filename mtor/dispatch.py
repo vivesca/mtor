@@ -157,7 +157,7 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     # Auto-deploy: push + merge + restart
     push = subprocess.run(
         ["git", "push", WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=120,
     )
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
@@ -165,7 +165,7 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     subprocess.run(
         ["ssh", WORKER_HOST,
          "cd ~/germline && git merge deploy-sync --no-edit"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=30,
     )
 
     restart = subprocess.run(
