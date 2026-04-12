@@ -297,7 +297,7 @@ def default_handler(
                     f"Duplicate dispatch blocked (key={dup_key}). Same prompt dispatched within the last 5 minutes.",
                     "DEDUP_BLOCKED",
                     "Wait a few minutes or change the prompt/spec to dispatch again.",
-                    [_action("mtor list", "View running workflows")],
+                    [_action("mtor riboseq", "View running workflows")],
                     exit_code=1,
                 )
             )
@@ -311,7 +311,7 @@ def default_handler(
         )
 
 
-@app.command(name="list")
+@app.command(name="riboseq")
 def list_cmd(
     *,
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"] | None = None,
@@ -324,7 +324,7 @@ def list_cmd(
     archived: Annotated[bool, Parameter(name=["--archived"])] = False,
 ) -> None:
     """List recent workflows. --since N shows last N hours only. --archived prints archived IDs from triage.json."""
-    cmd = "mtor list" + (f" --status {status}" if status else "") + f" --count {count}"
+    cmd = "mtor riboseq" + (f" --status {status}" if status else "") + f" --count {count}"
 
     if archived:
         import json
@@ -567,7 +567,7 @@ def status(workflow_id: str) -> None:
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
                     "Verify the workflow ID with: mtor list",
-                    [_action("mtor list", "List all recent workflows")],
+                    [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
             )
@@ -794,7 +794,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
                     "Verify the workflow ID with: mtor list",
-                    [_action("mtor list", "List all recent workflows")],
+                    [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
             )
@@ -1050,7 +1050,7 @@ def reactivate(workflow_id: str) -> None:
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
                     "Verify the workflow ID with: mtor list",
-                    [_action("mtor list", "List all recent workflows")],
+                    [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
             )
@@ -1201,7 +1201,7 @@ def deploy() -> None:
     _ok("mtor deploy", {"steps": steps, "healthy": True}, version=VERSION)
 
 
-@app.command
+@app.command(name="polysome")
 def stats() -> None:
     """Show dispatch statistics: today's verdicts, running count, weekly totals."""
     from datetime import datetime, timedelta
@@ -1210,7 +1210,7 @@ def stats() -> None:
     if err:
         sys.exit(
             _err(
-                "mtor stats",
+                "mtor polysome",
                 f"Cannot connect: {err}",
                 "TEMPORAL_UNREACHABLE",
                 "mtor doctor",
@@ -1239,7 +1239,7 @@ def stats() -> None:
         except Exception:
             counts[name] = -1
 
-    _ok("mtor stats", {"counts": counts}, version=VERSION)
+    _ok("mtor polysome", {"counts": counts}, version=VERSION)
 
 
 @app.command
@@ -1294,7 +1294,7 @@ def review(
         _ok(
             "mtor review --all",
             result,
-            [_action("mtor list", "View updated list")],
+            [_action("mtor riboseq", "View updated list")],
             version=VERSION,
         )
         return
@@ -1313,7 +1313,7 @@ def review(
     _ok(
         f"mtor review {workflow_id}",
         result,
-        [_action("mtor list", "View updated list")],
+        [_action("mtor riboseq", "View updated list")],
         version=VERSION,
     )
 
@@ -1359,7 +1359,7 @@ def verdict(
         _ok(
             cmd + " --all-rejected",
             result,
-            [_action("mtor list", "View updated verdicts")],
+            [_action("mtor riboseq", "View updated verdicts")],
             version=VERSION,
         )
         return
@@ -1371,7 +1371,7 @@ def verdict(
     _ok(
         f"mtor verdict {workflow_id}",
         result,
-        [_action("mtor list", "View updated list")],
+        [_action("mtor riboseq", "View updated list")],
         version=VERSION,
     )
 
@@ -1391,7 +1391,7 @@ def archive(
         _ok(
             "mtor archive --all-reviewed",
             result,
-            [_action("mtor list", "View updated list")],
+            [_action("mtor riboseq", "View updated list")],
             version=VERSION,
         )
         return
@@ -1435,7 +1435,7 @@ def archive(
         _ok(
             f"mtor archive --before {before}",
             result,
-            [_action("mtor list", "View updated list")],
+            [_action("mtor riboseq", "View updated list")],
             version=VERSION,
         )
         return
@@ -1454,7 +1454,7 @@ def archive(
     _ok(
         f"mtor archive {workflow_id}",
         result,
-        [_action("mtor list", "View updated list")],
+        [_action("mtor riboseq", "View updated list")],
         version=VERSION,
     )
 
@@ -1659,7 +1659,7 @@ def watch(
             once=once,
             on_cycle=_on_cycle,
         )
-        _ok(cmd, stats.to_dict(), [_action("mtor list", "Check synced workflows")], version=VERSION)
+        _ok(cmd, stats.to_dict(), [_action("mtor riboseq", "Check synced workflows")], version=VERSION)
         return
 
     # Start Temporal-native WatchWorkflow
@@ -1873,7 +1873,7 @@ def autophagy(
 
     next_actions = []
     if result.cherry_picked:
-        next_actions.append(_action("mtor list", "Check synced workflows"))
+        next_actions.append(_action("mtor riboseq", "Check synced workflows"))
     if result.error:
         next_actions.append(_action("mtor doctor", "Diagnose connectivity"))
 

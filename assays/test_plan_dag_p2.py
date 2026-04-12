@@ -6,7 +6,6 @@ import io
 import json
 import sys
 from contextlib import ExitStack
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.cli import app
@@ -177,7 +176,7 @@ class TestSearchAttributeSetOnDispatch:
 
 class TestListFilterByProvider:
     def test_test_list_filter_by_provider(self, tmp_path, monkeypatch):
-        """mtor list --provider filters workflows by provider search attribute."""
+        """mtor riboseq --provider filters workflows by provider search attribute."""
         import mtor.triage as triage_mod
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
@@ -207,7 +206,7 @@ class TestListFilterByProvider:
         mock_client.list_workflows = _fake_list
 
         with _patch_client(mock_client):
-            exit_code, data = invoke(["list", "--provider", "goose"])
+            exit_code, data = invoke(["riboseq", "--provider", "goose"])
 
         assert exit_code == 0
         assert data["ok"] is True
@@ -218,7 +217,7 @@ class TestListFilterByProvider:
 
 class TestListFilterByVerdict:
     def test_test_list_filter_by_verdict(self, tmp_path, monkeypatch):
-        """mtor list --verdict filters workflows by verdict search attribute."""
+        """mtor riboseq --verdict filters workflows by verdict search attribute."""
         import mtor.triage as triage_mod
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
@@ -248,7 +247,7 @@ class TestListFilterByVerdict:
         mock_client.list_workflows = _fake_list
 
         with _patch_client(mock_client):
-            exit_code, data = invoke(["list", "--verdict", "approved"])
+            exit_code, data = invoke(["riboseq", "--verdict", "approved"])
 
         assert exit_code == 0
         assert data["ok"] is True

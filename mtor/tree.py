@@ -43,7 +43,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "list",
+    "riboseq",
     "List recent workflows with optional filters",
     params=[
         {
