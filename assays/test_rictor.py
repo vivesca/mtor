@@ -165,7 +165,7 @@ class TestDeploy:
                 steps=[{"step": "push", "ok": True}],
                 healthy=True,
             )
-            exit_code, data = invoke(["rictor", "deploy"])
+            exit_code, data = invoke(["rictor-deploy"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "steps" in data["result"]
