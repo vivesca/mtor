@@ -22,11 +22,12 @@ def test_commits_dirty_tree():
         result = _auto_commit("/repo", "wf-123")
 
     assert result is True
-    mock_run.assert_any_call(["git", "add", "-A"], cwd="/repo", check=True)
     mock_run.assert_any_call(
-        ["git", "commit", "-m", "feat(translocase): wf-123"],
-        cwd="/repo",
-        check=True,
+        ["git", "add", "-A"], capture_output=True, cwd="/repo", timeout=10,
+    )
+    mock_run.assert_any_call(
+        ["git", "commit", "-m", "auto-commit: wf-123 (safety net)"],
+        capture_output=True, text=True, cwd="/repo", timeout=30,
     )
 
 
@@ -56,7 +57,9 @@ def test_noop_empty_staged():
 
     assert result is False
     # git add called, but git commit should NOT be called
-    mock_run.assert_any_call(["git", "add", "-A"], cwd="/repo", check=True)
+    mock_run.assert_any_call(
+        ["git", "add", "-A"], capture_output=True, cwd="/repo", timeout=10,
+    )
     assert mock_run.call_count == 3  # status + add + diff — no commit
 
 
