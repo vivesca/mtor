@@ -2,9 +2,7 @@
 
 import subprocess
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock, call, patch
 
 from mtor.worker.translocase import _auto_commit
 
@@ -22,12 +20,20 @@ def test_commits_dirty_tree():
         result = _auto_commit("/repo", "wf-123")
 
     assert result is True
-    mock_run.assert_any_call(
-        ["git", "add", "-A"], capture_output=True, cwd="/repo", timeout=10,
+    # Verify the 4-step sequence: status, add, diff --cached --quiet, commit
+    calls = mock_run.call_args_list
+    assert len(calls) == 4
+    assert calls[0] == call(
+        ["git", "status", "--porcelain"],
+        cwd="/repo", capture_output=True, text=True, timeout=10,
     )
-    mock_run.assert_any_call(
-        ["git", "commit", "-m", "auto-commit: wf-123 (safety net)"],
-        capture_output=True, text=True, cwd="/repo", timeout=30,
+    assert calls[1] == call(["git", "add", "-A"], cwd="/repo", check=True, timeout=10)
+    assert calls[2] == call(
+        ["git", "diff", "--cached", "--quiet"], cwd="/repo", timeout=10,
+    )
+    assert calls[3] == call(
+        ["git", "commit", "--no-verify", "-m", "ribosome: wf-123"],
+        cwd="/repo", check=True, timeout=30,
     )
 
 
@@ -56,17 +62,15 @@ def test_noop_empty_staged():
         result = _auto_commit("/repo", "wf-789")
 
     assert result is False
-    # git add called, but git commit should NOT be called
-    mock_run.assert_any_call(
-        ["git", "add", "-A"], capture_output=True, cwd="/repo", timeout=10,
-    )
     assert mock_run.call_count == 3  # status + add + diff — no commit
 
 
-def test_timeout_safe():
-    """subprocess.TimeoutExpired propagates without corrupting state."""
+def test_timeout_returns_false():
+    """subprocess.TimeoutExpired is caught and returns False (no corruption)."""
     with patch("mtor.worker.translocase._subprocess.run") as mock_run:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=30)
 
-        with pytest.raises(subprocess.TimeoutExpired):
-            _auto_commit("/repo", "wf-timeout")
+        result = _auto_commit("/repo", "wf-timeout")
+
+    # Implementation catches all exceptions and returns False
+    assert result is False
