@@ -24,9 +24,9 @@ with workflow.unsafe.imports_passed_through():
     from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle
 
 # #6: Search attributes (registered on server)
-SA_PROVIDER = SearchAttributeKey.for_keyword("TranslationProvider")
-SA_VERDICT = SearchAttributeKey.for_keyword("TranslationVerdict")
-SA_TASK_ID = SearchAttributeKey.for_keyword("TranslationTaskId")
+SA_PROVIDER = SearchAttributeKey.for_keyword("Provider")
+SA_VERDICT = SearchAttributeKey.for_keyword("Verdict")
+SA_SPEC_NAME = SearchAttributeKey.for_keyword("SpecName")
 
 # Retry policy: 2 attempts max (translation tasks mutate files, not safely retriable)
 _RETRY_POLICY = RetryPolicy(
@@ -129,7 +129,6 @@ class TranslationWorkflow:
             [
                 SA_PROVIDER.value_set(provider),
                 SA_VERDICT.value_set(review.get("verdict", "unknown")),
-                SA_TASK_ID.value_set(task[:50]),
             ]
         )
 
