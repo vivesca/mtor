@@ -67,7 +67,7 @@ ROUTE_PATTERNS: dict[str, list[str]] = {
 ROUTE_TO_PROVIDER: dict[str, str] = {
     "explore": "droid",
     "bugfix": "goose",
-    "build": "zhipu",
+    "build": "volcano",
     "test": "zhipu",
     "research": "zhipu",
 }
@@ -304,18 +304,6 @@ def _dispatch_prompt(
 
         async def _start():
             from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
-            from temporalio.common import SearchAttributeKey
-
-            # Set search attributes for better filtering on Temporal server
-            search_attributes = {}
-            sa_provider = SearchAttributeKey.for_keyword("Provider")
-            search_attributes.update(sa_provider.value_set(provider or "zhipu"))
-            if spec_path is not None:
-                # Extract spec name from the spec path
-                spec_name = spec_path.stem
-                sa_spec_name = SearchAttributeKey.for_keyword("SpecName")
-                search_attributes.update(sa_spec_name.value_set(spec_name))
-
             handle = await client.start_workflow(
                 WORKFLOW_TYPE,
                 args=[[spec]],
@@ -323,7 +311,6 @@ def _dispatch_prompt(
                 task_queue=TASK_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
                 id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-                search_attributes=search_attributes,
             )
             return handle.id
 

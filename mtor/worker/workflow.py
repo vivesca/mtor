@@ -16,17 +16,12 @@ import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy, SearchAttributeKey
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from pathlib import Path
 
     from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle
-
-# #6: Search attributes (registered on server)
-SA_PROVIDER = SearchAttributeKey.for_keyword("Provider")
-SA_VERDICT = SearchAttributeKey.for_keyword("Verdict")
-SA_SPEC_NAME = SearchAttributeKey.for_keyword("SpecName")
 
 # Retry policy: 2 attempts max (translation tasks mutate files, not safely retriable)
 _RETRY_POLICY = RetryPolicy(
@@ -123,14 +118,6 @@ class TranslationWorkflow:
                 "stderr": str(exc)[:2000],
             }
             review = {"approved": False, "flags": ["activity_failed"], "verdict": "rejected"}
-
-        # #6: Upsert search attributes
-        workflow.upsert_search_attributes(
-            [
-                SA_PROVIDER.value_set(provider),
-                SA_VERDICT.value_set(review.get("verdict", "unknown")),
-            ]
-        )
 
         # #5: If flagged, wait for approval signal (timeout 1h, auto-approve)
         if review.get("verdict") == "approved_with_flags":
