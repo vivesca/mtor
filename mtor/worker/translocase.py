@@ -240,6 +240,36 @@ def _detect_repo(task: str, default: str) -> str:
     return default
 
 
+def _extract_test_paths(task: str) -> list[str]:
+    """Extract test file paths from task YAML frontmatter ``tests:`` field."""
+    fm = _re.search(r'^---\s*\n(.*?)\n---', task, _re.DOTALL)
+    if not fm:
+        return []
+    in_tests = False
+    paths: list[str] = []
+    for line in fm.group(1).splitlines():
+        s = line.strip()
+        if s.startswith("tests:"):
+            in_tests = True
+            rest = s[len("tests:"):].strip()
+            if rest:
+                raw = rest.strip("[]")
+                tokens = raw.split(",") if "," in raw else raw.split()
+                for tok in tokens:
+                    tok = tok.strip().strip("'\"")
+                    if tok:
+                        paths.append(tok)
+            continue
+        if in_tests:
+            if s.startswith("- "):
+                tok = s[2:].strip().strip("'\"")
+                if tok:
+                    paths.append(tok)
+            elif not s or not line[0:1].isspace():
+                in_tests = False
+    return paths
+
+
 def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dict:
     """Capture git diff stat + numstat + commit list + full patch for review.
 
@@ -1084,6 +1114,64 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "output_path": "",
                     "branch_name": branch_name if worktree_path else "",
                     "merged": False,
+                }
+                finalize_trace(_trace, _r)
+                return _r
+
+    # Early exit gate: if work is committed and tests pass, skip verdict review.
+    # Prevents zombie pattern where translocase loops on circuit-broken providers
+    # after the ribosome has already completed and committed its work.
+    if rc == 0 and pre_sha and work_dir:
+        try:
+            _head_r = _subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5, cwd=work_dir,
+            )
+            _post_head = _head_r.stdout.strip() if _head_r.returncode == 0 else None
+        except Exception:
+            _post_head = None
+
+        if _post_head and _post_head != pre_sha:
+            _test_paths = _extract_test_paths(task)
+            _tests_pass = True
+            if _test_paths:
+                _test_r = await asyncio.to_thread(
+                    _subprocess.run,
+                    ["uv", "run", "pytest", "-x", *_test_paths],
+                    cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                _tests_pass = _test_r.returncode == 0
+
+            if _tests_pass:
+                if worktree_path:
+                    _subprocess.run(
+                        ["git", "push", "origin", f"{branch_name}:{branch_name}"],
+                        check=False, timeout=60, cwd=repo_root,
+                    )
+                    with contextlib.suppress(Exception):
+                        _subprocess.run(
+                            ["git", "worktree", "remove", "--force", worktree_path],
+                            capture_output=True, timeout=10, cwd=repo_root,
+                        )
+                _r = {
+                    "success": True,
+                    "exit_code": 0,
+                    "provider": provider,
+                    "task": task[:200],
+                    "stdout": stdout[:1000],
+                    "stderr": stderr[:500],
+                    "pre_diff": pre_diff,
+                    "post_diff": {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""},
+                    "cost_info": "",
+                    "output_path": "",
+                    "branch_name": branch_name if worktree_path else "",
+                    "merged": False,
+                    "mode": mode,
+                    "verdict": "early_exit_clean",
+                    "post_head": _post_head,
                 }
                 finalize_trace(_trace, _r)
                 return _r
