@@ -550,7 +550,7 @@ def status(workflow_id: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor list",
+                    "Verify the workflow ID with: mtor riboseq",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
@@ -777,7 +777,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor list",
+                    "Verify the workflow ID with: mtor riboseq",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
@@ -1033,7 +1033,7 @@ def reactivate(workflow_id: str) -> None:
                     cmd,
                     f"Workflow {workflow_id} not found",
                     "WORKFLOW_NOT_FOUND",
-                    "Verify the workflow ID with: mtor list",
+                    "Verify the workflow ID with: mtor riboseq",
                     [_action("mtor riboseq", "List all recent workflows")],
                     exit_code=4,
                 )
