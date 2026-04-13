@@ -127,7 +127,7 @@ def test_run_seeds_initial_health():
     """run() seeds _health from params['initial_health']."""
     wf = HealthWorkflow()
     initial = {"acme": {"state": "open", "cooldown_until": 99.0, "consecutive_failures": 3}}
-    asyncio.get_event_loop().run_until_complete(_run_workflow(wf, {"initial_health": initial}))
+    asyncio.run(_run_workflow(wf, {"initial_health": initial}))
 
     assert wf._health == initial
 
@@ -135,6 +135,6 @@ def test_run_seeds_initial_health():
 def test_run_default_empty_health():
     """run() with no params starts with empty health dict."""
     wf = HealthWorkflow()
-    asyncio.get_event_loop().run_until_complete(_run_workflow(wf, None))
+    asyncio.run(_run_workflow(wf, None))
 
     assert wf._health == {}
