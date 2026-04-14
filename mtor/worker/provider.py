@@ -25,7 +25,7 @@ PROVIDER_LIMITS: dict[str, int] = {
     "zhipu": 3,    # Max tier
     "infini": 3,   # Max tier
     "volcano": 3,  # Max tier
-    "gemini": 0,  # Disabled — env-i strips key context
+    "gemini": 2,   # Intermittent key rejection — rely on ribosome retry
     "codex": 2,
 }
 
