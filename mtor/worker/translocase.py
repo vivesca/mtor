@@ -708,7 +708,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         ).stdout.strip()
         or "0"
     )
-    if _proc_count > 4:
+    if _proc_count > 8:
         raise ApplicationError(f"Concurrency gate: {_proc_count} ribosome processes", non_retryable=False)
     # Capability gate: reject tasks containing blocked keywords
     task_upper = task.upper()
