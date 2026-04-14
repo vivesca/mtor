@@ -511,6 +511,60 @@ def doctor() -> None:
                 }
             )
 
+    # Check 7: GitHub CLI auth on ganglion
+    if WORKER_HOST == "localhost":
+        checks.append(
+            {
+                "name": "ganglion_gh_auth",
+                "ok": False,
+                "detail": "Skipped — WORKER_HOST is localhost (set MTOR_WORKER_HOST first)",
+            }
+        )
+    else:
+        try:
+            gh_result = subprocess.run(
+                ["ssh", WORKER_HOST, "gh auth status"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if gh_result.returncode == 0:
+                checks.append(
+                    {
+                        "name": "ganglion_gh_auth",
+                        "ok": True,
+                        "detail": f"GitHub CLI authenticated on {WORKER_HOST}",
+                    }
+                )
+            else:
+                all_ok = False
+                snippet = (gh_result.stderr or gh_result.stdout or "").strip().split("\n")[0]
+                checks.append(
+                    {
+                        "name": "ganglion_gh_auth",
+                        "ok": False,
+                        "detail": f"Not authenticated on {WORKER_HOST}: {snippet}",
+                    }
+                )
+        except subprocess.TimeoutExpired:
+            all_ok = False
+            checks.append(
+                {
+                    "name": "ganglion_gh_auth",
+                    "ok": False,
+                    "detail": f"SSH to {WORKER_HOST} timed out",
+                }
+            )
+        except OSError as exc:
+            all_ok = False
+            checks.append(
+                {
+                    "name": "ganglion_gh_auth",
+                    "ok": False,
+                    "detail": f"SSH to {WORKER_HOST} failed: {exc}",
+                }
+            )
+
     # Emit human-readable health report to stderr so JSON on stdout stays clean
     display = format_health_display(checks, result.get("provider_circuit_breaker"))
     sys.stderr.write(display)
