@@ -23,8 +23,8 @@ PROVIDER_PRIORITY = ["zhipu", "infini", "volcano", "gemini"]
 # Per-provider concurrency limits (max simultaneous tasks).
 PROVIDER_LIMITS: dict[str, int] = {
     "zhipu": 3,    # Max tier
-    "infini": 1,   # Lite tier — 1 concurrent
-    "volcano": 1,  # Lite tier — 1 concurrent
+    "infini": 3,   # Max tier
+    "volcano": 3,  # Max tier
     "gemini": 2,
     "codex": 2,
 }
