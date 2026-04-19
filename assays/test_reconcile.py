@@ -5,13 +5,33 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_reconcile.py -x
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mtor.spec import update_spec_status
+from mtor.reconcile import check_code_exists, reconcile_spec
+
+
+class TestReconcileCheckCodeExists:
+    """check_code_exists correctly detects existing files and functions."""
+
+    def test_file_exists_returns_true(self):
+        """Existing file → returns True."""
+        assert check_code_exists("mtor/reconcile.py") is True
+
+    def test_file_missing_returns_false(self):
+        """Missing file → returns False."""
+        assert check_code_exists("mtor/nonexistent_file.py") is False
+
+    def test_function_exists_in_file_returns_true(self):
+        """Existing function in file → returns True."""
+        assert check_code_exists("mtor/reconcile.py:check_code_exists") is True
+
+    def test_function_missing_in_file_returns_false(self):
+        """Missing function in existing file → returns False."""
+        assert check_code_exists("mtor/reconcile.py:missing_function") is False
 
 
 class TestReconcileSpecs:
@@ -28,6 +48,79 @@ class TestReconcileSpecs:
         text = spec.read_text()
         assert "status: done" in text
         assert "verdict: accepted" in text
+
+    def test_dispatched_no_workflows_becomes_ready(self, tmp_path: Path):
+        """dispatched + no workflows → status: ready, clear workflow_id."""
+        spec_path = tmp_path / "test-dispatched-gone.md"
+        spec_path.write_text("""---
+name: test-dispatched-gone
+status: dispatched
+workflow_id: wf-12345
+---
+# Test Spec
+""")
+
+        spec_dict = {
+            "name": "test-dispatched-gone",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-12345",
+            "body": "# Test Spec",
+        }
+
+        # dry_run = True to avoid actual change
+        result = reconcile_spec(spec_dict, dry_run=True)
+        assert result["changed"] is True
+        assert result["was"] == "dispatched"
+        assert result["now"] == "ready"
+
+    def test_done_with_existing_code_no_warning(self, tmp_path: Path):
+        """done + files exist → correct, no warning."""
+        spec_path = tmp_path / "test-done-code-exists.md"
+        spec_path.write_text("""---
+name: test-done-code-exists
+status: done
+---
+## Files to edit
+- mtor/reconcile.py:check_code_exists
+- mtor/cli.py
+""")
+
+        spec_dict = {
+            "name": "test-done-code-exists",
+            "path": str(spec_path),
+            "status": "done",
+            "body": spec_path.read_text(),
+        }
+
+        result = reconcile_spec(spec_dict, dry_run=True)
+        assert result["changed"] is False
+        assert result["warning"] is None
+
+    def test_done_with_missing_code_has_warning(self, tmp_path: Path):
+        """done + missing files → warning generated."""
+        spec_path = tmp_path / "test-done-missing.md"
+        spec_path.write_text("""---
+name: test-done-missing
+status: done
+---
+## Files to edit
+- mtor/nonexistent.py
+- mtor/reconcile.py:missing_function
+""")
+
+        spec_dict = {
+            "name": "test-done-missing",
+            "path": str(spec_path),
+            "status": "done",
+            "body": spec_path.read_text(),
+        }
+
+        result = reconcile_spec(spec_dict, dry_run=True)
+        assert result["changed"] is False
+        assert result["warning"] is not None
+        assert "nonexistent.py" in result["warning"]
+        assert "missing_function" in result["warning"]
 
     def test_completed_rejected_becomes_failed(self, tmp_path: Path):
         """COMPLETED + rejected verdict → status: failed."""
