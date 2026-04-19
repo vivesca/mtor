@@ -566,9 +566,70 @@ def status(workflow_id: str) -> None:
         )
 
 
+def _active_logs() -> None:
+    """SSH to ganglion, find log files modified in last 5 minutes, show filename + last 3 lines."""
+    cmd = "mtor logs --active"
+    find_cmd = r"find ~/code/mtor/logs -name '*.log' -mmin -5 -printf '%T@ %p\n' | sort -rn"
+    try:
+        result = subprocess.run(
+            ["ssh", WORKER_HOST, find_cmd],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            sys.exit(
+                _err(cmd, result.stderr.strip() or "SSH find failed", "SSH_ERROR", f"Verify worker host: ssh {WORKER_HOST}", [])
+            )
+    except subprocess.TimeoutExpired:
+        sys.exit(_err(cmd, f"SSH to {WORKER_HOST} timed out", "SSH_TIMEOUT", f"Check connectivity: ping {WORKER_HOST}", []))
+    except FileNotFoundError:
+        sys.exit(_err(cmd, "ssh binary not found", "SSH_NOT_FOUND", "Install openssh-client", []))
+
+    entries: list[dict[str, Any]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.strip().split(" ", 1)
+        if len(parts) != 2:
+            continue
+        log_path = parts[1]
+        fname = log_path.rsplit("/", 1)[-1] if "/" in log_path else log_path
+        try:
+            tail = subprocess.run(
+                ["ssh", WORKER_HOST, f"tail -3 {log_path}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            last_lines = tail.stdout.strip().splitlines() if tail.returncode == 0 else []
+        except (subprocess.TimeoutExpired, OSError):
+            last_lines = []
+        entries.append({"filename": fname, "path": log_path, "last_lines": last_lines})
+
+    _ok(cmd, {"active_logs": entries, "count": len(entries)}, version=VERSION)
+
+
 @app.command
-def logs(workflow_id: str) -> None:
-    """Fetch last 30 lines of workflow output from worker host."""
+def logs(
+    workflow_id: Annotated[str | None, Parameter(name=["workflow_id"])] = None,
+    *,
+    active: Annotated[bool, Parameter(name=["--active"])] = False,
+) -> None:
+    """Fetch last 30 lines of workflow output from worker host. --active shows currently-writing logs."""
+    if active:
+        _active_logs()
+        return
+
+    if workflow_id is None:
+        sys.exit(
+            _err(
+                "mtor logs",
+                "Missing workflow_id (or use --active)",
+                "MISSING_ARGS",
+                "Provide a workflow ID or use --active to show currently-writing logs",
+                exit_code=2,
+            )
+        )
+
     cmd = f"mtor logs {workflow_id}"
 
     # Step 1: Query Temporal for the workflow result to get output_path
@@ -2001,3 +2062,37 @@ def clean(
     cmd = "mtor rictor clean"
     result = _clean(older_than_days=older_than_days)
     _ok(cmd, result.to_dict(), version=VERSION)
+
+
+@app.command
+def reconcile(
+    *,
+    dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+) -> None:
+    """Reconcile spec status with reality — fix stale frontmatter based on Temporal and git.
+
+    Logic:
+    - dispatched → ready if workflow gone or completed without commits
+    - dispatched → done if workflow completed and commits exist on main
+    - done → warn if listed files/functions not found in codebase
+    - ready → report blocked if any dependency not done
+    """
+    from mtor.reconcile import reconcile_all
+
+    cmd = "mtor reconcile"
+    directory = dir.expanduser()
+
+    if not directory.exists():
+        sys.exit(
+            _err(
+                cmd,
+                f"Spec directory not found: {directory}",
+                "DIRECTORY_NOT_FOUND",
+                "Check --dir path",
+                exit_code=1,
+            )
+        )
+
+    result = reconcile_all(directory, dry_run=dry_run)
+    _ok(cmd, result, version=VERSION)
