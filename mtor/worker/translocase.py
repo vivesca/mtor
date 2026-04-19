@@ -21,6 +21,7 @@ import sys
 import time as _time
 from datetime import timedelta
 from pathlib import Path
+from subprocess import run as _run_branch_command
 
 from temporalio import activity
 from temporalio.client import Client
@@ -161,6 +162,21 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     environment may lack ruff/other tools in PATH. The chaperone review
     gate catches quality issues after the fact.
     """
+    try:
+        branch = _run_branch_command(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branch_name = branch.stdout.strip()
+    except (OSError, _subprocess.SubprocessError):
+        branch_name = ""
+    if branch_name in {"main", "master"}:
+        print("[auto-commit] WARNING refusing to commit on main/master", file=sys.stderr)
+        return False
+
     run = _subprocess.run
     wf_label = workflow_id or "unknown"
 
