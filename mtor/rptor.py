@@ -310,7 +310,7 @@ def resolve_dag(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
     for spec in specs:
         status = spec.get("status", "ready")
-        if status in ("done", "dispatched", "superseded"):
+        if status in ("done", "dispatched", "superseded", "stale"):
             dispatchable = False
         else:
             deps = spec.get("depends_on", [])
@@ -395,7 +395,7 @@ def display_dag(specs: list[dict[str, Any]]) -> dict[str, Any]:
             buckets["done"].append(spec)
         elif status == "dispatched":
             buckets["dispatched"].append(spec)
-        elif status == "superseded":
+        elif status in ("superseded", "stale"):
             buckets["superseded"].append(spec)
         elif dispatchable:
             buckets["ready"].append(spec)
