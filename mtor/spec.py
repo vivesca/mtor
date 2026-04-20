@@ -11,6 +11,7 @@ from typing import Any
 
 CANONICAL_FIELDS = {
     "status",
+    "title",
     "scope",
     "repo",
     "priority",
@@ -21,9 +22,10 @@ CANONICAL_FIELDS = {
     "verdict",
     "tests",
     "exclude",
+    "files",
 }
 
-VALID_STATUSES = {"ready", "dispatched", "done", "blocked", "abandoned"}
+VALID_STATUSES = {"ready", "dispatched", "done", "blocked", "abandoned", "failed", "stale", "queued"}
 REQUIRED_FIELDS = {"status", "scope"}
 DEFAULT_SPEC_DIR = Path("~/epigenome/chromatin/loci/plans/")
 
