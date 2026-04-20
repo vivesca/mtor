@@ -204,7 +204,7 @@ class TestBareInvocationIntegration:
             "mtor status",
             "mtor logs",
             "mtor cancel",
-            "mtor doctor",
+            "mtor tsc",
             "mtor schema",
             "mtor approve",
             "mtor deny",
@@ -262,7 +262,7 @@ class TestSchemaIntegration:
 class TestDoctorIntegration:
     def test_doctor_unreachable_returns_error_envelope(self):
         with _patch_client_error("Connection refused"):
-            exit_code, data = invoke(["doctor"])
+            exit_code, data = invoke(["tsc"])
         assert exit_code == 3
         assert data["ok"] is False
         assert "error" in data
@@ -272,7 +272,7 @@ class TestDoctorIntegration:
 
     def test_doctor_has_check_structure(self):
         with _patch_client_error("Connection refused"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         result = data["result"]
         assert "checks" in result
         assert "temporal_reachable" in result
@@ -287,7 +287,7 @@ class TestDoctorIntegration:
 
     def test_doctor_unreachable_reports_false(self):
         with _patch_client_error("Connection refused"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         result = data["result"]
         assert result["temporal_reachable"] is False
         assert result["worker_alive"] is False
@@ -295,7 +295,7 @@ class TestDoctorIntegration:
     def test_doctor_with_client_reachable(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _exit_code, data = invoke(["doctor"])
+            _exit_code, data = invoke(["tsc"])
         # Might fail on coaching file or providers, but structure is valid
         assert isinstance(data, dict)
         assert "result" in data
@@ -303,7 +303,7 @@ class TestDoctorIntegration:
 
     def test_doctor_temporal_host_in_result(self):
         with _patch_client_error("timeout"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         assert data["result"]["temporal_host"] == TEMPORAL_HOST
 
 
@@ -498,7 +498,7 @@ class TestEnvelopeShapes:
 
         with _patch_client_error("refused"):
             for args in [
-                ["doctor"],
+                ["tsc"],
                 ["list"],
                 ["status", "any-id"],
                 ["cancel", "any-id"],

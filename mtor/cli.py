@@ -328,7 +328,7 @@ def list_cmd(
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
                 f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
-                [_action("mtor doctor", "Run health check to diagnose connectivity")],
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
         )
@@ -458,8 +458,8 @@ def list_cmd(
                 cmd,
                 str(exc),
                 "LIST_ERROR",
-                "Check Temporal server health with: mtor doctor",
-                [_action("mtor doctor", "Run health check")],
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
             )
         )
 
@@ -477,7 +477,7 @@ def status(workflow_id: str) -> None:
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
                 f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
-                [_action("mtor doctor", "Run health check to diagnose connectivity")],
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
         )
@@ -560,8 +560,8 @@ def status(workflow_id: str) -> None:
                 cmd,
                 exc_str,
                 "STATUS_ERROR",
-                "Check Temporal server health with: mtor doctor",
-                [_action("mtor doctor", "Run health check")],
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
             )
         )
 
@@ -748,7 +748,7 @@ def logs(
                     f"SSH command failed: {stderr_msg}",
                     "SSH_ERROR",
                     f"Verify worker host is reachable: ping {WORKER_HOST}",
-                    [_action("mtor doctor", "Run health check")],
+                    [_action("mtor tsc", "Run health check")],
                 )
             )
 
@@ -773,7 +773,7 @@ def logs(
                 f"SSH to {WORKER_HOST} timed out after 30s",
                 "SSH_TIMEOUT",
                 f"Check connectivity: ping {WORKER_HOST}",
-                [_action("mtor doctor", "Run health check")],
+                [_action("mtor tsc", "Run health check")],
             )
         )
     except FileNotFoundError:
@@ -810,7 +810,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
                 f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
-                [_action("mtor doctor", "Run health check to diagnose connectivity")],
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
         )
@@ -866,18 +866,17 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                 cmd,
                 exc_str,
                 "TERMINATE_ERROR",
-                "Check Temporal server health with: mtor doctor",
-                [_action("mtor doctor", "Run health check")],
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
             )
         )
 
 
-@app.command
-def doctor() -> None:
+@app.command(name="doctor", show=False)
+@app.command(name="tsc")
+def tsc() -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
     _doctor()
-
-
 
 
 @app.command
@@ -1072,8 +1071,8 @@ def reactivate(workflow_id: str) -> None:
                 cmd,
                 exc_str,
                 "REACTIVATE_ERROR",
-                "Check Temporal server health with: mtor doctor",
-                [_action("mtor doctor", "Run health check")],
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
             )
         )
 
@@ -1226,7 +1225,7 @@ def stats() -> None:
                 "mtor polysome",
                 f"Cannot connect: {err}",
                 "TEMPORAL_UNREACHABLE",
-                "mtor doctor",
+                "mtor tsc",
                 exit_code=3,
             )
         )
@@ -1287,7 +1286,7 @@ def review(
                     "mtor review --all",
                     f"Cannot connect: {err}",
                     "TEMPORAL_UNREACHABLE",
-                    "mtor doctor",
+                    "mtor tsc",
                     exit_code=3,
                 )
             )
@@ -1345,7 +1344,7 @@ def verdict(
         # Bulk: find all rejected workflows and override
         client, err = _get_client()
         if err:
-            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
 
         async def _list_rejected():
             results = []
@@ -1417,7 +1416,7 @@ def archive(
                     "mtor archive --before",
                     f"Cannot connect: {err}",
                     "TEMPORAL_UNREACHABLE",
-                    "mtor doctor",
+                    "mtor tsc",
                     exit_code=3,
                 )
             )
@@ -1544,14 +1543,15 @@ def init(
         )
 
 
-@app.command
-def plan(
+@app.command(name="plan", show=False)
+@app.command(name="rptor")
+def rptor(
     *,
     dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
 ) -> None:
     """Display spec DAG — status, dependencies, and dispatchability."""
-    cmd = "mtor plan"
+    cmd = "mtor rptor"
     directory = dir.expanduser()
 
     specs = scan_specs(directory)
@@ -1573,7 +1573,7 @@ def plan(
                 str(exc),
                 "CIRCULAR_DEPENDENCY",
                 "Break the cycle by removing one depends_on entry",
-                [_action("mtor plan", "Re-run after fixing the cycle")],
+                [_action("mtor rptor", "Re-run after fixing the cycle")],
                 exit_code=1,
             )
         )
@@ -1597,14 +1597,15 @@ def plan(
     _ok(cmd, result, version=VERSION)
 
 
-@app.command(name="plan_done")
-def plan_done(
+@app.command(name="plan_done", show=False)
+@app.command(name="rptor_done")
+def rptor_done(
     name: str,
     *,
     dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
 ) -> None:
     """Mark a spec as done."""
-    cmd = f"mtor plan done {name}"
+    cmd = f"mtor rptor done {name}"
     directory = dir.expanduser()
 
     spec_file = directory / f"{name}.md"
@@ -1614,7 +1615,7 @@ def plan_done(
                 cmd,
                 f"Spec not found: {name}",
                 "SPEC_NOT_FOUND",
-                f"List specs: mtor plan --dir {directory}",
+                f"List specs: mtor rptor --dir {directory}",
                 exit_code=1,
             )
         )
@@ -1624,8 +1625,9 @@ def plan_done(
     _ok(cmd, {"name": name, "status": "done"}, version=VERSION)
 
 
-@app.command
-def watch(
+@app.command(name="watch", show=False)
+@app.command(name="ragulator")
+def ragulator(
     action: Literal["start", "query", "stop"] = "start",
     workflow_id: Annotated[str | None, Parameter(name=["--workflow-id", "-w"])] = None,
     *,
@@ -1643,7 +1645,7 @@ def watch(
       query  – query status of a running WatchWorkflow (needs -w ID)
       stop   – stop a running WatchWorkflow (needs -w ID)
     """
-    cmd = f"mtor watch {action}"
+    cmd = f"mtor ragulator {action}"
 
     if action == "stop":
         _stop_watch_workflow(cmd, workflow_id)
@@ -1684,7 +1686,7 @@ def watch(
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
                 f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
-                [_action("mtor doctor", "Run health check")],
+                [_action("mtor tsc", "Run health check")],
                 exit_code=3,
             )
         )
@@ -1717,8 +1719,8 @@ def watch(
         cmd,
         {"workflow_id": started_id, "status": "started", "params": params},
         [
-            _action(f"mtor watch query -w {started_id}", "Query watch status"),
-            _action(f"mtor watch stop -w {started_id}", "Stop watch workflow"),
+            _action(f"mtor ragulator query -w {started_id}", "Query watch status"),
+            _action(f"mtor ragulator stop -w {started_id}", "Stop watch workflow"),
         ],
         version=VERSION,
     )
@@ -1730,7 +1732,7 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
         # Try to find running watch workflows
         client, err = _get_client()
         if err:
-            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
 
         async def _find_and_stop():
             stopped = []
@@ -1742,7 +1744,7 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
                         stopped.append(ex.id)
                     except Exception:
                         with contextlib.suppress(Exception):
-                            await handle.terminate(reason="Stopped via mtor watch stop")
+                            await handle.terminate(reason="Stopped via mtor ragulator stop")
                         stopped.append(ex.id)
             return stopped
 
@@ -1755,7 +1757,7 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
 
     client, err = _get_client()
     if err:
-        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
 
     async def _stop():
         handle = client.get_workflow_handle(workflow_id)
@@ -1763,7 +1765,7 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
             await handle.signal("stop")
             return "signaled"
         except Exception:
-            await handle.terminate(reason="Stopped via mtor watch stop")
+            await handle.terminate(reason="Stopped via mtor ragulator stop")
             return "terminated"
 
     method = asyncio.run(_stop())
@@ -1785,7 +1787,7 @@ def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
 
     client, err = _get_client()
     if err:
-        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
 
     async def _query():
         handle = client.get_workflow_handle(workflow_id)
@@ -1888,7 +1890,7 @@ def autophagy(
     if result.cherry_picked:
         next_actions.append(_action("mtor riboseq", "Check synced workflows"))
     if result.error:
-        next_actions.append(_action("mtor doctor", "Diagnose connectivity"))
+        next_actions.append(_action("mtor tsc", "Diagnose connectivity"))
 
     _ok(
         cmd,
@@ -1934,7 +1936,7 @@ def dispatch_all(
                 str(exc),
                 "CIRCULAR_DEPENDENCY",
                 "Break the cycle by removing one depends_on entry",
-                [_action("mtor plan", "View the DAG")],
+                [_action("mtor rptor", "View the DAG")],
                 exit_code=1,
             )
         )
@@ -2034,7 +2036,7 @@ def check() -> None:
     result = report.to_dict()
     next_actions = []
     if not report.ok:
-        next_actions.append(_action("mtor doctor", "Full health check"))
+        next_actions.append(_action("mtor tsc", "Full health check"))
         next_actions.append(_action("mtor rictor deploy", "Redeploy to fix issues"))
     _ok(cmd, result, next_actions, version=VERSION)
 
@@ -2049,7 +2051,7 @@ def rictor_deploy() -> None:
     if result.healthy:
         next_actions.append(_action("mtor rictor check", "Verify health after deploy"))
     else:
-        next_actions.append(_action("mtor doctor", "Full health check"))
+        next_actions.append(_action("mtor tsc", "Full health check"))
     _ok(cmd, payload, next_actions, version=VERSION)
 
 

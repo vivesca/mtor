@@ -13,11 +13,11 @@ ALLOWLIST = {
     "spec_completed", "run", "approve_task", "reject_task", "stop",
     # cyclopts CLI command handlers
     "default_handler", "list_cmd", "list_alias", "status", "logs",
-    "terminate", "cancel", "doctor", "probe", "history", "scan",
+    "terminate", "cancel", "doctor", "tsc", "probe", "history", "scan",
     "scout", "research", "auto", "schema", "approve", "deny",
     "reactivate", "publish", "deploy", "stats", "checkpoints",
-    "review", "verdict", "archive", "init", "plan", "plan_done",
-    "watch", "rapa", "derapa", "deptor", "dedeptor", "autophagy",
+    "review", "verdict", "archive", "init", "rptor", "rptor_done",
+    "ragulator", "rapa", "derapa", "deptor", "dedeptor", "autophagy",
     "dispatch_all",
     # rptor DAG functions (called from CLI via import)
     "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",

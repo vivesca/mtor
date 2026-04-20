@@ -220,7 +220,7 @@ tree.add_command(
     annotations={"readonly": False, "destructive": False},
 )
 tree.add_command(
-    "doctor",
+    "tsc",
     "Health check: Temporal server reachability, worker liveness, provider info",
     params=[],
     returns={
@@ -318,7 +318,7 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
-    "watch",
+    "ragulator",
     "Poll ganglion remote and auto-sync new commits.",
     params=[
         {
@@ -570,7 +570,7 @@ tree.add_command(
     annotations={"readonly": False},
 )
 tree.add_command(
-    "plan",
+    "rptor",
     "Display spec DAG — status, dependencies, and dispatchability",
     params=[
         {

@@ -215,8 +215,8 @@ class TestSpecRequiredErrorShape:
         assert "--spec" in err["message"]
         assert "fix" in err
         assert "next_actions" in data
-        # Should suggest mtor init and mtor plan
+        # Should suggest mtor init and mtor rptor
         actions_text = " ".join(a.get("label", "") for a in data["next_actions"])
-        assert any(kw in actions_text for kw in ["init", "plan"]), (
-            f"Expected init/plan in next_actions, got: {data['next_actions']}"
+        assert any(kw in actions_text for kw in ["init", "rptor"]), (
+            f"Expected init/rptor in next_actions, got: {data['next_actions']}"
         )

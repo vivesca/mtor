@@ -77,13 +77,13 @@ def test_parse_spec_frontmatter(tmp_path):
         "  - other-spec\n"
         "  - another-spec\n"
         "scope:\n"
-        "  - mtor/plan.py\n"
+        "  - mtor/rptor.py\n"
         "  - mtor/cli.py\n"
         "exclude:\n"
         "  - genome.md\n"
         "  - uv.lock\n"
         "tests:\n"
-        "  run: cd ~/code/mtor && python -m pytest assays/test_plan.py -v\n"
+        "  run: cd ~/code/mtor && python -m pytest assays/test_rptor.py -v\n"
         "  functions:\n"
         "    - parse_spec\n"
         "    - scan_specs\n"
@@ -100,9 +100,9 @@ def test_parse_spec_frontmatter(tmp_path):
     assert result["priority"] == "high"
     assert result["repo"] == "~/code/mtor"
     assert result["depends_on"] == ["other-spec", "another-spec"]
-    assert result["scope"] == ["mtor/plan.py", "mtor/cli.py"]
+    assert result["scope"] == ["mtor/rptor.py", "mtor/cli.py"]
     assert result["exclude"] == ["genome.md", "uv.lock"]
-    assert result["tests"]["run"] == "cd ~/code/mtor && python -m pytest assays/test_plan.py -v"
+    assert result["tests"]["run"] == "cd ~/code/mtor && python -m pytest assays/test_rptor.py -v"
     assert result["tests"]["functions"] == ["parse_spec", "scan_specs"]
     assert result["path"] == str(spec_file.resolve())
     assert "## Problem" in result["body"]
@@ -278,16 +278,16 @@ def test_display_dag_buckets(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CLI: plan command
+# CLI: rptor command
 # ---------------------------------------------------------------------------
 
 
-def test_plan_shows_dag(tmp_path):
-    """mtor plan returns DAG with specs and counts."""
+def test_rptor_shows_dag(tmp_path):
+    """mtor rptor returns DAG with specs and counts."""
     (tmp_path / "alpha.md").write_text("---\nstatus: done\n---\n", encoding="utf-8")
     (tmp_path / "beta.md").write_text("---\nstatus: ready\n---\n", encoding="utf-8")
 
-    exit_code, data = invoke(["plan", "--dir", str(tmp_path)])
+    exit_code, data = invoke(["rptor", "--dir", str(tmp_path)])
 
     assert exit_code == 0
     assert data["ok"] is True
@@ -296,36 +296,36 @@ def test_plan_shows_dag(tmp_path):
     assert data["result"]["directory"] == str(tmp_path)
 
 
-def test_plan_pending_only_shows_ready(tmp_path):
-    """mtor plan --pending shows only dispatchable specs."""
+def test_rptor_pending_only_shows_ready(tmp_path):
+    """mtor rptor --pending shows only dispatchable specs."""
     (tmp_path / "alpha.md").write_text("---\nstatus: done\n---\n", encoding="utf-8")
     (tmp_path / "beta.md").write_text(
         "---\nstatus: ready\ndepends_on:\n  - alpha\n---\n",
         encoding="utf-8",
     )
 
-    exit_code, data = invoke(["plan", "--pending", "--dir", str(tmp_path)])
+    exit_code, data = invoke(["rptor", "--pending", "--dir", str(tmp_path)])
 
     assert exit_code == 0
     assert "ready" in data["result"]["specs"]
     assert data["result"]["counts"]["ready"] == 1
 
 
-def test_plan_empty_directory(tmp_path):
-    """mtor plan on empty directory returns empty lists with zero counts."""
-    exit_code, data = invoke(["plan", "--dir", str(tmp_path)])
+def test_rptor_empty_directory(tmp_path):
+    """mtor rptor on empty directory returns empty lists with zero counts."""
+    exit_code, data = invoke(["rptor", "--dir", str(tmp_path)])
 
     assert exit_code == 0
     assert data["result"]["specs"] == []
     assert data["result"]["counts"]["ready"] == 0
 
 
-def test_plan_circular_dependency_reported(tmp_path):
-    """mtor plan exits with error when circular dependency is found."""
+def test_rptor_circular_dependency_reported(tmp_path):
+    """mtor rptor exits with error when circular dependency is found."""
     (tmp_path / "x.md").write_text("---\nstatus: ready\ndepends_on:\n  - y\n---\n", encoding="utf-8")
     (tmp_path / "y.md").write_text("---\nstatus: ready\ndepends_on:\n  - x\n---\n", encoding="utf-8")
 
-    exit_code, data = invoke(["plan", "--dir", str(tmp_path)])
+    exit_code, data = invoke(["rptor", "--dir", str(tmp_path)])
 
     assert exit_code == 1
     assert data["ok"] is False
@@ -333,20 +333,31 @@ def test_plan_circular_dependency_reported(tmp_path):
     assert "Circular dependency" in data["error"]["message"]
 
 
+def test_plan_hidden_alias_still_runs(tmp_path):
+    """mtor plan remains a transition alias for mtor rptor."""
+    (tmp_path / "alpha.md").write_text("---\nstatus: ready\n---\n", encoding="utf-8")
+
+    exit_code, data = invoke(["plan", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    assert data["command"] == "mtor rptor"
+    assert data["result"]["counts"]["ready"] == 1
+
+
 # ---------------------------------------------------------------------------
-# CLI: plan done command
+# CLI: rptor done command
 # ---------------------------------------------------------------------------
 
 
-def test_plan_done_updates_status(tmp_path):
-    """mtor plan done <name> updates spec status to done."""
+def test_rptor_done_updates_status(tmp_path):
+    """mtor rptor done <name> updates spec status to done."""
     spec_file = tmp_path / "my-spec.md"
     spec_file.write_text(
         "---\nstatus: ready\nrepo: ~\n---\n## Problem\n\nTest.\n",
         encoding="utf-8",
     )
 
-    exit_code, data = invoke(["plan_done", "my-spec", "--dir", str(tmp_path)])
+    exit_code, data = invoke(["rptor_done", "my-spec", "--dir", str(tmp_path)])
 
     assert exit_code == 0
     assert data["ok"] is True
@@ -358,13 +369,25 @@ def test_plan_done_updates_status(tmp_path):
     assert "status: done" in text
 
 
-def test_plan_done_missing_spec(tmp_path):
-    """mtor plan done for missing spec returns SPEC_NOT_FOUND error."""
-    exit_code, data = invoke(["plan_done", "nonexistent", "--dir", str(tmp_path)])
+def test_rptor_done_missing_spec(tmp_path):
+    """mtor rptor done for missing spec returns SPEC_NOT_FOUND error."""
+    exit_code, data = invoke(["rptor_done", "nonexistent", "--dir", str(tmp_path)])
 
     assert exit_code == 1
     assert data["ok"] is False
     assert data["error"]["code"] == "SPEC_NOT_FOUND"
+
+
+def test_plan_done_hidden_alias_still_runs(tmp_path):
+    """mtor plan_done remains a transition alias for mtor rptor_done."""
+    spec_file = tmp_path / "my-spec.md"
+    spec_file.write_text("---\nstatus: ready\nrepo: ~\n---\n", encoding="utf-8")
+
+    exit_code, data = invoke(["plan_done", "my-spec", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    assert data["command"] == "mtor rptor done my-spec"
+    assert "status: done" in spec_file.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +399,7 @@ def test_scope_injected_into_prompt(tmp_path):
     """_inject_spec_constraints appends scope CONSTRAINT to prompt."""
     spec_file = tmp_path / "scope-spec.md"
     spec_file.write_text(
-        "---\nstatus: ready\nscope:\n  - mtor/plan.py\n  - mtor/cli.py\nexclude:\n  - genome.md\n---\n",
+        "---\nstatus: ready\nscope:\n  - mtor/rptor.py\n  - mtor/cli.py\nexclude:\n  - genome.md\n---\n",
         encoding="utf-8",
     )
 
@@ -386,7 +409,7 @@ def test_scope_injected_into_prompt(tmp_path):
         prompt_for_cmd="Write the plan module.",
     )
 
-    assert "CONSTRAINT: Only modify mtor/plan.py, mtor/cli.py." in result
+    assert "CONSTRAINT: Only modify mtor/rptor.py, mtor/cli.py." in result
     assert "Do NOT modify: genome.md." in result
 
 
@@ -394,7 +417,7 @@ def test_tests_injected_into_prompt(tmp_path):
     """_inject_spec_constraints appends test run + functions to prompt."""
     spec_file = tmp_path / "test-spec.md"
     spec_file.write_text(
-        "---\nstatus: ready\ntests:\n  run: cd ~/code/mtor && python -m pytest assays/test_plan.py -v\n  functions:\n    - parse_spec\n    - scan_specs\n---\n",
+        "---\nstatus: ready\ntests:\n  run: cd ~/code/mtor && python -m pytest assays/test_rptor.py -v\n  functions:\n    - parse_spec\n    - scan_specs\n---\n",
         encoding="utf-8",
     )
 
@@ -404,7 +427,7 @@ def test_tests_injected_into_prompt(tmp_path):
         prompt_for_cmd="Build the feature.",
     )
 
-    assert "Run: cd ~/code/mtor && python -m pytest assays/test_plan.py -v" in result
+    assert "Run: cd ~/code/mtor && python -m pytest assays/test_rptor.py -v" in result
     assert "Verify test functions:" in result
     assert "test_parse_spec" in result
     assert "test_scan_specs" in result

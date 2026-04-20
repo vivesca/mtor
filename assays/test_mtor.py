@@ -157,7 +157,7 @@ class TestBareInvocation:
             "mtor status <workflow_id>",
             "mtor logs <workflow_id>",
             "mtor cancel <workflow_id>",
-            "mtor doctor",
+            "mtor tsc",
             "mtor schema",
         ]:
             first_word = expected.split()[0]
@@ -174,6 +174,16 @@ class TestBareInvocation:
             assert any(expected in name for name in cmd_names), (
                 f"Missing command containing '{expected}'. Available: {cmd_names}"
             )
+
+    def test_bio_command_aliases_hidden(self):
+        """Transition aliases remain callable but hidden from command metadata."""
+        for visible, hidden in [
+            ("tsc", "doctor"),
+            ("rptor", "plan"),
+            ("ragulator", "watch"),
+        ]:
+            assert app._registered_commands[visible].show is True
+            assert app._registered_commands[hidden].show is False
 
 
 class TestHelpSuppression:
@@ -216,7 +226,7 @@ class TestExitCodes:
 
     def test_temporal_unreachable_exits_3(self):
         with _patch_client_error("Connection refused"):
-            exit_code, data = invoke(["doctor"])
+            exit_code, data = invoke(["tsc"])
         assert exit_code == 3
         assert data["ok"] is False
 
@@ -274,7 +284,7 @@ class TestDispatch:
         test_cases = [
             [],
             ["schema"],
-            ["doctor"],
+            ["tsc"],
         ]
         with _patch_client(mock_client):
             for args in test_cases:
@@ -420,14 +430,14 @@ class TestCancel:
 class TestDoctor:
     def test_doctor_unreachable_temporal_exits_3(self):
         with _patch_client_error("Connection refused"):
-            exit_code, data = invoke(["doctor"])
+            exit_code, data = invoke(["tsc"])
         assert exit_code == 3
         assert data["ok"] is False
         assert "fix" in data
 
     def test_doctor_has_checks_list(self):
         with _patch_client_error("Connection refused"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         # Even failed doctor has checks in result
         assert "result" in data
         assert "checks" in data["result"]
@@ -435,7 +445,7 @@ class TestDoctor:
     def test_doctor_success(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            _exit_code, data = invoke(["doctor"])
+            _exit_code, data = invoke(["tsc"])
         # May still fail if coaching file missing, but should be JSON
         assert isinstance(data, dict)
         assert "result" in data
@@ -444,7 +454,7 @@ class TestDoctor:
         """worker_host check fails when MTOR_WORKER_HOST is localhost."""
         with _patch_client_error("Connection refused"), \
              patch("mtor.doctor.WORKER_HOST", "localhost"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         checks = data["result"]["checks"]
         wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
         assert wh_check is not None, f"worker_host check not found in {checks}"
@@ -456,7 +466,7 @@ class TestDoctor:
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client), \
              patch("mtor.doctor.WORKER_HOST", "ganglion"):
-            _, data = invoke(["doctor"])
+            _, data = invoke(["tsc"])
         checks = data["result"]["checks"]
         wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
         assert wh_check is not None, f"worker_host check not found in {checks}"
@@ -507,7 +517,7 @@ class TestEnvelopeInvariants:
             outputs.append(invoke(["status", "ribosome-test1234"]))
 
         with _patch_client_error("refused"):
-            outputs.append(invoke(["doctor"]))
+            outputs.append(invoke(["tsc"]))
             outputs.append(invoke(["status", "any"]))
             outputs.append(invoke(["cancel", "any"]))
 

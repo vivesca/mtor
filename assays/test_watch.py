@@ -1,4 +1,4 @@
-"""Tests for mtor watch command — polling sync_from_ganglion.
+"""Tests for mtor ragulator command — polling sync_from_ganglion.
 
 Runs via: cd ~/code/mtor && uv run pytest assays/test_watch.py -v
 """
