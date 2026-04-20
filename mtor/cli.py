@@ -811,6 +811,47 @@ def cancel(workflow_id: str) -> None:
     _terminate_workflow(workflow_id, "mtor cancel")
 
 
+@app.command(name="batch-cancel")
+def batch_cancel(
+    *,
+    query: str,
+    reason: str = "batch cleanup via mtor",
+) -> None:
+    """Cancel all workflows matching a Temporal visibility query.
+
+    Example: mtor batch-cancel --query "ExecutionStatus = 'Running' AND StartTime < '2026-04-06'"
+    """
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                "mtor batch-cancel",
+                f"Cannot connect: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "mtor doctor",
+                exit_code=3,
+            )
+        )
+
+    async def _do_batch():
+        count = 0
+        cancelled = 0
+        async for wf in client.list_workflows(query=query):
+            count += 1
+            with contextlib.suppress(Exception):
+                handle = client.get_workflow_handle(wf.id)
+                await handle.cancel()
+                cancelled += 1
+        return count, cancelled
+
+    total, done = asyncio.run(_do_batch())
+    _ok(
+        "mtor batch-cancel",
+        {"query": query, "matched": total, "cancelled": done, "reason": reason},
+        version=VERSION,
+    )
+
+
 def _terminate_workflow(workflow_id: str, cmd: str) -> None:
     """Shared terminate logic for both cancel and terminate commands."""
     client, err = _get_client()
