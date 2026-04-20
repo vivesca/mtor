@@ -790,7 +790,17 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     # unexpanded value here crashes the activity with FileNotFoundError before
     # any log is written.
     if repo:
-        repo_root = str(Path(repo).expanduser())
+        resolved = Path(repo).expanduser()
+        # Defensive: bare names like "terryli-hm" survive expanduser unchanged.
+        # Resolve to ~/code/<name> or ~/<name> before using as subprocess cwd.
+        if not resolved.is_absolute():
+            for candidate in [Path.home() / "code" / repo, Path.home() / repo]:
+                if candidate.is_dir():
+                    resolved = candidate
+                    break
+            else:
+                resolved = Path(repo).resolve()
+        repo_root = str(resolved)
     else:
         repo_root = _detect_repo(task, str(Path.home() / "germline"))
 
