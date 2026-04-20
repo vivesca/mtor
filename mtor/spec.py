@@ -26,6 +26,11 @@ CANONICAL_FIELDS = {
     "dispatched",
     "type",
     "target",
+    "created",
+    "revised",
+    "goal",
+    "name",
+    "description",
     "blocked_by",
 }
 
