@@ -6,6 +6,116 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+
+CANONICAL_FIELDS = {
+    "status",
+    "scope",
+    "repo",
+    "priority",
+    "depends_on",
+    "dispatched_at",
+    "workflow_id",
+    "completed_at",
+    "verdict",
+    "tests",
+    "exclude",
+}
+
+VALID_STATUSES = {"ready", "dispatched", "done", "blocked", "abandoned"}
+REQUIRED_FIELDS = {"status", "scope"}
+DEFAULT_SPEC_DIR = Path("~/epigenome/chromatin/loci/plans/")
+
+
+def _frontmatter_keys(text: str) -> set[str]:
+    fm_match = re.match(r"^---\n(.*?)\n---\n?", text, re.DOTALL)
+    if not fm_match:
+        return set()
+
+    keys: set[str] = set()
+    for raw_line in fm_match.group(1).splitlines():
+        if raw_line[:1].isspace():
+            continue
+        match = re.match(r"^(\w+):", raw_line.strip())
+        if match:
+            keys.add(match.group(1))
+    return keys
+
+
+def _normalize_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item != "[]"]
+    if value is None or value == "" or value == "[]":
+        return []
+    return [str(value)]
+
+
+def _validate_one_spec(spec: dict[str, Any], spec_names: set[str]) -> list[str]:
+    path = Path(spec["path"])
+    text = path.read_text(encoding="utf-8")
+    keys = _frontmatter_keys(text)
+    errors: list[str] = []
+
+    if not keys:
+        return [f"{path}: missing YAML frontmatter"]
+
+    for key in sorted(keys - CANONICAL_FIELDS):
+        errors.append(f"{path}: unknown frontmatter field '{key}'")
+
+    for field in sorted(REQUIRED_FIELDS - keys):
+        errors.append(f"{path}: missing required frontmatter field '{field}'")
+
+    if "status" in keys:
+        status = str(spec.get("status", ""))
+        if status not in VALID_STATUSES:
+            allowed = ", ".join(sorted(VALID_STATUSES))
+            errors.append(f"{path}: invalid status '{status}' (expected one of: {allowed})")
+
+    for dep in _normalize_list(spec.get("depends_on", [])):
+        if dep not in spec_names:
+            errors.append(f"{path}: depends_on target '{dep}' does not exist")
+
+    return errors
+
+
+def validate_spec(path: Path | None = None) -> list[str]:
+    """Validate one spec file or every spec in the default plan directory."""
+    from mtor.rptor import CycleDetected, parse_spec, resolve_dag, scan_specs
+
+    errors: list[str] = []
+    target = path.expanduser() if path is not None else None
+    directory = target.parent if target is not None else DEFAULT_SPEC_DIR.expanduser()
+
+    if target is not None and not target.is_file():
+        return [f"{target}: spec file not found"]
+    if target is None and not directory.is_dir():
+        return [f"{directory}: spec directory not found"]
+
+    specs = scan_specs(directory)
+    if target is not None:
+        resolved_target = target.resolve()
+        if not any(Path(spec["path"]).resolve() == resolved_target for spec in specs):
+            specs.append(parse_spec(target))
+
+    spec_names = {spec["name"] for spec in specs}
+    selected = [
+        spec
+        for spec in specs
+        if target is None or Path(spec["path"]).resolve() == target.resolve()
+    ]
+
+    for spec in selected:
+        errors.extend(_validate_one_spec(spec, spec_names))
+
+    try:
+        resolve_dag(specs)
+    except CycleDetected as exc:
+        selected_names = {Path(spec["path"]).stem for spec in selected}
+        if target is None or selected_names.intersection(exc.cycle):
+            errors.append(f"{directory}: {exc}")
+
+    return errors
 
 
 def update_spec_status(
@@ -96,6 +206,7 @@ def scaffold_spec(
     repo: str = "~",
     scope: list[str] | None = None,
     exclude: list[str] | None = None,
+    template: str = "legacy",
 ) -> Path:
     """Scaffold a new spec file with YAML frontmatter.
 
@@ -103,7 +214,7 @@ def scaffold_spec(
     - Fields: status, repo, scope (YAML list), exclude (YAML list)
     - genome.md and uv.lock are always in exclude (merged with user values)
     - Title is kebab-case → Title Case (mtor-archive-command → Mtor Archive Command)
-    - Template body with ## Problem, ## Implementation, ## Tests, ## Non-goals
+    - Template body with spec sections
     - Raises FileExistsError if path already exists
     - Returns absolute path
     """
@@ -114,6 +225,31 @@ def scaffold_spec(
 
     # Title: kebab-case → Title Case
     title = " ".join(word.capitalize() for word in name.split("-"))
+
+    if template == "plan":
+        scope_value = scope[0] if scope else "mtor"
+        body_title = name
+        text = f"""---
+status: done
+scope: {scope_value}
+repo: {repo}
+priority: medium
+depends_on: []
+---
+
+# {body_title}
+
+## Problem
+
+## Fix
+
+## Test
+
+## Files to edit
+"""
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(text, encoding="utf-8")
+        return resolved
 
     # Build frontmatter as plain string
     lines = [

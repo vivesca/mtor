@@ -53,7 +53,7 @@ from mtor.triage import (
     review_ids,
 )
 from mtor.tree import tree
-from mtor.spec import scaffold_spec, update_spec_status
+from mtor.spec import DEFAULT_SPEC_DIR, scaffold_spec, update_spec_status, validate_spec
 from mtor.infra import check_health as _check_health, clean as _clean, deploy as _deploy
 from mtor.watch import (
     freeze as _create_freeze,
@@ -189,6 +189,9 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
 
 app = App(help_flags=[], version_flags=[])
 
+spec_app = App(name="spec", help_flags=[], version_flags=[])
+app.command(spec_app)
+
 
 @app.default
 def default_handler(
@@ -215,6 +218,14 @@ def default_handler(
     # itself a file path, which is not the case on the `--spec` code path.
     if spec is not None:
         import re as _re
+
+        _frontmatter_errors = validate_spec(spec)
+        if _frontmatter_errors:
+            cmd = f"mtor --spec {spec}"
+            msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _frontmatter_errors)
+            sys.exit(
+                _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+            )
 
         spec_contents = spec.read_text(encoding="utf-8").strip()
         spec_contents = _re.sub(
@@ -258,7 +269,7 @@ def default_handler(
                     exit_code=1,
                 )
             )
-        # Spec validation gate — tests field required, no bypass
+        # Spec dispatch-readiness gate — tests field required, no bypass
         if spec is not None:
             from mtor.dispatch import validate_spec as _validate_spec
             _repo = Path.home() / "code" / "mtor"
@@ -1469,6 +1480,53 @@ def archive(
         [_action("mtor riboseq", "View updated list")],
         version=VERSION,
     )
+
+
+@spec_app.command(name="new")
+def spec_new(
+    name: str,
+    *,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_SPEC_DIR,
+) -> None:
+    """Create a plan spec with the canonical frontmatter template."""
+    import os
+    import shlex
+
+    out_path = (dir.expanduser() / name).with_suffix(".md")
+    try:
+        created_path = scaffold_spec(
+            name=name,
+            path=out_path,
+            repo="~/code/mtor",
+            scope=["mtor"],
+            template="plan",
+        )
+    except FileExistsError as exc:
+        sys.exit(
+            _err(
+                f"mtor spec new {name}",
+                str(exc),
+                "SPEC_EXISTS",
+                f"Remove or rename {out_path} before scaffolding",
+                [_action(f"ls -la {out_path}", "Inspect existing file")],
+                exit_code=1,
+            )
+        )
+
+    print(created_path)
+    editor = os.environ.get("EDITOR")
+    if editor:
+        subprocess.run([*shlex.split(editor), str(created_path)], check=False)
+
+
+@spec_app.command(name="validate")
+def spec_validate(path: Path | None = None) -> None:
+    """Validate one spec or every spec in the plan directory."""
+    errors = validate_spec(path)
+    for error in errors:
+        print(error)
+    if errors:
+        sys.exit(1)
 
 
 @app.command
