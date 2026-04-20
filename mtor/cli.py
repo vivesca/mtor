@@ -20,7 +20,6 @@ import contextlib
 import subprocess
 import sys
 import time
-from datetime import UTC
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -1265,25 +1264,22 @@ def deploy() -> None:
     _ok("mtor deploy", {"steps": steps, "healthy": True}, version=VERSION)
 
 
-@app.command(name="polysome")
+@app.command(name="polysome", show=False)
+def polysome() -> None:
+    """Alias for stats command (polysome is multiple ribosomes = multiple stats)."""
+    return stats()
+
+@app.command
 def stats() -> None:
     """Show dispatch statistics: today's verdicts, running count, weekly totals."""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     client, err = _get_client()
     if err:
-        sys.exit(
-            _err(
-                "mtor polysome",
-                f"Cannot connect: {err}",
-                "TEMPORAL_UNREACHABLE",
-                "mtor tsc",
-                exit_code=3,
-            )
-        )
+        sys.exit(_err("mtor stats", f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
 
-    today = datetime.now(UTC).strftime("%Y-%m-%dT00:00:00Z")
-    week_ago = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async def _count(query: str) -> int:
         return await client.count_workflows(query=query)
@@ -1303,7 +1299,7 @@ def stats() -> None:
         except Exception:
             counts[name] = -1
 
-    _ok("mtor polysome", {"counts": counts}, version=VERSION)
+    _ok("mtor stats", {"counts": counts}, version=VERSION)
 
 
 @app.command
