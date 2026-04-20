@@ -23,10 +23,14 @@ CANONICAL_FIELDS = {
     "tests",
     "exclude",
     "files",
+    "dispatched",
+    "type",
+    "target",
+    "blocked_by",
 }
 
 VALID_STATUSES = {"ready", "dispatched", "done", "blocked", "abandoned", "failed", "stale", "queued"}
-REQUIRED_FIELDS = {"status", "scope"}
+REQUIRED_FIELDS = {"status"}
 DEFAULT_SPEC_DIR = Path("~/epigenome/chromatin/loci/plans/")
 
 
