@@ -119,19 +119,10 @@ class TranslationWorkflow:
             }
             review = {"approved": False, "flags": ["activity_failed"], "verdict": "rejected"}
 
-        # #5: If flagged, wait for approval signal (timeout 1h, auto-approve)
-        if review.get("verdict") == "approved_with_flags":
-            task_id = spec.get("task", "")[:50]
-            try:
-                await workflow.wait_condition(
-                    lambda: task_id in self._approval_signals,
-                    timeout=timedelta(hours=1),
-                )
-                decision = self._approval_signals.get(task_id, "approve")
-                if decision == "reject":
-                    review = {**review, "approved": False, "verdict": "rejected_by_signal"}
-            except TimeoutError:
-                pass  # auto-approve after 1h
+        # #5: If flagged, log flags but proceed immediately.
+        # approved_with_flags means chaperone approved with non-fatal flags —
+        # no reason to block. Flags are already logged in the review JSONL.
+        # (Previously blocked 1h waiting for a signal nobody sends — zombie root cause.)
 
         # Wire use_review_v2: pass output_path in review for new executions
         # so dispatch can log it.  Old replays keep current behavior (no output_path).
@@ -144,7 +135,7 @@ class TranslationWorkflow:
                 merge_result = await workflow.execute_activity(
                     merge_approved,
                     args=[{
-                        "repo_root": str(Path.home() / "germline"),
+                        "repo_root": spec.get("repo", str(Path.home() / "germline")),
                         "branch_name": result["branch_name"],
                     }],
                     start_to_close_timeout=timedelta(minutes=2),
@@ -358,7 +349,7 @@ class WatchWorkflow:
                 break
 
             # --- sleep until next cycle ---
-            await asyncio.sleep(interval_seconds)
+            await workflow.sleep(interval_seconds)
 
         return {
             "cycles": cycle,
