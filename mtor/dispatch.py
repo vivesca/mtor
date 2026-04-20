@@ -274,10 +274,11 @@ def _dispatch_prompt(
         import asyncio
 
         # Deterministic ID — Temporal rejects if already running (dedup)
-        workflow_id = _make_workflow_id(full_prompt, provider or "zhipu", harness=harness)
+        resolved_provider = provider or _resolve_default_provider(spec_mode)
+        workflow_id = _make_workflow_id(full_prompt, resolved_provider, harness=harness)
         spec = {
             "task": full_prompt,
-            "provider": provider,
+            "provider": resolved_provider,
             "mode": spec_mode,
             "risk": classify_risk(full_prompt),
             "harness": harness,
@@ -339,7 +340,7 @@ def _dispatch_prompt(
             "prompt_preview": prompt[:100],
             "risk": classify_risk(full_prompt),
         }
-        result_envelope["provider"] = provider or _resolve_default_provider(spec_mode)
+        result_envelope["provider"] = resolved_provider
         if spec_mode == "experiment":
             result_envelope["experiment"] = True
         if spec_mode == "scout":

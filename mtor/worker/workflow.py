@@ -147,7 +147,7 @@ class TranslationWorkflow:
         return {
             **result,
             "review": review,
-            "mode": "raw",
+            "mode": dispatch_mode,
             "requeue_prompt": review.get("requeue_prompt", ""),
         }
 

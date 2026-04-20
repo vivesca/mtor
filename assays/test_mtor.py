@@ -931,6 +931,17 @@ class TestScoutMode:
         spec = call_kwargs["args"][0][0]
         assert spec["provider"] == "droid"
 
+    def test_scout_defaults_provider_in_spec(self):
+        """Scout command stores the resolved default provider in the workflow spec."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["scout", "--no-wait", "Explore codebase"])
+        assert exit_code == 0
+        assert data["result"]["provider"] == "zhipu"
+        call_kwargs = mock_client.start_workflow.call_args.kwargs
+        spec = call_kwargs["args"][0][0]
+        assert spec["provider"] == "zhipu"
+
     def test_scout_no_experiment_flag(self):
         """Scout result does NOT have experiment flag."""
         mock_client, _ = make_mock_client()
