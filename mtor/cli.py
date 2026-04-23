@@ -271,7 +271,9 @@ def default_handler(
         # Spec dispatch-readiness gate — tests field required, no bypass
         if spec is not None:
             from mtor.dispatch import validate_spec as _validate_spec
-            _repo = Path.home() / "code" / "mtor"
+            from mtor.rptor import parse_spec as _parse_spec
+            _spec_data = _parse_spec(spec)
+            _repo = Path(_spec_data.get("repo", ".")).expanduser()
             _spec_errors = _validate_spec(spec, _repo)
             if _spec_errors:
                 cmd = f"mtor --spec {spec}"
