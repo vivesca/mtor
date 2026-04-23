@@ -129,6 +129,18 @@ class TranslationWorkflow:
         if use_review_v2:
             review = {**review, "output_path": result.get("output_path", "")}
 
+        # Upsert verdict search attribute if available
+        if review.get("verdict"):
+            from temporalio.common import SearchAttributeKey, SearchAttributePair
+
+            workflow.upsert_search_attributes(
+                [
+                    SearchAttributePair(
+                        SearchAttributeKey.for_keyword("mtor_verdict"), review["verdict"]
+                    ),
+                ]
+            )
+
         # Merge to main only after chaperone approves (verdict gate)
         if review.get("approved") and result.get("branch_name"):
             try:

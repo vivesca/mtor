@@ -258,3 +258,37 @@ def clean(
                 result.errors.append(f"{f}: {exc}")
 
     return result
+
+
+async def setup_search_attributes() -> dict[str, object]:
+    """Register custom search attributes on the Temporal server."""
+    from temporalio.api.enums.v1 import IndexedValueType
+    from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
+
+    from mtor.client import _get_client
+
+    client, err = _get_client()
+    if err:
+        raise RuntimeError(f"Cannot connect to Temporal: {err}")
+
+    # Attributes to register
+    attrs = {
+        "mtor_provider": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "mtor_verdict": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "mtor_mode": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "mtor_spec": IndexedValueType.INDEXED_VALUE_TYPE_TEXT,
+        "mtor_risk": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+    }
+
+    try:
+        await client.operator_service.add_search_attributes(
+            AddSearchAttributesRequest(
+                namespace="default",
+                search_attributes=attrs,
+            )
+        )
+        return {"status": "success", "attributes": list(attrs.keys())}
+    except Exception as exc:
+        if "already exists" in str(exc).lower():
+            return {"status": "already_registered", "attributes": list(attrs.keys())}
+        raise

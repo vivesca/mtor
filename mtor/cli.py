@@ -307,7 +307,7 @@ def default_handler(
         )
 
 
-@app.command(name="riboseq")
+@app.command(name=["riboseq", "list"])
 def list_cmd(
     *,
     status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"] | None = None,
@@ -317,6 +317,7 @@ def list_cmd(
     all_: Annotated[bool, Parameter(name=["--all"])] = False,
     provider_filter: Annotated[str | None, Parameter(name=["--provider"])] = None,
     verdict_filter: Annotated[str | None, Parameter(name=["--verdict"])] = None,
+    mode_filter: Annotated[str | None, Parameter(name=["--mode"])] = None,
     archived: Annotated[bool, Parameter(name=["--archived"])] = False,
 ) -> None:
     """List recent workflows. --since N shows last N hours only. --archived prints archived IDs from triage.json."""
@@ -362,6 +363,15 @@ def list_cmd(
 
             cutoff = datetime.now(UTC) - timedelta(hours=since)
             query_parts.append(f"StartTime > '{cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}'")
+
+        # Temporal Search Attribute filters
+        if provider_filter:
+            query_parts.append(f"mtor_provider = '{provider_filter}'")
+        if verdict_filter:
+            query_parts.append(f"mtor_verdict = '{verdict_filter}'")
+        if mode_filter:
+            query_parts.append(f"mtor_mode = '{mode_filter}'")
+
         query_filter = " AND ".join(query_parts) if query_parts else ""
 
         async def _list():
@@ -408,9 +418,7 @@ def list_cmd(
             if wf_id in verdict_overrides:
                 sa_verdict = verdict_overrides[wf_id]
 
-            # Filter by --provider / --verdict search attributes
-            if provider_filter and sa_provider != provider_filter:
-                continue
+            # Filters are now handled by Temporal query, but local overrides might change verdict
             if verdict_filter and sa_verdict != verdict_filter:
                 continue
 
@@ -2294,6 +2302,19 @@ def clean(
     cmd = "mtor rictor clean"
     result = _clean(older_than_days=older_than_days)
     _ok(cmd, result.to_dict(), version=VERSION)
+
+
+@rictor_app.command(name="setup-search-attrs")
+def setup_search_attrs() -> None:
+    """Register custom search attributes on the Temporal server."""
+    from mtor.infra import setup_search_attributes
+
+    cmd = "mtor rictor setup-search-attrs"
+    try:
+        result = asyncio.run(setup_search_attributes())
+        _ok(cmd, result, version=VERSION)
+    except Exception as exc:
+        sys.exit(_err(cmd, str(exc), "SETUP_ERROR", "Check Temporal server health"))
 
 
 @app.command

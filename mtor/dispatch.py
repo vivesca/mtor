@@ -317,8 +317,23 @@ def _dispatch_prompt(
                         resolved = Path(repo).resolve()
                 spec["repo"] = str(resolved)
 
+        from temporalio.common import (
+            SearchAttributeKey,
+            SearchAttributePair,
+            TypedSearchAttributes,
+            WorkflowIDConflictPolicy,
+            WorkflowIDReusePolicy,
+        )
+
+        search_attrs = [
+            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_provider"), resolved_provider),
+            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_mode"), spec_mode),
+            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_risk"), classify_risk(full_prompt)),
+        ]
+        if spec_path:
+            search_attrs.append(SearchAttributePair(SearchAttributeKey.for_text("mtor_spec"), str(spec_path)))
+
         async def _start():
-            from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
             handle = await client.start_workflow(
                 WORKFLOW_TYPE,
                 args=[[spec]],
@@ -326,6 +341,7 @@ def _dispatch_prompt(
                 task_queue=TASK_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
                 id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                search_attributes=TypedSearchAttributes(search_attrs),
             )
             return handle.id
 
