@@ -186,7 +186,7 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
 # Cyclopts CLI
 # ---------------------------------------------------------------------------
 
-app = App(help_flags=[], version_flags=[])
+app = App(help_flags=["--help", "-h"], version_flags=[])
 
 spec_app = App(name="spec", help_flags=[], version_flags=[])
 app.command(spec_app)
@@ -241,68 +241,92 @@ def default_handler(
         else:
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
-    else:
-        # Freeze check — block dispatch when frozen (deptor lock)
-        if _is_frozen():
-            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
-            sys.exit(
-                _err(
-                    cmd,
-                    "Dispatching is frozen. Use 'mtor dedeptor' to unfreeze.",
-                    "FROZEN",
-                    "Run: mtor dedeptor",
-                    [_action("mtor dedeptor", "Unfreeze dispatching")],
-                    exit_code=1,
-                )
-            )
-        # Pause check — block dispatch when paused
-        if _is_paused():
-            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
-            sys.exit(
-                _err(
-                    cmd,
-                    "Dispatching is paused. Use 'mtor derapa' to resume.",
-                    "PAUSED",
-                    "Run: mtor derapa",
-                    [_action("mtor derapa", "Resume dispatching")],
-                    exit_code=1,
-                )
-            )
-        # Spec dispatch-readiness gate — tests field required, no bypass
-        if spec is not None:
-            from mtor.dispatch import validate_spec as _validate_spec
-            _repo = Path.home() / "code" / "mtor"
-            _spec_errors = _validate_spec(spec, _repo)
-            if _spec_errors:
-                cmd = f"mtor --spec {spec}"
-                msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _spec_errors)
-                sys.exit(
-                    _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
-                )
 
-        # Dedup check — block identical dispatches within 5-minute window
-        # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
-        dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
-        if dup_key is not None:
-            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
-            sys.exit(
-                _err(
-                    cmd,
-                    f"Duplicate dispatch blocked (key={dup_key}). Same prompt dispatched within the last 5 minutes.",
-                    "DEDUP_BLOCKED",
-                    "Wait a few minutes or change the prompt/spec to dispatch again.",
-                    [_action("mtor riboseq", "View running workflows")],
-                    exit_code=1,
-                )
+    # Prompt quality guard — reject too-short or subcommand-like prompts
+    _SUBCOMMAND_NAMES = frozenset({
+        "riboseq", "status", "logs", "cancel", "terminate", "schema",
+        "scout", "research", "scan", "doctor", "tsc", "rptor",
+        "approve", "deny", "reactivate", "rapa", "derapa",
+        "deptor", "dedeptor", "auto", "verdict", "review",
+        "archive", "autophagy", "init", "ragulator", "rictor",
+    })
+    stripped = prompt.strip()
+    if len(stripped) < 10 or stripped.lower() in _SUBCOMMAND_NAMES:
+        cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+        sys.exit(
+            _err(
+                cmd,
+                f"Prompt too short or matches a subcommand name ({len(stripped)} chars, minimum 10). "
+                "Provide a meaningful task description.",
+                "PROMPT_TOO_SHORT",
+                "Provide a prompt ≥10 characters that describes the task. "
+                "Use 'mtor --help' to see available commands.",
+                [_action("mtor --help", "Show available commands")],
+                exit_code=2,
             )
-        _dispatch_prompt(
-            prompt,
-            provider=provider,
-            experiment=experiment,
-            skip_sha_check=skip_sha_check,
-            chain=then,
-            spec_path=spec,
         )
+
+    # Freeze check — block dispatch when frozen (deptor lock)
+    if _is_frozen():
+        cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+        sys.exit(
+            _err(
+                cmd,
+                "Dispatching is frozen. Use 'mtor dedeptor' to unfreeze.",
+                "FROZEN",
+                "Run: mtor dedeptor",
+                [_action("mtor dedeptor", "Unfreeze dispatching")],
+                exit_code=1,
+            )
+        )
+    # Pause check — block dispatch when paused
+    if _is_paused():
+        cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+        sys.exit(
+            _err(
+                cmd,
+                "Dispatching is paused. Use 'mtor derapa' to resume.",
+                "PAUSED",
+                "Run: mtor derapa",
+                [_action("mtor derapa", "Resume dispatching")],
+                exit_code=1,
+            )
+        )
+    # Spec dispatch-readiness gate — tests field required, no bypass
+    if spec is not None:
+        from mtor.dispatch import validate_spec as _validate_spec
+        _repo = Path.home() / "code" / "mtor"
+        _spec_errors = _validate_spec(spec, _repo)
+        if _spec_errors:
+            cmd = f"mtor --spec {spec}"
+            msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _spec_errors)
+            sys.exit(
+                _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+            )
+
+    # Dedup check — block identical dispatches within 5-minute window
+    # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
+    dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
+    if dup_key is not None:
+        cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+        sys.exit(
+            _err(
+                cmd,
+                f"Duplicate dispatch blocked (key={dup_key}). Same prompt dispatched within the last 5 minutes.",
+                "DEDUP_BLOCKED",
+                "Wait a few minutes or change the prompt/spec to dispatch again.",
+                [_action("mtor riboseq", "View running workflows")],
+                exit_code=1,
+            )
+        )
+    _dispatch_prompt(
+        prompt,
+        provider=provider,
+        experiment=experiment,
+        skip_sha_check=skip_sha_check,
+        chain=then,
+        spec_path=spec,
+    )
 
 
 @app.command(name="riboseq")
