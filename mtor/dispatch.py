@@ -154,9 +154,14 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     if local.stdout.strip() == remote.stdout.strip():
         return True
 
-    # Auto-deploy: push + merge + restart
+    # Auto-deploy: push + merge + restart.
+    # Use -C to pin git context to ~/germline regardless of caller cwd —
+    # otherwise dispatching from a non-`main` repo (e.g. quorate on master)
+    # fails with bogus "src refspec main does not match any".
+    germline_dir = str(Path.home() / "germline")
     push = subprocess.run(
-        ["git", "push", WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
+        ["git", "-C", germline_dir, "push",
+         WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
         capture_output=True, text=True, timeout=120,
     )
     if push.returncode != 0:
