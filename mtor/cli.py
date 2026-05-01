@@ -2160,7 +2160,7 @@ def check() -> None:
     _ok(cmd, result, next_actions, version=VERSION)
 
 
-@rictor_app.command
+@rictor_app.command(name="deploy")
 def rictor_deploy() -> None:
     """Sync code to worker, restart services, verify health."""
     cmd = "mtor rictor deploy"
