@@ -35,6 +35,44 @@ class ProbeResult:
     ok: bool
     latency_ms: float | None
     detail: str
+    classification: str = "unknown"  # ok|auth|billing|quota|connection|unknown
+
+
+def _classify_response_error(http_status: int | None, body: str) -> str:
+    """Classify a provider HTTP error into actionable categories.
+
+    First-match-wins ordering: status code beats body pattern, billing beats auth
+    when both match (404 with billing message → billing).
+
+    Args:
+        http_status: HTTP status code, or None for connection-level failures.
+        body: Response body or error message.
+
+    Returns:
+        One of: "auth", "billing", "quota", "connection", "unknown".
+    """
+    body_lc = (body or "").lower()
+    # Chinese billing patterns from zhipu / volcano
+    if any(token in body for token in ("套餐", "已到期", "请续费", "已用完")):
+        return "billing"
+    # English billing patterns
+    if any(token in body_lc for token in ("subscription expired", "plan expired", "renew your plan", "billing required", "credit expired", "payment required")):
+        return "billing"
+    # Auth patterns (key-related, not billing)
+    if any(token in body_lc for token in ("invalid api key", "invalid key", "unauthorized", "api key invalid", "authentication parameter not received", "key is invalid")):
+        return "auth"
+    # Status-code dispatch
+    if http_status == 401:
+        return "auth"
+    if http_status == 402:
+        return "billing"
+    if http_status == 429:
+        return "quota"
+    if http_status == 403:
+        return "auth"  # often credential-scope rejection
+    if http_status is None:
+        return "connection"
+    return "unknown"
 
 
 def _probe_provider(provider: str) -> ProbeResult:
@@ -68,6 +106,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=f"{key_envvar} not set",
+            classification="auth",
         )
 
     payload = {
@@ -97,13 +136,27 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=True,
             latency_ms=round(latency_ms, 1),
             detail=f"OK ({latency_ms:.0f}ms)",
+            classification="ok",
         )
     except urllib.error.HTTPError as exc:
+        body_text = ""
+        try:
+            body_bytes = exc.read()
+            body_text = body_bytes.decode("utf-8", errors="replace")[:500]
+        except Exception:
+            body_text = ""
+        classification = _classify_response_error(exc.code, body_text)
+        # Surface body snippet in detail when it's the diagnostic signal
+        body_hint = ""
+        if body_text and classification in ("billing", "auth", "quota"):
+            stripped = body_text.strip().replace("\n", " ")[:120]
+            body_hint = f" — {stripped}"
         return ProbeResult(
             provider=provider,
             ok=False,
             latency_ms=None,
-            detail=f"HTTP {exc.code}: {exc.reason}",
+            detail=f"HTTP {exc.code}: {exc.reason}{body_hint}",
+            classification=classification,
         )
     except urllib.error.URLError as exc:
         return ProbeResult(
@@ -111,6 +164,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=f"Network error: {exc.reason}",
+            classification="connection",
         )
     except TimeoutError:
         return ProbeResult(
@@ -118,6 +172,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail="Timeout (15s)",
+            classification="connection",
         )
     except Exception as exc:
         return ProbeResult(
@@ -125,6 +180,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=str(exc),
+            classification="unknown",
         )
 
 
@@ -353,12 +409,13 @@ def doctor() -> None:
                 "ok": pr.ok,
                 "latency_ms": pr.latency_ms,
                 "detail": pr.detail,
+                "classification": pr.classification,
             }
         all_probes_ok = all(pr.ok for pr in probe_threads_results)
         if not all_probes_ok:
             all_ok = False
         probe_detail = ", ".join(
-            f"{pr.provider}: {pr.detail}" for pr in probe_threads_results
+            f"{pr.provider}: [{pr.classification}] {pr.detail}" for pr in probe_threads_results
         )
         checks.append(
             {
