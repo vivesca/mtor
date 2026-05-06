@@ -477,8 +477,13 @@ def list_cmd(
 
 
 @app.command
-def status(workflow_id: str) -> None:
-    """Query status of a single workflow."""
+def status(workflow_id: str, short: bool = False) -> None:
+    """Query status of a single workflow.
+
+    Args:
+        workflow_id: Workflow identifier.
+        short: Emit one-line `STATUS | success | verdict | failure_reason` instead of JSON envelope.
+    """
     cmd = f"mtor status {workflow_id}"
 
     client, err = _get_client()
@@ -544,6 +549,20 @@ def status(workflow_id: str) -> None:
                 if task_result:
                     failure_reason = _build_failure_reason(task_result)
             result_payload["failure_reason"] = failure_reason
+
+        if short:
+            status_field = result_payload.get("status", "?")
+            success_field = result_payload.get("success", "—")
+            if success_field is None:
+                success_field = "—"
+            verdict_field = result_payload.get("verdict", "—")
+            if verdict_field is None:
+                verdict_field = "—"
+            failure_field = result_payload.get("failure_reason", "—")
+            if isinstance(failure_field, str) and len(failure_field) > 80:
+                failure_field = failure_field[:77] + "..."
+            print(f"{status_field} | {success_field} | {verdict_field} | {failure_field}")
+            return
 
         _ok(
             cmd,
