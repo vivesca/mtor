@@ -302,57 +302,10 @@ def doctor() -> None:
             }
         )
 
-    # Check 4: Provider readiness on ganglion (where ribosome executes)
-    if WORKER_HOST == "localhost":
-        checks.append(
-            {
-                "name": "providers",
-                "ok": False,
-                "detail": "Skipped — WORKER_HOST is localhost (set MTOR_WORKER_HOST first)",
-            }
-        )
-    else:
-        try:
-            provider_result = subprocess.run(
-                [
-                    "ssh",
-                    WORKER_HOST,
-                    "set -a; source ~/.temporal-worker.env 2>/dev/null; set +a;"
-                    " ribosome-tools status --compact --json",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            providers = json.loads(provider_result.stdout) if provider_result.returncode == 0 else []
-            healthy = [p for p in providers if p.get("health") in ("OK", "HEALTHY")]
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": len(healthy) > 0,
-                    "detail": f"{len(healthy)}/{len(providers)} providers available ({WORKER_HOST})",
-                    "providers": providers,
-                }
-            )
-            if not healthy:
-                all_ok = False
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            all_ok = False
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": False,
-                    "detail": f"{WORKER_HOST} unreachable: {exc}",
-                }
-            )
-        except Exception:
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": False,
-                    "detail": f"ribosome status not available on {WORKER_HOST}",
-                }
-            )
+    # Check 4: Provider readiness — defer to circuit_breaker (Check 6) which
+    # reads the actual provider HEALTH_FILE on WORKER_HOST. The earlier
+    # ribosome-tools status probe was retired 2026-05-06 — that binary never
+    # existed; circuit_breaker is the canonical health signal.
 
     result = {
         "temporal_reachable": temporal_ok,
@@ -362,44 +315,59 @@ def doctor() -> None:
         "checks": checks,
     }
 
-    # Check 5: Real API probe — fire all three providers concurrently
-    probe_providers = []
-    probe_threads_results: list[ProbeResult] = []
+    # Check 5: Real API probe — only meaningful when soma == worker (API keys
+    # live on WORKER_HOST via op run, not in soma's shell). Skip with a
+    # non-failing note when remote so doctor isn't a false negative.
+    if WORKER_HOST != "localhost":
+        checks.append(
+            {
+                "name": "provider_api_probe",
+                "ok": True,
+                "detail": (
+                    f"Skipped — WORKER_HOST={WORKER_HOST}; provider keys live"
+                    f" on {WORKER_HOST} via op run, not in soma shell."
+                    f" See provider_circuit_breaker for actual health."
+                ),
+            }
+        )
+    else:
+        probe_providers = []
+        probe_threads_results: list[ProbeResult] = []
 
-    def _run_probe(p: str) -> None:
-        probe_threads_results.append(_probe_provider(p))
+        def _run_probe(p: str) -> None:
+            probe_threads_results.append(_probe_provider(p))
 
-    import threading
+        import threading
 
-    for p in ("zhipu", "volcano", "infini"):
-        t = threading.Thread(target=_run_probe, args=(p,))
-        t.start()
-        probe_providers.append((p, t))
+        for p in ("zhipu", "volcano", "infini"):
+            t = threading.Thread(target=_run_probe, args=(p,))
+            t.start()
+            probe_providers.append((p, t))
 
-    for p, t in probe_providers:
-        t.join()
+        for p, t in probe_providers:
+            t.join()
 
-    provider_probe_states: dict[str, dict] = {}
-    for pr in probe_threads_results:
-        provider_probe_states[pr.provider] = {
-            "ok": pr.ok,
-            "latency_ms": pr.latency_ms,
-            "detail": pr.detail,
-        }
-    all_probes_ok = all(pr.ok for pr in probe_threads_results)
-    if not all_probes_ok:
-        all_ok = False
-    probe_detail = ", ".join(
-        f"{pr.provider}: {pr.detail}" for pr in probe_threads_results
-    )
-    checks.append(
-        {
-            "name": "provider_api_probe",
-            "ok": all_probes_ok,
-            "detail": probe_detail,
-            "provider_probe_states": provider_probe_states,
-        }
-    )
+        provider_probe_states: dict[str, dict] = {}
+        for pr in probe_threads_results:
+            provider_probe_states[pr.provider] = {
+                "ok": pr.ok,
+                "latency_ms": pr.latency_ms,
+                "detail": pr.detail,
+            }
+        all_probes_ok = all(pr.ok for pr in probe_threads_results)
+        if not all_probes_ok:
+            all_ok = False
+        probe_detail = ", ".join(
+            f"{pr.provider}: {pr.detail}" for pr in probe_threads_results
+        )
+        checks.append(
+            {
+                "name": "provider_api_probe",
+                "ok": all_probes_ok,
+                "detail": probe_detail,
+                "provider_probe_states": provider_probe_states,
+            }
+        )
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
