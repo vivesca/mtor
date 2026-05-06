@@ -166,7 +166,10 @@ class TestSpecOnly:
 
     def test_spec_reads_file_as_prompt(self, tmp_path: Path):
         spec_file = tmp_path / "task.md"
-        spec_file.write_text("Implement the foo module")
+        spec_file.write_text(
+            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\n"
+            "Implement the foo module"
+        )
 
         client, handle = _make_mock_client()
         with _patch_client(client):
@@ -183,7 +186,10 @@ class TestSpecOnly:
     def test_spec_only_no_positional(self, tmp_path: Path):
         """When only --spec is given (no positional arg), dispatch proceeds."""
         spec_file = tmp_path / "spec.md"
-        spec_file.write_text("Add logging to bar.py")
+        spec_file.write_text(
+            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\n"
+            "Add logging to bar.py"
+        )
 
         client, handle = _make_mock_client()
         with _patch_client(client):
@@ -199,7 +205,10 @@ class TestSpecPlusTask:
 
     def test_spec_and_task_concatenated(self, tmp_path: Path):
         spec_file = tmp_path / "task.md"
-        spec_file.write_text("Context: the project uses pytest")
+        spec_file.write_text(
+            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\n"
+            "Context: the project uses pytest"
+        )
 
         client, handle = _make_mock_client()
         with _patch_client(client):
@@ -219,7 +228,10 @@ class TestSpecPlusTask:
     def test_spec_task_ordering(self, tmp_path: Path):
         """Spec content appears before the positional task with newline separator."""
         spec_file = tmp_path / "notes.md"
-        spec_file.write_text("SPEC_BODY")
+        spec_file.write_text(
+            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\n"
+            "SPEC_BODY"
+        )
 
         client, handle = _make_mock_client()
         with _patch_client(client):
