@@ -241,6 +241,46 @@ def default_handler(
         else:
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
+    else:
+        # Freeze check — block dispatch when frozen (deptor lock)
+        if _is_frozen():
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Dispatching is frozen. Use 'mtor dedeptor' to unfreeze.",
+                    "FROZEN",
+                    "Run: mtor dedeptor",
+                    [_action("mtor dedeptor", "Unfreeze dispatching")],
+                    exit_code=1,
+                )
+            )
+        # Pause check — block dispatch when paused
+        if _is_paused():
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            sys.exit(
+                _err(
+                    cmd,
+                    "Dispatching is paused. Use 'mtor derapa' to resume.",
+                    "PAUSED",
+                    "Run: mtor derapa",
+                    [_action("mtor derapa", "Resume dispatching")],
+                    exit_code=1,
+                )
+            )
+        # Spec dispatch-readiness gate — tests field required, no bypass
+        if spec is not None:
+            from mtor.dispatch import validate_spec as _validate_spec
+            from mtor.rptor import parse_spec as _parse_spec
+            _spec_data = _parse_spec(spec)
+            _repo = Path(_spec_data.get("repo", ".")).expanduser()
+            _spec_errors = _validate_spec(spec, _repo)
+            if _spec_errors:
+                cmd = f"mtor --spec {spec}"
+                msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _spec_errors)
+                sys.exit(
+                    _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+                )
 
     # Prompt quality guard — reject too-short or subcommand-like prompts
     _SUBCOMMAND_NAMES = frozenset({
@@ -499,8 +539,13 @@ def list_cmd(
 
 
 @app.command
-def status(workflow_id: str) -> None:
-    """Query status of a single workflow."""
+def status(workflow_id: str, short: bool = False) -> None:
+    """Query status of a single workflow.
+
+    Args:
+        workflow_id: Workflow identifier.
+        short: Emit one-line `STATUS | success | verdict | failure_reason` instead of JSON envelope.
+    """
     cmd = f"mtor status {workflow_id}"
 
     client, err = _get_client()
@@ -567,6 +612,20 @@ def status(workflow_id: str) -> None:
                     failure_reason = _build_failure_reason(task_result)
             result_payload["failure_reason"] = failure_reason
 
+        if short:
+            status_field = result_payload.get("status", "?")
+            success_field = result_payload.get("success", "—")
+            if success_field is None:
+                success_field = "—"
+            verdict_field = result_payload.get("verdict", "—")
+            if verdict_field is None:
+                verdict_field = "—"
+            failure_field = result_payload.get("failure_reason", "—")
+            if isinstance(failure_field, str) and len(failure_field) > 80:
+                failure_field = failure_field[:77] + "..."
+            print(f"{status_field} | {success_field} | {verdict_field} | {failure_field}")
+            return
+
         _ok(
             cmd,
             result_payload,
@@ -598,6 +657,117 @@ def status(workflow_id: str) -> None:
                 [_action("mtor tsc", "Run health check")],
             )
         )
+
+
+@app.command
+def wait(
+    workflow_id: str,
+    timeout: int = 1800,
+    interval: int = 5,
+) -> None:
+    """Block until the workflow leaves RUNNING. Returns final state as porin envelope.
+
+    Args:
+        workflow_id: Workflow to wait for.
+        timeout: Max seconds before giving up. Default 1800 (30 min) — matches Temporal start_to_close.
+        interval: Poll interval seconds. Bounded [2, 60].
+    """
+    cmd = f"mtor wait {workflow_id}"
+
+    if interval < 2 or interval > 60:
+        sys.exit(_err(cmd, f"interval must be 2-60s, got {interval}", "INVALID_INTERVAL", "Try --interval 5", []))
+
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
+                "TEMPORAL_UNREACHABLE",
+                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
+                exit_code=3,
+            )
+        )
+
+    running_states = {"RUNNING", "CONTINUED_AS_NEW"}
+    polls = 0
+    start_wall = time.time()
+
+    try:
+        async def _wait_loop():
+            nonlocal polls
+            handle = client.get_workflow_handle(workflow_id)
+            while True:
+                desc = await handle.describe()
+                polls += 1
+                status_val = desc.status.name if desc.status else "UNKNOWN"
+                if status_val not in running_states:
+                    wf_result_local = None
+                    if status_val == "COMPLETED":
+                        try:
+                            wf_result_local = await handle.result()
+                        except Exception:
+                            wf_result_local = None
+                    return desc, status_val, False, wf_result_local
+                if time.time() - start_wall >= timeout:
+                    return desc, status_val, True, None
+                await asyncio.sleep(interval)
+
+        desc, final_status, timed_out, wf_result = asyncio.run(_wait_loop())
+        waited = round(time.time() - start_wall, 1)
+
+        result_payload: dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "status": final_status,
+            "start_time": desc.start_time.isoformat() if desc.start_time else None,
+            "close_time": desc.close_time.isoformat() if desc.close_time else None,
+            "waited_seconds": waited,
+            "polls": polls,
+            "timed_out": timed_out,
+        }
+        if wf_result and isinstance(wf_result, dict):
+            task_result = _extract_first_result(wf_result)
+            if task_result:
+                result_payload["success"] = task_result.get("success")
+                result_payload["exit_code"] = task_result.get("exit_code")
+                result_payload["provider"] = task_result.get("provider")
+                result_payload["verdict"] = task_result.get("review", {}).get("verdict")
+
+        vo = get_verdict_overrides()
+        if workflow_id in vo:
+            result_payload["verdict"] = vo[workflow_id]
+
+        if timed_out:
+            sys.exit(_err(
+                cmd,
+                f"Wait exceeded {timeout}s — workflow still {final_status}",
+                "WAIT_TIMEOUT",
+                f"Workflow may still be running. Check with: mtor status {workflow_id}",
+                [_action(f"mtor status {workflow_id}", "Re-check status"),
+                 _action(f"mtor logs {workflow_id}", "Inspect output")],
+                exit_code=5,
+            ))
+
+        _ok(
+            cmd,
+            result_payload,
+            [_action(f"mtor logs {workflow_id}", "Fetch output")],
+            version=VERSION,
+        )
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower():
+            sys.exit(_err(
+                cmd,
+                f"Workflow {workflow_id} not found",
+                "WORKFLOW_NOT_FOUND",
+                "Verify ID with: mtor riboseq",
+                [_action("mtor riboseq", "List recent workflows")],
+                exit_code=4,
+            ))
+        sys.exit(_err(cmd, exc_str, "WAIT_ERROR", "Check Temporal health: mtor tsc",
+                      [_action("mtor tsc", "Run health check")]))
 
 
 def _active_logs() -> None:

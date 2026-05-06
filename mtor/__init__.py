@@ -16,8 +16,23 @@ REPO_DIR = os.environ.get("MTOR_REPO_DIR", os.path.join(_HOME, "germline"))
 OUTPUTS_DIR = os.environ.get("MTOR_OUTPUTS_DIR", os.path.join(_HOME, ".mtor", "outputs"))
 LOG_TAIL_LINES = 30
 
-# Optional coaching file path (string, not pathlib — Temporal sandbox restriction)
-COACHING_PATH: str | None = os.environ.get("MTOR_COACHING_PATH") or None
+# Optional coaching file path (string, not pathlib — Temporal sandbox restriction).
+# Resolution order:
+#   1. MTOR_COACHING_PATH env var (explicit override, e.g. for tests)
+#   2. ~/epigenome/marks/feedback_ribosome_coaching.md (durable default — the
+#      file is the source-of-truth corrections for ribosome's recurring failure
+#      modes; baking the path means the file is always picked up without needing
+#      systemd EnvironmentFile config on the worker host)
+#   3. None (no coaching prepended)
+def _resolve_coaching_path() -> str | None:
+    explicit = os.environ.get("MTOR_COACHING_PATH")
+    if explicit:
+        return explicit
+    default = os.path.join(_HOME, "epigenome", "marks", "feedback_ribosome_coaching.md")
+    return default if os.path.exists(default) else None
+
+
+COACHING_PATH: str | None = _resolve_coaching_path()
 COACHING_MAX_KB = 10  # Hard cap — coaching + spec must fit under 15KB or GLM exits immediately
 
 __version__ = VERSION

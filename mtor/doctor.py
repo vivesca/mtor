@@ -35,6 +35,44 @@ class ProbeResult:
     ok: bool
     latency_ms: float | None
     detail: str
+    classification: str = "unknown"  # ok|auth|billing|quota|connection|unknown
+
+
+def _classify_response_error(http_status: int | None, body: str) -> str:
+    """Classify a provider HTTP error into actionable categories.
+
+    First-match-wins ordering: status code beats body pattern, billing beats auth
+    when both match (404 with billing message → billing).
+
+    Args:
+        http_status: HTTP status code, or None for connection-level failures.
+        body: Response body or error message.
+
+    Returns:
+        One of: "auth", "billing", "quota", "connection", "unknown".
+    """
+    body_lc = (body or "").lower()
+    # Chinese billing patterns from zhipu / volcano
+    if any(token in body for token in ("套餐", "已到期", "请续费", "已用完")):
+        return "billing"
+    # English billing patterns
+    if any(token in body_lc for token in ("subscription expired", "plan expired", "renew your plan", "billing required", "credit expired", "payment required")):
+        return "billing"
+    # Auth patterns (key-related, not billing)
+    if any(token in body_lc for token in ("invalid api key", "invalid key", "unauthorized", "api key invalid", "authentication parameter not received", "key is invalid")):
+        return "auth"
+    # Status-code dispatch
+    if http_status == 401:
+        return "auth"
+    if http_status == 402:
+        return "billing"
+    if http_status == 429:
+        return "quota"
+    if http_status == 403:
+        return "auth"  # often credential-scope rejection
+    if http_status is None:
+        return "connection"
+    return "unknown"
 
 
 def _probe_provider(provider: str) -> ProbeResult:
@@ -68,6 +106,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=f"{key_envvar} not set",
+            classification="auth",
         )
 
     payload = {
@@ -97,13 +136,27 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=True,
             latency_ms=round(latency_ms, 1),
             detail=f"OK ({latency_ms:.0f}ms)",
+            classification="ok",
         )
     except urllib.error.HTTPError as exc:
+        body_text = ""
+        try:
+            body_bytes = exc.read()
+            body_text = body_bytes.decode("utf-8", errors="replace")[:500]
+        except Exception:
+            body_text = ""
+        classification = _classify_response_error(exc.code, body_text)
+        # Surface body snippet in detail when it's the diagnostic signal
+        body_hint = ""
+        if body_text and classification in ("billing", "auth", "quota"):
+            stripped = body_text.strip().replace("\n", " ")[:120]
+            body_hint = f" — {stripped}"
         return ProbeResult(
             provider=provider,
             ok=False,
             latency_ms=None,
-            detail=f"HTTP {exc.code}: {exc.reason}",
+            detail=f"HTTP {exc.code}: {exc.reason}{body_hint}",
+            classification=classification,
         )
     except urllib.error.URLError as exc:
         return ProbeResult(
@@ -111,6 +164,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=f"Network error: {exc.reason}",
+            classification="connection",
         )
     except TimeoutError:
         return ProbeResult(
@@ -118,6 +172,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail="Timeout (15s)",
+            classification="connection",
         )
     except Exception as exc:
         return ProbeResult(
@@ -125,6 +180,7 @@ def _probe_provider(provider: str) -> ProbeResult:
             ok=False,
             latency_ms=None,
             detail=str(exc),
+            classification="unknown",
         )
 
 
@@ -302,57 +358,10 @@ def doctor() -> None:
             }
         )
 
-    # Check 4: Provider readiness on ganglion (where ribosome executes)
-    if WORKER_HOST == "localhost":
-        checks.append(
-            {
-                "name": "providers",
-                "ok": False,
-                "detail": "Skipped — WORKER_HOST is localhost (set MTOR_WORKER_HOST first)",
-            }
-        )
-    else:
-        try:
-            provider_result = subprocess.run(
-                [
-                    "ssh",
-                    WORKER_HOST,
-                    "set -a; source ~/.temporal-worker.env 2>/dev/null; set +a;"
-                    " ribosome-tools status --compact --json",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            providers = json.loads(provider_result.stdout) if provider_result.returncode == 0 else []
-            healthy = [p for p in providers if p.get("health") in ("OK", "HEALTHY")]
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": len(healthy) > 0,
-                    "detail": f"{len(healthy)}/{len(providers)} providers available ({WORKER_HOST})",
-                    "providers": providers,
-                }
-            )
-            if not healthy:
-                all_ok = False
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            all_ok = False
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": False,
-                    "detail": f"{WORKER_HOST} unreachable: {exc}",
-                }
-            )
-        except Exception:
-            checks.append(
-                {
-                    "name": "providers",
-                    "ok": False,
-                    "detail": f"ribosome status not available on {WORKER_HOST}",
-                }
-            )
+    # Check 4: Provider readiness — defer to circuit_breaker (Check 6) which
+    # reads the actual provider HEALTH_FILE on WORKER_HOST. The earlier
+    # ribosome-tools status probe was retired 2026-05-06 — that binary never
+    # existed; circuit_breaker is the canonical health signal.
 
     result = {
         "temporal_reachable": temporal_ok,
@@ -362,44 +371,60 @@ def doctor() -> None:
         "checks": checks,
     }
 
-    # Check 5: Real API probe — fire all three providers concurrently
-    probe_providers = []
-    probe_threads_results: list[ProbeResult] = []
+    # Check 5: Real API probe — only meaningful when soma == worker (API keys
+    # live on WORKER_HOST via op run, not in soma's shell). Skip with a
+    # non-failing note when remote so doctor isn't a false negative.
+    if WORKER_HOST != "localhost":
+        checks.append(
+            {
+                "name": "provider_api_probe",
+                "ok": True,
+                "detail": (
+                    f"Skipped — WORKER_HOST={WORKER_HOST}; provider keys live"
+                    f" on {WORKER_HOST} via op run, not in soma shell."
+                    f" See provider_circuit_breaker for actual health."
+                ),
+            }
+        )
+    else:
+        probe_providers = []
+        probe_threads_results: list[ProbeResult] = []
 
-    def _run_probe(p: str) -> None:
-        probe_threads_results.append(_probe_provider(p))
+        def _run_probe(p: str) -> None:
+            probe_threads_results.append(_probe_provider(p))
 
-    import threading
+        import threading
 
-    for p in ("zhipu", "volcano", "infini"):
-        t = threading.Thread(target=_run_probe, args=(p,))
-        t.start()
-        probe_providers.append((p, t))
+        for p in ("zhipu", "volcano", "infini"):
+            t = threading.Thread(target=_run_probe, args=(p,))
+            t.start()
+            probe_providers.append((p, t))
 
-    for p, t in probe_providers:
-        t.join()
+        for p, t in probe_providers:
+            t.join()
 
-    provider_probe_states: dict[str, dict] = {}
-    for pr in probe_threads_results:
-        provider_probe_states[pr.provider] = {
-            "ok": pr.ok,
-            "latency_ms": pr.latency_ms,
-            "detail": pr.detail,
-        }
-    all_probes_ok = all(pr.ok for pr in probe_threads_results)
-    if not all_probes_ok:
-        all_ok = False
-    probe_detail = ", ".join(
-        f"{pr.provider}: {pr.detail}" for pr in probe_threads_results
-    )
-    checks.append(
-        {
-            "name": "provider_api_probe",
-            "ok": all_probes_ok,
-            "detail": probe_detail,
-            "provider_probe_states": provider_probe_states,
-        }
-    )
+        provider_probe_states: dict[str, dict] = {}
+        for pr in probe_threads_results:
+            provider_probe_states[pr.provider] = {
+                "ok": pr.ok,
+                "latency_ms": pr.latency_ms,
+                "detail": pr.detail,
+                "classification": pr.classification,
+            }
+        all_probes_ok = all(pr.ok for pr in probe_threads_results)
+        if not all_probes_ok:
+            all_ok = False
+        probe_detail = ", ".join(
+            f"{pr.provider}: [{pr.classification}] {pr.detail}" for pr in probe_threads_results
+        )
+        checks.append(
+            {
+                "name": "provider_api_probe",
+                "ok": all_probes_ok,
+                "detail": probe_detail,
+                "provider_probe_states": provider_probe_states,
+            }
+        )
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
