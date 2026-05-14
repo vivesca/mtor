@@ -27,6 +27,7 @@ class TestAutoCommitWiring:
         (tmp_path / "file.py").write_text("print('hello')")
         subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "ribosome-test"], cwd=tmp_path, check=True, capture_output=True)
 
         # Make a change
         (tmp_path / "file.py").write_text("print('changed')")

@@ -18,7 +18,13 @@ ALLOWLIST = {
     "reactivate", "publish", "deploy", "stats", "checkpoints",
     "review", "verdict", "archive", "init", "rptor", "rptor_done",
     "ragulator", "rapa", "derapa", "deptor", "dedeptor", "autophagy",
-    "dispatch_all",
+    "dispatch_all", "batch_cancel", "spec_new", "spec_validate",
+    "rictor_deploy", "setup_search_attrs",
+    # watch/control helpers called by operators or future controllers
+    "prioritize_specs", "circadian_dispatch_rate", "check_ganglion_load",
+    "feedback_dispatch_blocked",
+    # Temporal/Langfuse framework entrypoints
+    "create_pr", "create_span",
     # rptor DAG functions (called from CLI via import)
     "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",
     # triage (called from CLI)

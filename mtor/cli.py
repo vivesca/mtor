@@ -278,7 +278,6 @@ def default_handler(
                 exit_code=2,
             )
         )
-
     else:
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
@@ -457,6 +456,8 @@ def list_cmd(
                 sa_verdict = verdict_overrides[wf_id]
 
             # Filters are now handled by Temporal query, but local overrides might change verdict
+            if provider_filter and sa_provider != provider_filter:
+                continue
             if verdict_filter and sa_verdict != verdict_filter:
                 continue
 

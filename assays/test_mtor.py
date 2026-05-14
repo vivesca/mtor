@@ -862,6 +862,42 @@ class TestCheckpoints:
         assert data["result"]["count"] == 0
 
 
+class TestLogs:
+    def test_logs_caches_remote_worker_path_under_home_cache(self, tmp_path, monkeypatch):
+        """Remote /home/vivesca log paths are fetched into a local cache."""
+        import mtor.cli as _cli
+
+        workflow_id = "ribosome-glm51-spec-a989709c-6a06468c"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.jsonl"
+        mock_client, wf_handle = make_mock_client()
+        wf_handle.result = AsyncMock(
+            return_value={
+                "exit_code": 0,
+                "success": True,
+                "output_path": remote_path,
+            }
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd and cmd[0] == "scp":
+                Path(cmd[-1]).write_text('{"workflow_id": "wf", "provider": "zhipu"}\n')
+            return result
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["logs", workflow_id])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        log_path = Path(data["result"]["log_path"])
+        assert log_path == tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
+        assert data["result"]["lines"] == ['{"workflow_id": "wf", "provider": "zhipu"}']
+
+
 # ---------------------------------------------------------------------------
 # Scout mode tests
 # ---------------------------------------------------------------------------

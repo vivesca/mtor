@@ -78,6 +78,7 @@ def test_select_all_open_picks_earliest_cooldown():
         "zhipu": {"state": "open", "cooldown_until": now + 300},
         "infini": {"state": "open", "cooldown_until": now + 60},
         "volcano": {"state": "open", "cooldown_until": now + 600},
+        "gemini": {"state": "open", "cooldown_until": now + 900},
     }
     result = select_provider(health)
     # infini has the earliest cooldown_until
@@ -243,7 +244,7 @@ def test_load_health_corrupt_file_returns_empty(tmp_path, monkeypatch):
 
 def test_provider_priority_exports():
     """PROVIDER_PRIORITY is a list of expected provider names."""
-    assert PROVIDER_PRIORITY == ["zhipu", "infini", "volcano"]
+    assert PROVIDER_PRIORITY == ["zhipu", "infini", "volcano", "gemini"]
 
 
 def test_exit_rate_limited_value():

@@ -1,7 +1,7 @@
 """Tests for spec-required gate on default_handler.
 
 Validates:
-  1. Build mode without --spec exits SPEC_REQUIRED (code 2)
+  1. Prompt dispatch without --spec remains supported
   2. Build mode with --spec dispatches normally
   3. Spec without tests field is always rejected (no bypass)
   4. No prompt (bare invocation) still shows help/tree
@@ -92,22 +92,25 @@ def _write_spec(tmp_path: Path, frontmatter: str, body: str = "# Spec\n") -> Pat
 # ---------------------------------------------------------------------------
 
 
-class TestBuildRequiresSpec:
-    """Build mode (default) without --spec must exit SPEC_REQUIRED."""
+class TestPromptDispatchWithoutSpec:
+    """Build mode (default) still supports direct prompt dispatch."""
 
-    def test_prompt_without_spec_rejected(self):
-        """mtor 'prompt' without --spec exits SPEC_REQUIRED."""
-        exit_code, data = invoke(["Fix the bug"])
-        assert exit_code == 2
-        assert data["ok"] is False
-        assert data["error"]["code"] == "SPEC_REQUIRED"
-        assert "--spec" in data["error"]["message"]
+    def test_prompt_without_spec_dispatches(self):
+        """mtor 'prompt' without --spec dispatches for quick direct tasks."""
+        client, _handle = _make_mock_client()
+        with _patch_dispatch(client):
+            exit_code, data = invoke(["Fix the bug"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["workflow_id"] == "ribosome-gate-test1234"
 
     def test_prompt_without_spec_no_double_dash(self):
-        """Positional prompt alone triggers the gate."""
-        exit_code, data = invoke(["Refactor the module"])
-        assert exit_code == 2
-        assert data["error"]["code"] == "SPEC_REQUIRED"
+        """Positional prompt alone is treated as a direct dispatch prompt."""
+        client, _handle = _make_mock_client()
+        with _patch_dispatch(client):
+            exit_code, data = invoke(["Refactor the module"])
+        assert exit_code == 0
+        assert data["ok"] is True
 
     def test_bare_invocation_not_rejected(self):
         """mtor with no args (bare) does NOT trigger SPEC_REQUIRED — shows help/tree."""
@@ -200,23 +203,25 @@ class TestSpecValidationAlwaysEnforced:
         assert data["error"]["code"] == "SPEC_INVALID"
 
 
-class TestSpecRequiredErrorShape:
-    """Verify the SPEC_REQUIRED error envelope has correct shape."""
+class TestPromptQualityErrorShape:
+    """Verify prompt quality errors keep the standard envelope shape."""
 
     def test_error_envelope_structure(self):
-        """SPEC_REQUIRED error has ok, error.code, error.message, error.fix, next_actions."""
-        exit_code, data = invoke(["Build the feature"])
+        """PROMPT_TOO_SHORT error has ok, error.code, fix, next_actions."""
+        exit_code, data = invoke(["fix"])
         assert exit_code == 2
         assert data["ok"] is False
         assert "error" in data
         err = data["error"]
-        assert err["code"] == "SPEC_REQUIRED"
+        assert err["code"] == "PROMPT_TOO_SHORT"
         assert "message" in err
-        assert "--spec" in err["message"]
-        assert "fix" in err
+        assert "fix" in data
+        assert "prompt" in data["fix"]
         assert "next_actions" in data
-        # Should suggest mtor init and mtor rptor
-        actions_text = " ".join(a.get("label", "") for a in data["next_actions"])
-        assert any(kw in actions_text for kw in ["init", "rptor"]), (
-            f"Expected init/rptor in next_actions, got: {data['next_actions']}"
+        actions_text = " ".join(
+            f"{a.get('command', '')} {a.get('description', '')}"
+            for a in data["next_actions"]
+        )
+        assert "--help" in actions_text, (
+            f"Expected help in next_actions, got: {data['next_actions']}"
         )

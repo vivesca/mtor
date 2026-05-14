@@ -257,7 +257,10 @@ def _detect_repo(task: str, default: str) -> str:
     if not match:
         return default
     candidate = Path(match.group()).expanduser()
+    code_root = Path.home() / "code"
     for d in [candidate] + list(candidate.parents):
+        if d == code_root:
+            break
         if (d / ".git").is_dir():
             print(f"[translocase] detected target repo: {d}", file=sys.stderr)
             return str(d)
