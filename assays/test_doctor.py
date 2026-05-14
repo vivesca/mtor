@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -204,6 +205,77 @@ class TestFormatReportWithFailures(unittest.TestCase):
         self.assertIn("✘ worker_alive: Worker probe failed", output)
         self.assertIn("✔ temporal_reachable", output)
         self.assertNotIn("ALL CHECKS PASSED", output)
+
+
+class TestReconcileRunningWorkflows(unittest.TestCase):
+    """Test reconcile_running_workflows classification logic."""
+
+    def _make_fake_workflow(self, wf_id: str):
+        wf = MagicMock()
+        wf.id = wf_id
+        return wf
+
+    def _mock_client(self, workflow_ids: list[str]) -> MagicMock:
+        client = MagicMock()
+        workflows = [self._make_fake_workflow(wid) for wid in workflow_ids]
+
+        async def _list_running(**_kwargs):
+            for wf in workflows:
+                yield wf
+
+        client.list_workflows = _list_running
+        return client
+
+    def test_reconcile_classifications(self):
+        """Three RUNNING workflows: alive, stale, abandoned."""
+        now = time.time()
+        fresh_mtime = str(now - 10)
+        stale_mtime = str(now - 500)
+
+        ssh_outputs = {
+            "wf-alive-123": fresh_mtime,
+            "wf-stale-456": stale_mtime,
+            "wf-abandoned-789": "MISSING",
+        }
+
+        def _fake_run(cmd, **_kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            for wf_id, output in ssh_outputs.items():
+                if wf_id in cmd_str:
+                    result.stdout = output
+                    return result
+            result.stdout = "MISSING"
+            return result
+
+        from mtor.doctor import reconcile_running_workflows, HEARTBEAT_STALE_THRESHOLD
+
+        client = self._mock_client(["wf-alive-123", "wf-stale-456", "wf-abandoned-789"])
+
+        with patch("mtor.doctor.subprocess.run", side_effect=_fake_run):
+            with patch("mtor.doctor.WORKER_HOST", "ganglion"):
+                classifications = reconcile_running_workflows(client)
+
+        by_id = {c["workflow_id"]: c for c in classifications}
+
+        # alive: heartbeat within threshold
+        alive = by_id["wf-alive-123"]
+        self.assertEqual(alive["classification"], "alive")
+        self.assertLessEqual(alive["last_heartbeat_age_s"], HEARTBEAT_STALE_THRESHOLD)
+        self.assertNotIn("next_action", alive)
+
+        # stale: heartbeat exists but too old
+        stale = by_id["wf-stale-456"]
+        self.assertEqual(stale["classification"], "stale")
+        self.assertGreater(stale["last_heartbeat_age_s"], HEARTBEAT_STALE_THRESHOLD)
+        self.assertEqual(stale["next_action"], "mtor cancel wf-stale-456")
+
+        # abandoned: no heartbeat file
+        abandoned = by_id["wf-abandoned-789"]
+        self.assertEqual(abandoned["classification"], "abandoned")
+        self.assertNotIn("last_heartbeat_age_s", abandoned)
+        self.assertEqual(abandoned["next_action"], "mtor cancel wf-abandoned-789")
 
 
 if __name__ == "__main__":

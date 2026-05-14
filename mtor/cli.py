@@ -1057,9 +1057,12 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
 
 @app.command(name="doctor", show=False)
 @app.command(name="tsc")
-def tsc() -> None:
+def tsc(
+    *,
+    reconcile: Annotated[bool, Parameter(name=["--reconcile"])] = False,
+) -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
-    _doctor()
+    _doctor(reconcile=reconcile)
 
 
 @app.command

@@ -17,6 +17,9 @@ from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
 from mtor.client import _get_client
 from mtor.envelope import _ok
 
+HEARTBEAT_DIR = "~/germline/loci/ribosome-heartbeats"
+HEARTBEAT_STALE_THRESHOLD = 120
+
 
 # ---------------------------------------------------------------------------
 # Provider API probe
@@ -261,7 +264,71 @@ def _get_provider_module():
     return _providers_module
 
 
-def doctor() -> None:
+def reconcile_running_workflows(client) -> list[dict]:
+    """Classify RUNNING workflows by heartbeat freshness.
+
+    Args:
+        client: Connected Temporal client.
+
+    Returns:
+        List of dicts with workflow_id, classification, last_heartbeat_age_s,
+        and suggested next_action.
+    """
+    import asyncio
+
+    async def _list_running():
+        results = []
+        async for wf in client.list_workflows(query="ExecutionStatus = 'Running'"):
+            results.append(wf)
+        return results
+
+    running = asyncio.run(_list_running())
+    now = time.time()
+    classifications = []
+
+    for wf in running:
+        wf_id = wf.id
+        heartbeat_path = f"{HEARTBEAT_DIR}/{wf_id}"
+        try:
+            stat_result = subprocess.run(
+                ["ssh", WORKER_HOST, f"stat -c %Y {heartbeat_path} 2>/dev/null || echo MISSING"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            output = stat_result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            output = "MISSING"
+
+        if output == "MISSING" or not output:
+            classification = "abandoned"
+            age_s = None
+        else:
+            try:
+                mtime = float(output)
+                age_s = now - mtime
+                if age_s <= HEARTBEAT_STALE_THRESHOLD:
+                    classification = "alive"
+                else:
+                    classification = "stale"
+            except ValueError:
+                classification = "abandoned"
+                age_s = None
+
+        entry: dict[str, object] = {
+            "workflow_id": wf_id,
+            "classification": classification,
+        }
+        if age_s is not None:
+            entry["last_heartbeat_age_s"] = round(age_s, 1)
+        if classification in ("stale", "abandoned"):
+            entry["next_action"] = f"mtor cancel {wf_id}"
+        classifications.append(entry)
+
+    return classifications
+
+
+def doctor(*, reconcile: bool = False) -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
     cmd = "mtor doctor"
     checks = []
@@ -589,6 +656,17 @@ def doctor() -> None:
                     "detail": f"SSH to {WORKER_HOST} failed: {exc}",
                 }
             )
+
+    # Reconciliation: classify RUNNING workflows by heartbeat freshness
+    if reconcile and temporal_ok and client is not None:
+        try:
+            classifications = reconcile_running_workflows(client)
+            result["reconciliation"] = {
+                "workflows": classifications,
+                "count": len(classifications),
+            }
+        except Exception as reconcile_exc:
+            result["reconciliation"] = {"error": str(reconcile_exc)}
 
     # Emit human-readable health report to stderr so JSON on stdout stays clean
     display = format_health_display(checks, result.get("provider_circuit_breaker"))
