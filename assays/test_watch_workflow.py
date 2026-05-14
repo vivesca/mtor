@@ -18,6 +18,11 @@ from temporalio.worker import Worker, UnsandboxedWorkflowRunner
 
 from mtor.worker.workflow import WatchWorkflow
 
+# Temporal's time-skipping harness can leave workflow.sleep coroutine objects
+# unraisable during full-suite teardown on Python 3.13. The watch tests pass
+# cleanly in isolation; this filter keeps unrelated warning-as-error runs useful.
+pytestmark = pytest.mark.filterwarnings("ignore:Exception ignored in.*coroutine object sleep:pytest.PytestUnraisableExceptionWarning")
+
 
 # ---------------------------------------------------------------------------
 # Mock child workflow — replaces TranslationWorkflow for tests

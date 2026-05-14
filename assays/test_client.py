@@ -1,5 +1,6 @@
 """Tests for client.py — Temporal client connection helper."""
 from unittest.mock import patch, MagicMock, AsyncMock
+import asyncio
 
 from mtor.client import _get_client
 
@@ -43,3 +44,20 @@ def test_connection_error_returns_exception_message() -> None:
 
     assert result_client is None
     assert result_err == "connection refused"
+
+
+def test_running_event_loop_returns_error_without_leaking_coroutine() -> None:
+    """Calling sync client helper inside async code returns a clean error."""
+    fake_client = MagicMock(name="TemporalClient")
+    mock_client_cls = MagicMock(name="Client")
+    mock_client_cls.connect = AsyncMock(return_value=fake_client)
+
+    async def _call():
+        with patch.dict("sys.modules", {"temporalio": MagicMock(), "temporalio.client": MagicMock(Client=mock_client_cls)}):
+            return _get_client()
+
+    result_client, result_err = asyncio.run(_call())
+
+    assert result_client is None
+    assert result_err == "cannot connect synchronously from a running event loop"
+    mock_client_cls.connect.assert_not_called()

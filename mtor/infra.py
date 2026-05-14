@@ -7,7 +7,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, REPO_DIR, WORKER_HOST
+from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST
+
+MTOR_CODE_DIR = str(Path(__file__).resolve().parents[1])
 
 
 @dataclass
@@ -31,7 +33,7 @@ def check_health(
     Checks: Temporal connectivity, worker SSH reachability, disk space on worker.
     """
     host = worker_host or WORKER_HOST
-    repo = repo_dir or REPO_DIR
+    repo = repo_dir or MTOR_CODE_DIR
     checks: list[dict[str, object]] = []
     all_ok = True
 
@@ -114,6 +116,71 @@ def check_health(
     if not disk_ok:
         all_ok = False
 
+    # Check 5: exactly one authoritative worker service/process tree.
+    service_ok = True
+    service_detail = "Skipped (localhost)"
+    process_ok = True
+    process_detail = "Skipped (localhost)"
+    if host != "localhost" and ssh_ok:
+        try:
+            result = subprocess.run(
+                [
+                    "ssh",
+                    host,
+                    "systemctl show temporal-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager; "
+                    "systemctl show mtor-worker.service "
+                    "--property=ActiveState,SubState,UnitFileState --no-pager 2>/dev/null || true",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            output = result.stdout
+            temporal_active = "ActiveState=active" in output and "SubState=running" in output
+            duplicate_absent = "UnitFileState=" not in output
+            duplicate_inactive = (
+                "UnitFileState=disabled" in output
+                and "ActiveState=inactive" in output
+                and "SubState=dead" in output
+            )
+            service_ok = result.returncode == 0 and temporal_active and (duplicate_inactive or duplicate_absent)
+            service_detail = (
+                "temporal-worker active; mtor-worker absent or disabled/dead"
+                if service_ok
+                else "Expected temporal-worker active and mtor-worker absent or disabled/dead"
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            service_ok = False
+            service_detail = f"Worker service check failed: {exc}"
+
+        try:
+            result = subprocess.run(
+                [
+                    "ssh",
+                    host,
+                    "ps -eo ppid,args | awk '/mtor[.]worker/ && /op run/ && $1 == 1 {count++} END {print count+0}'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            roots = int((result.stdout or "0").strip())
+            process_ok = result.returncode == 0 and roots == 1
+            process_detail = (
+                "one managed mtor.worker root"
+                if process_ok
+                else f"expected one mtor.worker root, found {roots}"
+            )
+        except (ValueError, subprocess.TimeoutExpired, OSError) as exc:
+            process_ok = False
+            process_detail = f"Worker process check failed: {exc}"
+
+    checks.append({"name": "worker_service_singleton", "ok": service_ok, "detail": service_detail})
+    checks.append({"name": "worker_process_singleton", "ok": process_ok, "detail": process_detail})
+    if not service_ok or not process_ok:
+        all_ok = False
+
     return HealthReport(ok=all_ok, checks=checks)
 
 
@@ -145,7 +212,7 @@ def deploy(
     """
     host = worker_host or WORKER_HOST
     remote = deploy_remote or DEPLOY_REMOTE
-    repo = repo_dir or REPO_DIR
+    repo = repo_dir or MTOR_CODE_DIR
     steps: list[dict[str, object]] = []
 
     # Step 1: push to deploy remote

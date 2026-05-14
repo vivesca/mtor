@@ -12,6 +12,12 @@ def _get_client():
 
         from temporalio.client import Client
 
+        try:
+            asyncio.get_running_loop()
+            return None, "cannot connect synchronously from a running event loop"
+        except RuntimeError:
+            pass
+
         async def _connect():
             return await Client.connect(TEMPORAL_HOST)
 

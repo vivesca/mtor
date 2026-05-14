@@ -114,6 +114,78 @@ class TestCheckHealth:
         ssh_check = next(c for c in report.checks if c["name"] == "worker_ssh")
         assert "Skipped" in str(ssh_check["detail"])
 
+    def test_check_health_detects_single_worker_service(self, tmp_path):
+        """Remote health passes when temporal-worker is active and duplicate unit is dead."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl show temporal-worker.service" in joined:
+                result.stdout = (
+                    "ActiveState=active\nSubState=running\nMainPID=123\n"
+                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
+                )
+            elif "ps -eo" in joined:
+                result.stdout = "1\n"
+            elif cmd[:2] == ["git", "status"]:
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        assert service_check["ok"] is True
+        assert process_check["ok"] is True
+
+    def test_check_health_fails_on_duplicate_worker_roots(self, tmp_path):
+        """Remote health fails when more than one mtor.worker root is active."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl show temporal-worker.service" in joined:
+                result.stdout = (
+                    "ActiveState=active\nSubState=running\nMainPID=123\n"
+                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
+                )
+            elif "ps -eo" in joined:
+                result.stdout = "2\n"
+            elif cmd[:2] == ["git", "status"]:
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        assert report.ok is False
+        assert process_check["ok"] is False
+        assert "found 2" in str(process_check["detail"])
+
 
 # ---------------------------------------------------------------------------
 # deploy tests

@@ -21,6 +21,13 @@ from mtor.envelope import _ok
 HEARTBEAT_DIR = "~/germline/loci/ribosome-heartbeats"
 HEARTBEAT_STALE_THRESHOLD = 120
 
+PROVIDER_MODELS = {
+    "zhipu": "glm-5.1",
+    "infini": "minimax-m2.7",
+    "volcano": "doubao-seed-2-0-code",
+    "gemini": "gemini",
+}
+
 
 # ---------------------------------------------------------------------------
 # Provider API probe
@@ -496,6 +503,24 @@ def doctor(*, reconcile: bool = False) -> None:
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
+    if pm is not None:
+        route_parts = [
+            f"{provider}({PROVIDER_MODELS.get(provider, provider)}, limit={pm.PROVIDER_LIMITS.get(provider, 2)})"
+            for provider in pm.PROVIDER_PRIORITY
+        ]
+        checks.append(
+            {
+                "name": "provider_routing",
+                "ok": True,
+                "detail": "priority: " + " > ".join(route_parts),
+            }
+        )
+        result["provider_routing"] = {
+            "priority": list(pm.PROVIDER_PRIORITY),
+            "models": {provider: PROVIDER_MODELS.get(provider, provider) for provider in pm.PROVIDER_PRIORITY},
+            "limits": {provider: pm.PROVIDER_LIMITS.get(provider, 2) for provider in pm.PROVIDER_PRIORITY},
+        }
+
     if pm is not None and WORKER_HOST != "localhost":
         try:
             health_result = subprocess.run(
