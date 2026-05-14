@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,25 @@ from pathlib import Path
 from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST
 
 MTOR_CODE_DIR = str(Path(__file__).resolve().parents[1])
+
+
+def _is_local_host(host: str) -> bool:
+    """Return True when *host* names the current machine."""
+    local_names = {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        socket.gethostname(),
+        socket.getfqdn(),
+    }
+    return host in local_names
+
+
+def _host_command(host: str, command: str) -> list[str]:
+    """Build a local or SSH command for *host*."""
+    if _is_local_host(host):
+        return ["bash", "-lc", command]
+    return ["ssh", host, command]
 
 
 @dataclass
@@ -38,9 +58,10 @@ def check_health(
     all_ok = True
 
     # Check 1: Worker SSH reachability
-    ssh_ok = False
-    ssh_detail = f"Skipped (host={host} is localhost)"
-    if host != "localhost":
+    host_is_local = _is_local_host(host)
+    ssh_ok = host_is_local
+    ssh_detail = f"Skipped (host={host} is local)"
+    if not host_is_local:
         try:
             result = subprocess.run(
                 ["ssh", host, "echo ok"],
@@ -52,7 +73,7 @@ def check_health(
             ssh_detail = f"SSH to {host} succeeded" if ssh_ok else f"SSH failed: {result.stderr.strip()[:100]}"
         except (subprocess.TimeoutExpired, OSError) as exc:
             ssh_detail = f"SSH to {host} failed: {exc}"
-    if not ssh_ok and host != "localhost":
+    if not ssh_ok and not host_is_local:
         all_ok = False
     checks.append({"name": "worker_ssh", "ok": ssh_ok, "detail": ssh_detail})
 
@@ -70,7 +91,7 @@ def check_health(
     if repo_ok:
         try:
             result = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "--untracked-files=no"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -87,11 +108,11 @@ def check_health(
 
     # Check 4: Disk space on worker (SSH)
     disk_ok = False
-    disk_detail = f"Skipped (host={host} is localhost)"
-    if host != "localhost" and ssh_ok:
+    disk_detail = f"Skipped (host={host} is local)"
+    if ssh_ok:
         try:
             result = subprocess.run(
-                ["ssh", host, "df -h . | tail -1 | awk '{print $5}'"],
+                _host_command(host, "df -h . | tail -1 | awk '{print $5}'"),
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -108,9 +129,6 @@ def check_health(
                 disk_detail = f"df command failed: {result.stderr.strip()[:80]}"
         except (subprocess.TimeoutExpired, OSError) as exc:
             disk_detail = f"Disk check error: {exc}"
-    elif host == "localhost":
-        disk_ok = True
-        disk_detail = "Skipped (localhost)"
     checks.append({"name": "worker_disk", "ok": disk_ok, "detail": disk_detail})
 
     if not disk_ok:
@@ -118,20 +136,19 @@ def check_health(
 
     # Check 5: exactly one authoritative worker service/process tree.
     service_ok = True
-    service_detail = "Skipped (localhost)"
+    service_detail = f"Skipped (host={host} unreachable)"
     process_ok = True
-    process_detail = "Skipped (localhost)"
-    if host != "localhost" and ssh_ok:
+    process_detail = f"Skipped (host={host} unreachable)"
+    if ssh_ok:
         try:
             result = subprocess.run(
-                [
-                    "ssh",
+                _host_command(
                     host,
                     "systemctl show temporal-worker.service "
                     "--property=ActiveState,SubState,MainPID --no-pager; "
                     "systemctl show mtor-worker.service "
                     "--property=ActiveState,SubState,UnitFileState --no-pager 2>/dev/null || true",
-                ],
+                ),
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -156,11 +173,10 @@ def check_health(
 
         try:
             result = subprocess.run(
-                [
-                    "ssh",
+                _host_command(
                     host,
                     "ps -eo ppid,args | awk '/mtor[.]worker/ && /op run/ && $1 == 1 {count++} END {print count+0}'",
-                ],
+                ),
                 capture_output=True,
                 text=True,
                 timeout=10,
