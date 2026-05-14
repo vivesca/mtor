@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -614,8 +615,14 @@ def doctor(*, reconcile: bool = False) -> None:
         )
     else:
         try:
+            local_names = {socket.gethostname(), socket.getfqdn(), "localhost"}
+            command = (
+                ["gh", "auth", "status"]
+                if WORKER_HOST in local_names
+                else ["ssh", WORKER_HOST, "gh auth status"]
+            )
             gh_result = subprocess.run(
-                ["ssh", WORKER_HOST, "gh auth status"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=15,
