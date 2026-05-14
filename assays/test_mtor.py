@@ -220,6 +220,7 @@ class TestExitCodes:
         assert data["ok"] is False
         assert data["error"]["code"] in (
             "MISSING_PROMPT",
+            "PROMPT_TOO_SHORT",
             "TEMPORAL_UNREACHABLE",
             "DISPATCH_ERROR",
         )
@@ -1637,6 +1638,9 @@ class TestSpecFlag:
         spec_file.write_text(
             "---\n"
             "status: ready\n"
+            "tests:\n"
+            "  functions:\n"
+            "    - test_feature\n"
             "---\n"
             "# Integration test task\n"
         )

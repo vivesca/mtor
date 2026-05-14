@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import subprocess
 import sys
 import time
@@ -35,6 +36,7 @@ from mtor import (
     TEMPORAL_HOST,
     VERSION,
     WORKER_HOST,
+    WORKER_LOG_DIR,
 )
 from mtor.client import _get_client
 from mtor.dedup import check_and_record as _check_dedup
@@ -82,7 +84,9 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)
                     if task_result:
-                        return task_result.get("review", {}).get("output_path", "")
+                        return task_result.get("review", {}).get(
+                            "output_path", ""
+                        ) or task_result.get("output_path", "")
                 return ""
 
             log_path = asyncio.run(_get_output_path())
@@ -92,7 +96,16 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
     if not log_path:
         try:
             find_result = subprocess.run(
-                ["ssh", WORKER_HOST, f"ls -t {OUTPUTS_DIR}/*.txt 2>/dev/null | head -20"],
+                [
+                    "ssh",
+                    WORKER_HOST,
+                    (
+                        f"find {OUTPUTS_DIR} {WORKER_LOG_DIR} -maxdepth 1 "
+                        f"\\( -name '*.txt' -o -name '{workflow_id}.log' -o "
+                        f"-name '{workflow_id}.jsonl' \\) -type f "
+                        f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -40 | cut -d' ' -f2-"
+                    ),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -100,9 +113,10 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
             if find_result.returncode == 0:
                 wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
                 for line in find_result.stdout.strip().splitlines():
-                    fname = line.strip().rsplit("/", 1)[-1]
-                    if wf_suffix in fname:
-                        log_path = line.strip()
+                    candidate = line.strip()
+                    fname = candidate.rsplit("/", 1)[-1]
+                    if workflow_id in fname or wf_suffix in fname:
+                        log_path = candidate
                         break
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -186,7 +200,7 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
 # Cyclopts CLI
 # ---------------------------------------------------------------------------
 
-app = App(help_flags=[], version_flags=[])
+app = App(help_flags=["--help", "-h"], version_flags=[])
 
 spec_app = App(name="spec", help_flags=[], version_flags=[])
 app.command(spec_app)
@@ -241,6 +255,30 @@ def default_handler(
         else:
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
+
+    subcommand_names = frozenset({
+        "riboseq", "list", "status", "logs", "cancel", "terminate",
+        "schema", "scout", "research", "scan", "doctor", "tsc", "rptor",
+        "approve", "deny", "reactivate", "rapa", "derapa", "deptor",
+        "dedeptor", "auto", "verdict", "review", "archive", "autophagy",
+        "init", "ragulator", "rictor",
+    })
+    stripped_prompt = prompt.strip()
+    if len(stripped_prompt) < 10 or stripped_prompt.lower() in subcommand_names:
+        cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+        sys.exit(
+            _err(
+                cmd,
+                f"Prompt too short or matches a subcommand name ({len(stripped_prompt)} chars, minimum 10). "
+                "Provide a meaningful task description.",
+                "PROMPT_TOO_SHORT",
+                "Provide a prompt >=10 characters that describes the task. "
+                "Use 'mtor --help' to see available commands.",
+                [_action("mtor --help", "Show available commands")],
+                exit_code=2,
+            )
+        )
+
     else:
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
@@ -538,7 +576,7 @@ def status(workflow_id: str, short: bool = False) -> None:
                 result_payload["task_preview"] = task_result.get("task", "")[:120]
                 result_payload["output_path"] = task_result.get("review", {}).get(
                     "output_path", ""
-                )
+                ) or task_result.get("output_path", "")
                 result_payload["merged"] = task_result.get("merged")
                 result_payload["verdict"] = task_result.get("review", {}).get("verdict")
 
@@ -794,37 +832,58 @@ def logs(
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)
                     if task_result:
-                        return task_result.get("review", {}).get("output_path", "")
+                        return task_result.get("review", {}).get(
+                            "output_path", ""
+                        ) or task_result.get("output_path", "")
                 return ""
 
             log_path = asyncio.run(_get_output_path())
         except Exception:
             pass
 
-    # Step 2: If no output_path from result, fall back to local glob then SSH ls
+    # Step 2: If no output_path from result, fall back to local glob then SSH ls.
+    # Rejected workflows often have no review.output_path but do have
+    # ~/code/mtor/logs/<workflow_id>.log from the worker tee.
     if not log_path:
         wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
         # Try local directory first
-        outputs_path = Path(OUTPUTS_DIR)
-        if outputs_path.exists():
-            for txt_file in sorted(outputs_path.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
-                if wf_suffix in txt_file.name:
-                    log_path = str(txt_file)
+        for base_dir, patterns in (
+            (Path(OUTPUTS_DIR), ("*.txt",)),
+            (Path(WORKER_LOG_DIR), (f"{workflow_id}.log", f"{workflow_id}.jsonl")),
+        ):
+            if log_path or not base_dir.exists():
+                continue
+            candidates = []
+            for pattern in patterns:
+                candidates.extend(base_dir.glob(pattern))
+            for candidate in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[:40]:
+                if workflow_id in candidate.name or wf_suffix in candidate.name:
+                    log_path = str(candidate)
                     break
         # Fall back to SSH
         if not log_path:
             try:
                 find_result = subprocess.run(
-                    ["ssh", WORKER_HOST, f"ls -t {OUTPUTS_DIR}/*.txt 2>/dev/null | head -20"],
+                    [
+                        "ssh",
+                        WORKER_HOST,
+                        (
+                            f"find {OUTPUTS_DIR} {WORKER_LOG_DIR} -maxdepth 1 "
+                            f"\\( -name '*.txt' -o -name '{workflow_id}.log' -o "
+                            f"-name '{workflow_id}.jsonl' \\) -type f "
+                            f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -40 | cut -d' ' -f2-"
+                        ),
+                    ],
                     capture_output=True,
                     text=True,
                     timeout=15,
                 )
                 if find_result.returncode == 0:
                     for line in find_result.stdout.strip().splitlines():
-                        fname = line.strip().rsplit("/", 1)[-1]
-                        if wf_suffix in fname:
-                            log_path = line.strip()
+                        candidate = line.strip()
+                        fname = candidate.rsplit("/", 1)[-1]
+                        if workflow_id in fname or wf_suffix in fname:
+                            log_path = candidate
                             break
             except (subprocess.TimeoutExpired, OSError):
                 pass
@@ -1081,7 +1140,14 @@ def history(
     """Show recent ribosome run history from JSONL log."""
     import json as _json
 
-    log_path = Path(REPO_DIR) / "loci" / "ribosome-runs.jsonl"
+    original_repo_dir = Path(os.environ.get("HOME", str(Path.home()))) / "germline"
+    if "MTOR_REPO_DIR" in os.environ:
+        repo_dir = Path(os.environ["MTOR_REPO_DIR"])
+    elif Path(REPO_DIR) == original_repo_dir:
+        repo_dir = Path.home() / "germline"
+    else:
+        repo_dir = Path(REPO_DIR)
+    log_path = repo_dir / "loci" / "ribosome-runs.jsonl"
     if not log_path.exists():
         _ok("mtor history", {"runs": [], "count": 0}, version=VERSION)
         return

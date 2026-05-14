@@ -127,7 +127,8 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     Requires start_new_session=True on the subprocess.
     Falls back to proc.kill() if pgid lookup fails.
     """
-    if proc.returncode is not None:
+    returncode = getattr(proc, "returncode", None)
+    if isinstance(returncode, int):
         return
     try:
         os.killpg(proc.pid, _signal.SIGKILL)
@@ -361,6 +362,24 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
 def _git_pull_ff_only(repo_root: str) -> None:
     """Pull latest so CC-written test files are available before ribosome runs."""
     try:
+        upstream = _subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=repo_root,
+        )
+        if upstream.returncode != 0:
+            fetch = _subprocess.run(
+                ["git", "fetch", "origin", "main"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=repo_root,
+            )
+            if fetch.returncode != 0:
+                print(f"WARNING: git fetch origin main failed: {fetch.stderr.strip()}", file=sys.stderr)
+            return
         result = _subprocess.run(
             ["git", "pull", "--ff-only"],
             capture_output=True,
@@ -592,7 +611,7 @@ async def _heartbeat_stall_check(
                 f"killing process (pid={proc.pid})",
                 file=sys.stderr,
             )
-            await _graceful_kill(proc)
+            _kill_process_group(proc)
             return
 
         # Compute diff content hash
@@ -616,7 +635,8 @@ async def _heartbeat_stall_check(
 
         recent_hashes.append(diff_hash)
         recent_stdout_bytes.append(current_stdout_bytes)
-        if len(recent_hashes) > stall_oscillation_threshold + 1:
+        max_stall_window = max(stall_frozen_threshold, stall_oscillation_threshold) + 1
+        if len(recent_hashes) > max_stall_window:
             recent_hashes.pop(0)
             recent_stdout_bytes.pop(0)
 
@@ -651,7 +671,7 @@ async def _heartbeat_stall_check(
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                await _graceful_kill(proc)
+                _kill_process_group(proc)
                 return
             if empty_ticks >= 80:
                 print(
@@ -705,7 +725,7 @@ async def _heartbeat_stall_check(
                     f"[stall-detect] killing stalled process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                await _graceful_kill(proc)
+                _kill_process_group(proc)
                 return
 
 
