@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 TEMPORAL_HOST = os.environ.get("MTOR_TEMPORAL_HOST", "ganglion:7233")
 TASK_QUEUE = os.environ.get("MTOR_TASK_QUEUE", "translation-queue")
 WORKFLOW_TYPE = os.environ.get("MTOR_WORKFLOW_TYPE", "TranslationWorkflow")
