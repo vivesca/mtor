@@ -15,9 +15,9 @@ _HOME = os.environ.get("HOME", "/home/vivesca")
 REPO_DIR = os.environ.get("MTOR_REPO_DIR", os.path.join(_HOME, "germline"))
 OUTPUTS_DIR = os.environ.get(
     "MTOR_OUTPUTS_DIR",
-    os.path.join(_HOME, "germline", "loci", "ribosome-outputs"),
+    "/home/vivesca/germline/loci/ribosome-outputs",
 )
-WORKER_LOG_DIR = os.environ.get("MTOR_WORKER_LOG_DIR", os.path.join(_HOME, "code", "mtor", "logs"))
+WORKER_LOG_DIR = os.environ.get("MTOR_WORKER_LOG_DIR", "/home/vivesca/code/mtor/logs")
 LOG_TAIL_LINES = 30
 
 # Optional coaching file path (string, not pathlib — Temporal sandbox restriction).
