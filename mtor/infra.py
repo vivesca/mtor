@@ -10,7 +10,16 @@ from pathlib import Path
 
 from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST
 
-MTOR_CODE_DIR = str(Path(__file__).resolve().parents[1])
+
+def _default_mtor_code_dir() -> str:
+    """Prefer the checkout repo over the installed wheel location."""
+    checkout = Path.home() / "code" / "mtor"
+    if (checkout / ".git").exists():
+        return str(checkout)
+    return str(Path(__file__).resolve().parents[1])
+
+
+MTOR_CODE_DIR = _default_mtor_code_dir()
 
 
 def _is_local_host(host: str) -> bool:
@@ -105,6 +114,8 @@ def check_health(
         except (subprocess.TimeoutExpired, OSError) as exc:
             git_detail = f"git status error: {exc}"
     checks.append({"name": "git_clean", "ok": git_clean, "detail": git_detail})
+    if not git_clean:
+        all_ok = False
 
     # Check 4: Disk space on worker (SSH)
     disk_ok = False

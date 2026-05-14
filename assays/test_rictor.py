@@ -93,6 +93,29 @@ class TestCheckHealth:
         repo_check = next(c for c in report.checks if c["name"] == "repo_dir")
         assert repo_check["ok"] is False
 
+    def test_check_health_git_failure_makes_report_fail(self, tmp_path):
+        """git status failure is reflected in aggregate health."""
+        from mtor.infra import check_health
+
+        tmp_path.mkdir(exist_ok=True)
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:2] == ["git", "status"]:
+                result.returncode = 128
+                result.stderr = "not a git repository"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="localhost", repo_dir=str(tmp_path))
+
+        git_check = next(c for c in report.checks if c["name"] == "git_clean")
+        assert report.ok is False
+        assert git_check["ok"] is False
+
     def test_check_health_ssh_unreachable(self):
         """check_health reports SSH failure for unreachable host."""
         from mtor.infra import check_health
