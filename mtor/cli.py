@@ -900,12 +900,14 @@ def logs(
             )
         )
 
-    # Try local file first (avoids SSH round-trip); fetch + cache if missing
+    # Try local file first (avoids SSH round-trip); fetch + cache if missing.
+    # Remote worker paths such as /home/vivesca/... are not valid local cache roots.
     local_path = Path(log_path)
     if not local_path.is_absolute():
         local_path = Path.home() / log_path.lstrip("~/")
     if not local_path.exists():
         # Fetch single file from worker host into local mirror
+        local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(Exception):
             subprocess.run(
