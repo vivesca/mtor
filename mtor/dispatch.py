@@ -199,8 +199,10 @@ def _dispatch_prompt(
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
-    prompt_path = Path(prompt).expanduser()
-    if prompt_path.is_file():
+    prompt_path = None
+    if "\n" not in prompt and len(prompt) < 512:
+        prompt_path = Path(prompt).expanduser()
+    if prompt_path is not None and prompt_path.is_file():
         prompt = prompt_path.read_text(encoding="utf-8").strip()
         # Strip YAML frontmatter (--- ... ---) — confuses GLM into treating spec as document
         prompt = re.sub(r"\A---\n.*?\n---\n*", "", prompt, count=1, flags=re.DOTALL).strip()

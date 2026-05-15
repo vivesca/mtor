@@ -437,6 +437,15 @@ class TestFilePathPrompt:
         assert exit_code == 0
         assert data["ok"] is True
 
+    def test_dispatch_long_multiline_prompt_not_treated_as_path(self):
+        """A long spec-injected prompt is a literal prompt, not a filesystem path."""
+        mock_client, _ = make_mock_client()
+        prompt = "# Spec\n\n" + ("Implement the requested change.\n" * 80)
+        with _patch_client(mock_client):
+            exit_code, data = invoke([prompt])
+        assert exit_code == 0
+        assert data["ok"] is True
+
 
 # ---------------------------------------------------------------------------
 # Coaching injection
