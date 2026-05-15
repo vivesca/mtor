@@ -751,7 +751,7 @@ async def _heartbeat_stall_check(
                 empty_ticks = 0  # stdout is active, agent is not stalled
                 continue
             empty_ticks += 1
-            if empty_ticks >= 120:
+            if empty_ticks >= 30:
                 if workflow_id:
                     with contextlib.suppress(Exception):
                         _log_event(workflow_id, "stall_detected", tick=tick, reason="empty_diff_timeout")
@@ -763,7 +763,7 @@ async def _heartbeat_stall_check(
                 )
                 _kill_process_group(proc)
                 return
-            if empty_ticks >= 80:
+            if empty_ticks >= 20:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout warning at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",

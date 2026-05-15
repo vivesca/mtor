@@ -39,6 +39,12 @@ def _mock_nonempty_diff(content: str = "diff --git a/foo.py b/foo.py\n+line\n") 
     return r
 
 
+def _mock_empty_diff() -> MagicMock:
+    r = MagicMock()
+    r.stdout = ""
+    return r
+
+
 class TestFrozenHashGrowingStdout:
     """Frozen diff hash + growing stdout → agent is active, no kill."""
 
@@ -191,4 +197,34 @@ class TestBackwardCompatibleNoCounter:
                 skip_stall=False,
             ))
 
+        proc.kill.assert_called_once()
+
+
+class TestEmptyDiffStaticStdout:
+    """Empty diff + static stdout should not wait for the 2h activity timeout."""
+
+    def test_empty_diff_kills_after_30_empty_ticks(self):
+        proc = _make_proc()
+        stdout_counter = [0]
+        sleep_calls = 0
+
+        async def mock_sleep(seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 35:
+                raise AssertionError("empty diff stall detector waited too long")
+
+        with (
+            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch("mtor.worker.translocase.activity") as mock_activity,
+            patch("asyncio.sleep", side_effect=mock_sleep),
+        ):
+            mock_activity.is_cancelled.return_value = False
+            mock_activity.heartbeat = MagicMock()
+            _run(_heartbeat_stall_check(
+                proc, "/tmp/worktree", "zhipu", "test task",
+                skip_stall=False, stdout_counter=stdout_counter,
+            ))
+
+        assert sleep_calls <= 35
         proc.kill.assert_called_once()
