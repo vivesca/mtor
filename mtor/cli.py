@@ -805,11 +805,15 @@ def logs(
     workflow_id: Annotated[str | None, Parameter(name=["workflow_id"])] = None,
     *,
     active: Annotated[bool, Parameter(name=["--active"])] = False,
+    lines: Annotated[int, Parameter(name=["--lines", "-n"])] = LOG_TAIL_LINES,
 ) -> None:
-    """Fetch last 30 lines of workflow output from worker host. --active shows currently-writing logs."""
+    """Fetch workflow output from worker host. --active shows currently-writing logs."""
     if active:
         _active_logs()
         return
+
+    if lines < 1 or lines > 1000:
+        sys.exit(_err("mtor logs", f"lines must be 1-1000, got {lines}", "INVALID_LINES", "Try --lines 30", []))
 
     if workflow_id is None:
         sys.exit(
@@ -935,13 +939,13 @@ def logs(
                 timeout=15,
             )
     if local_path.exists():
-        lines = local_path.read_text().splitlines()[-LOG_TAIL_LINES:]
+        log_lines = local_path.read_text().splitlines()[-lines:]
         _ok(
             cmd,
             {
-                "lines": lines,
+                "lines": log_lines,
                 "log_path": str(local_path),
-                "truncated": len(lines) == LOG_TAIL_LINES,
+                "truncated": len(log_lines) == lines,
             },
             [
                 _action(f"mtor status {workflow_id}", "Check workflow status"),
@@ -954,7 +958,7 @@ def logs(
     # Fall back to SSH
     try:
         result = subprocess.run(
-            ["ssh", WORKER_HOST, f"tail -{LOG_TAIL_LINES} {log_path}"],
+            ["ssh", WORKER_HOST, f"tail -{lines} {log_path}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -982,13 +986,13 @@ def logs(
                 )
             )
 
-        lines = result.stdout.splitlines()
+        log_lines = result.stdout.splitlines()
         _ok(
             cmd,
             {
-                "lines": lines,
+                "lines": log_lines,
                 "log_path": log_path,
-                "truncated": len(lines) == LOG_TAIL_LINES,
+                "truncated": len(log_lines) == lines,
             },
             [
                 _action(f"mtor status {workflow_id}", "Check workflow status"),

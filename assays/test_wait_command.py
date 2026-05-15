@@ -14,6 +14,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+async def _instant_sleep(_delay: float) -> None:
+    return None
+
+
 def _make_status_obj(name: str):
     return SimpleNamespace(name=name)
 
@@ -69,7 +73,7 @@ def mock_client_completed():
 def test_wait_returns_when_completed(mock_client_completed):
     from mtor import cli
     with patch.object(cli, "_get_client", return_value=(mock_client_completed, None)):
-        with patch("asyncio.sleep", return_value=asyncio.sleep(0)):
+        with patch("asyncio.sleep", side_effect=_instant_sleep):
             envelope, exit_code = _capture_envelope(cli.wait, "wf-test", interval=2)
     assert exit_code == 0
     result = envelope.get("result", {})
@@ -112,7 +116,7 @@ def test_wait_timeout_returns_error_envelope():
     times = iter([0.0, 0.0, 100.0, 200.0])
     with patch.object(cli, "_get_client", return_value=(client, None)):
         with patch("time.time", side_effect=lambda: next(times)):
-            with patch("asyncio.sleep", return_value=asyncio.sleep(0)):
+            with patch("asyncio.sleep", side_effect=_instant_sleep):
                 envelope, exit_code = _capture_envelope(cli.wait, "wf-stuck", timeout=10, interval=2)
     assert exit_code == 5
     assert envelope.get("error", {}).get("code") == "WAIT_TIMEOUT"

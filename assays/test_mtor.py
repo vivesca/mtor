@@ -929,6 +929,44 @@ class TestLogs:
         wf_handle.result.assert_not_awaited()
         assert data["result"]["lines"] == ["header", "still running"]
 
+    def test_logs_lines_option_limits_local_tail(self, tmp_path, monkeypatch):
+        """--lines controls the number of returned log lines."""
+        import mtor.cli as _cli
+
+        workflow_id = "ribosome-glm51-spec-a989709c-6a06468c"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.jsonl"
+        mock_client, wf_handle = make_mock_client()
+        wf_handle.result = AsyncMock(
+            return_value={
+                "exit_code": 0,
+                "success": True,
+                "output_path": remote_path,
+            }
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd and cmd[0] == "scp":
+                Path(cmd[-1]).write_text("one\ntwo\nthree\n")
+            return result
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["logs", workflow_id, "--lines", "2"])
+
+        assert exit_code == 0
+        assert data["result"]["lines"] == ["two", "three"]
+        assert data["result"]["truncated"] is True
+
+    def test_logs_rejects_invalid_lines(self):
+        """--lines has a bounded range."""
+        exit_code, data = invoke(["logs", "wf-x", "--lines", "0"])
+        assert exit_code != 0
+        assert data["error"]["code"] == "INVALID_LINES"
+
 
 # ---------------------------------------------------------------------------
 # Scout mode tests
