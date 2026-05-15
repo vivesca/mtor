@@ -266,6 +266,48 @@ class TestDispatch:
         commands = [na["command"] for na in data["next_actions"]]
         assert any("status" in cmd for cmd in commands)
 
+    def test_dispatch_harness_passes_to_workflow_spec(self):
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke([
+                "Make assays/test_harness_routing.py pass",
+                "--harness",
+                "goose",
+            ])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        kwargs = mock_client.start_workflow.await_args.kwargs
+        spec = kwargs["args"][0][0]
+        assert spec["harness"] == "goose"
+        assert kwargs["id"].startswith("goose-")
+
+    def test_dispatch_default_harness_falls_back_to_provider(self):
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["Make assays/test_harness_routing.py pass"])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        kwargs = mock_client.start_workflow.await_args.kwargs
+        spec = kwargs["args"][0][0]
+        assert spec["harness"] == ""
+        assert kwargs["id"].startswith("ribosome-")
+
+    def test_dispatch_unknown_harness_fails_before_temporal(self):
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke([
+                "Make assays/test_harness_routing.py pass",
+                "--harness",
+                "not-a-harness",
+            ])
+
+        assert exit_code == 2
+        assert data["ok"] is False
+        assert data["error"]["code"] == "UNKNOWN_HARNESS"
+        mock_client.start_workflow.assert_not_called()
+
     def test_dispatch_no_prompt_returns_error_envelope(self):
         """Empty prompt string must return error with fix field."""
         _exit_code, data = invoke([""])

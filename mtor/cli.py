@@ -43,6 +43,7 @@ from mtor.dedup import check_and_record as _check_dedup
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
+from mtor.harness import PROVIDER_HARNESS_MAP
 from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
 from mtor.scan import _run_checks
 from mtor.triage import (
@@ -287,6 +288,7 @@ def default_handler(
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
     spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
+    harness: Annotated[str, Parameter(name=["--harness"])] = "",
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
@@ -351,6 +353,20 @@ def default_handler(
             )
         )
     else:
+        if harness and harness not in PROVIDER_HARNESS_MAP:
+            cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
+            allowed = ", ".join(sorted(PROVIDER_HARNESS_MAP))
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Unknown harness '{harness}'",
+                    "UNKNOWN_HARNESS",
+                    f"Use one of: {allowed}",
+                    [],
+                    exit_code=2,
+                )
+            )
+
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
@@ -413,6 +429,7 @@ def default_handler(
             skip_sha_check=skip_sha_check,
             chain=then,
             spec_path=spec,
+            harness=harness,
         )
 
 

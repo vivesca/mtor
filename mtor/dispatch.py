@@ -226,7 +226,7 @@ def _dispatch_prompt(
     wait: bool = False,
     timeout: int = 300,
     spec_path: Path | None = None,
-    harness: str = "ribosome",
+    harness: str = "",
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -325,7 +325,11 @@ def _dispatch_prompt(
 
         # Deterministic ID — Temporal rejects if already running (dedup)
         resolved_provider = provider or _resolve_default_provider(spec_mode)
-        workflow_id = _make_workflow_id(full_prompt, resolved_provider, harness=harness)
+        workflow_id = _make_workflow_id(
+            full_prompt,
+            resolved_provider,
+            harness=harness or "ribosome",
+        )
         spec = {
             "task": full_prompt,
             "provider": resolved_provider,
