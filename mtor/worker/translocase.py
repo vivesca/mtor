@@ -166,6 +166,20 @@ def _write_attempt_summary(
         f.write(json.dumps(summary) + "\n")
 
 
+def _log_event(workflow_id: str, event_type: str, **fields) -> None:
+    """Append one lifecycle event to the workflow's JSONL log."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "type": event_type,
+        "workflow_id": workflow_id,
+        "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **fields,
+    }
+    log_file = LOG_DIR / f"{workflow_id}.jsonl"
+    with open(log_file, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill the entire process group (ribosome + claude + children).
 
@@ -625,6 +639,7 @@ async def _tee_stream(
 async def _heartbeat_stall_check(
     proc, work_dir: str, provider: str, task: str, *,
     skip_stall: bool = False, stdout_counter: list[int] | None = None,
+    workflow_id: str = "",
 ) -> None:
     """Dual-signal stall detection: git diff hash + stdout byte growth.
 
@@ -713,6 +728,9 @@ async def _heartbeat_stall_check(
                 continue
             empty_ticks += 1
             if empty_ticks >= 120:
+                if workflow_id:
+                    with contextlib.suppress(Exception):
+                        _log_event(workflow_id, "stall_detected", tick=tick, reason="empty_diff_timeout")
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
@@ -761,6 +779,9 @@ async def _heartbeat_stall_check(
 
         if is_frozen or is_oscillating:
             stall_type = "frozen" if is_frozen else "oscillating"
+            if workflow_id:
+                with contextlib.suppress(Exception):
+                    _log_event(workflow_id, "stall_detected", tick=tick, reason=f"{stall_type}_diff")
             warnings_sent += 1
             print(
                 f"[stall-detect] {stall_type} at tick {tick} "
@@ -849,6 +870,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
     # Create Langfuse trace for this task execution (no-op if langfuse not installed)
     workflow_id = activity.info().workflow_id
+    _log_event(workflow_id, "dispatch", task=task[:200], mode=mode)
     _trace = create_task_trace(task, provider, workflow_id)
 
     # Use structured repo parameter when provided; fall back to prompt mining.
@@ -943,6 +965,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
         _attempted.add(resolved_provider)
         _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
+        _log_event(workflow_id, "provider_selected", provider=resolved_provider, attempt=len(_attempted))
         print(
             f"[translocase] selected: {resolved_provider} "
             f"(health: {health.get(resolved_provider, {}).get('state', 'closed')})",
@@ -966,6 +989,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             env={**os.environ, "RIBOSOME_PROVIDER": harness or resolved_provider, "HOME": str(Path.home())},
             start_new_session=True,  # process group kill — prevents orphan ribosome processes
         )
+        _log_event(workflow_id, "subprocess_started", pid=proc.pid)
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
 
@@ -1001,6 +1025,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 proc, work_dir, provider, task,
                 skip_stall=_skip_stall,
                 stdout_counter=stdout_counter,
+                workflow_id=workflow_id,
             )
         )
         try:
@@ -1091,17 +1116,17 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         save_health(health)
 
         try:
-            _write_attempt_summary(
-                workflow_id=workflow_id,
+            _log_event(
+                workflow_id,
+                "subprocess_exited",
                 provider=resolved_provider,
                 exit_code=rc,
-                duration_seconds=_time.monotonic() - _run_start,
+                duration_seconds=round(_time.monotonic() - _run_start, 2),
                 stdout_bytes=len(stdout_bytes),
                 stderr_bytes=len(stderr_bytes),
-                work_dir=work_dir,
             )
         except Exception as exc:
-            print(f"WARNING: failed to write attempt summary: {exc}", file=sys.stderr)
+            print(f"WARNING: failed to write lifecycle event: {exc}", file=sys.stderr)
 
         # Retry on rate-limit exit: circuit-trip this provider, select next, re-run
         if rc == EXIT_RATE_LIMITED:

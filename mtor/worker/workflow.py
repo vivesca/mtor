@@ -21,7 +21,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from pathlib import Path
 
-    from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle
+    from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle, _log_event
 
 # Retry policy: 2 attempts max (translation tasks mutate files, not safely retriable)
 _RETRY_POLICY = RetryPolicy(
@@ -128,6 +128,17 @@ class TranslationWorkflow:
         # so dispatch can log it.  Old replays keep current behavior (no output_path).
         if use_review_v2:
             review = {**review, "output_path": result.get("output_path", "")}
+
+        # Log structured verdict event for lifecycle tracking
+        try:
+            _log_event(
+                workflow.info().workflow_id,
+                "verdict",
+                approved=review.get("approved", False),
+                flags=review.get("flags", []),
+            )
+        except Exception:
+            pass
 
         # Upsert verdict search attribute if available
         if review.get("verdict"):
