@@ -468,7 +468,9 @@ def _inject_spec_constraints(
     # form so prompts do not leak the local machine's absolute HOME.
     repo = spec.get("repo", "~")
     if repo != "~":
-        repo = _normalize_spec_repo_for_worker(str(repo))
+        repo = str(repo)
+        if not repo.startswith("/home/vivesca/"):
+            repo = _normalize_spec_repo_for_worker(repo)
         parts.append(f"Working directory: {repo}")
 
     # Test run command and function list
