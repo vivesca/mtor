@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST
+from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST, WORKER_LOG_DIR
 
 
 def _default_mtor_code_dir() -> str:
@@ -20,6 +21,7 @@ def _default_mtor_code_dir() -> str:
 
 
 MTOR_CODE_DIR = _default_mtor_code_dir()
+REMOTE_MTOR_CODE_DIR = str(Path(WORKER_LOG_DIR).parent)
 
 
 def _is_local_host(host: str) -> bool:
@@ -56,6 +58,7 @@ def check_health(
     *,
     worker_host: str | None = None,
     repo_dir: str | None = None,
+    remote_repo_dir: str | None = None,
 ) -> HealthReport:
     """Run infrastructure health checks and return a report.
 
@@ -63,6 +66,7 @@ def check_health(
     """
     host = worker_host or WORKER_HOST
     repo = repo_dir or MTOR_CODE_DIR
+    remote_repo = remote_repo_dir or REMOTE_MTOR_CODE_DIR
     checks: list[dict[str, object]] = []
     all_ok = True
 
@@ -86,10 +90,29 @@ def check_health(
         all_ok = False
     checks.append({"name": "worker_ssh", "ok": ssh_ok, "detail": ssh_detail})
 
-    # Check 2: Repo directory exists
-    repo_path = Path(repo)
-    repo_ok = repo_path.exists()
-    repo_detail = f"Repo at {repo} exists" if repo_ok else f"Repo not found: {repo}"
+    # Check 2: Worker repo directory exists
+    checked_repo = repo if host_is_local else remote_repo
+    if not ssh_ok and not host_is_local:
+        repo_ok = False
+        repo_detail = f"Skipped (host={host} unreachable)"
+    elif host_is_local:
+        repo_ok = Path(checked_repo).exists()
+        repo_detail = (
+            f"Repo at {checked_repo} exists" if repo_ok else f"Repo not found: {checked_repo}"
+        )
+    else:
+        result = subprocess.run(
+            _host_command(host, f"test -d {shlex.quote(checked_repo)}/.git"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        repo_ok = result.returncode == 0
+        repo_detail = (
+            f"Repo at {checked_repo} exists on {host}"
+            if repo_ok
+            else f"Repo not found on {host}: {checked_repo}"
+        )
     if not repo_ok:
         all_ok = False
     checks.append({"name": "repo_dir", "ok": repo_ok, "detail": repo_detail})
@@ -99,13 +122,25 @@ def check_health(
     git_detail = "Skipped (repo missing)"
     if repo_ok:
         try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=no"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=repo,
-            )
+            if host_is_local:
+                result = subprocess.run(
+                    ["git", "status", "--porcelain", "--untracked-files=no"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=checked_repo,
+                )
+            else:
+                result = subprocess.run(
+                    _host_command(
+                        host,
+                        f"cd {shlex.quote(checked_repo)} && "
+                        "git status --porcelain --untracked-files=no",
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
             if result.returncode == 0:
                 git_clean = result.stdout.strip() == ""
                 git_detail = "Working tree clean" if git_clean else f"Uncommitted changes: {result.stdout.strip()[:80]}"
@@ -228,6 +263,7 @@ def deploy(
     worker_host: str | None = None,
     deploy_remote: str | None = None,
     repo_dir: str | None = None,
+    remote_repo_dir: str | None = None,
 ) -> DeployResult:
     """Sync code to worker host, restart Temporal worker, verify health.
 
@@ -240,6 +276,7 @@ def deploy(
     host = worker_host or WORKER_HOST
     remote = deploy_remote or DEPLOY_REMOTE
     repo = repo_dir or MTOR_CODE_DIR
+    remote_repo = remote_repo_dir or REMOTE_MTOR_CODE_DIR
     steps: list[dict[str, object]] = []
 
     # Step 1: push to deploy remote
@@ -263,13 +300,25 @@ def deploy(
         [
             "ssh",
             host,
-            f"cd {repo} && git merge deploy-sync --no-edit; git branch -d deploy-sync 2>/dev/null; true",
+            "bash",
+            "-lc",
+            (
+                f"set -e; cd {shlex.quote(remote_repo)}; "
+                "git merge deploy-sync --no-edit; "
+                "git branch -d deploy-sync 2>/dev/null || true"
+            ),
         ],
         capture_output=True,
         text=True,
         timeout=15,
     )
     steps.append({"step": "merge", "ok": merge.returncode == 0})
+    if merge.returncode != 0:
+        return DeployResult(
+            steps=steps,
+            healthy=False,
+            error=f"merge failed: {merge.stderr.strip()[:200]}",
+        )
 
     # Step 3: restart worker
     restart = subprocess.run(
@@ -288,7 +337,7 @@ def deploy(
 
     # Step 4: verify health
     time.sleep(3)
-    report = check_health(worker_host=host, repo_dir=repo)
+    report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
     steps.append({"step": "health_check", "ok": report.ok})
 
     return DeployResult(
