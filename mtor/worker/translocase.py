@@ -121,6 +121,11 @@ def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> floa
     return max(1.0, wait + jitter)
 
 
+def _is_coaching_bloat_error(rc: int, stderr: str) -> bool:
+    """Return True when ribosome failed before launch due to coaching size."""
+    return rc == 1 and "coaching file" in stderr.lower() and "limit 10kb" in stderr.lower()
+
+
 def _write_attempt_summary(
     *,
     workflow_id: str,
@@ -1121,6 +1126,20 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _auto_commit(str(work_dir), wf_id)
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
+
+        if _is_coaching_bloat_error(rc, stderr):
+            _r = {
+                "success": False,
+                "exit_code": rc,
+                "provider": resolved_provider,
+                "task": task[:200],
+                "stdout": stdout[:1000],
+                "stderr": stderr[:1000],
+                "error": "coaching_bloat",
+                "non_retryable": True,
+            }
+            finalize_trace(_trace, _r)
+            return _r
 
         # Detect rate-limit errors from stderr on non-zero, non-42 exits
         suggested_wait: float | None = None
