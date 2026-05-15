@@ -252,6 +252,19 @@ def test_resolve_dag_dispatched_not_dispatchable(tmp_path):
     assert spec_a["dispatchable"] is False
 
 
+@pytest.mark.parametrize("status", ["draft", "failed", "open", "queued", "shipped"])
+def test_resolve_dag_only_ready_status_dispatchable(tmp_path, status):
+    """Specs with non-ready workflow states are not dispatchable."""
+    spec_file = tmp_path / "spec-a.md"
+    spec_file.write_text(f"---\nstatus: {status}\n---\n", encoding="utf-8")
+
+    specs = scan_specs(tmp_path)
+    resolved = resolve_dag(specs)
+
+    spec_a = next(s for s in resolved if s["name"] == "spec-a")
+    assert spec_a["dispatchable"] is False
+
+
 # ---------------------------------------------------------------------------
 # DAG display
 # ---------------------------------------------------------------------------
@@ -313,6 +326,20 @@ def test_rptor_pending_only_shows_ready(tmp_path):
     assert exit_code == 0
     assert "ready" in data["result"]["specs"]
     assert data["result"]["counts"]["ready"] == 1
+
+
+def test_rptor_pending_excludes_non_ready_statuses(tmp_path):
+    """mtor rptor --pending excludes draft/failed/open specs."""
+    (tmp_path / "ready.md").write_text("---\nstatus: ready\n---\n", encoding="utf-8")
+    (tmp_path / "draft.md").write_text("---\nstatus: draft\n---\n", encoding="utf-8")
+    (tmp_path / "failed.md").write_text("---\nstatus: failed\n---\n", encoding="utf-8")
+    (tmp_path / "open.md").write_text("---\nstatus: open\n---\n", encoding="utf-8")
+
+    exit_code, data = invoke(["rptor", "--pending", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    assert data["result"]["counts"]["ready"] == 1
+    assert [spec["name"] for spec in data["result"]["specs"]["ready"]] == ["ready"]
 
 
 def test_rptor_empty_directory(tmp_path):

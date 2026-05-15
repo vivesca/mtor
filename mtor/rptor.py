@@ -295,11 +295,8 @@ def resolve_dag(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Resolve DAG dispatchability for specs.
 
     For each spec:
-      - If status is "done": dispatchable = False (already complete)
-      - If status is "dispatched": dispatchable = False (in flight)
-      - If status is "superseded": dispatchable = False
-      - Else: dispatchable = True only when ALL depends_on have status "done"
-                AND the spec's own status is not "done"
+      - If status is "ready": dispatchable = True only when ALL depends_on have status "done"
+      - Else: dispatchable = False
 
     Raises CycleDetected if a circular dependency exists among specs.
 
@@ -314,11 +311,11 @@ def resolve_dag(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
     for spec in specs:
         status = spec.get("status", "ready")
-        if status in ("done", "dispatched", "superseded", "stale"):
-            dispatchable = False
-        else:
+        if status == "ready":
             deps = spec.get("depends_on", [])
             dispatchable = all(dep in done_names for dep in deps)
+        else:
+            dispatchable = False
         resolved.append({**spec, "dispatchable": dispatchable})
     return resolved
 
