@@ -314,25 +314,16 @@ class TestWorkflowSpecShape:
 # ---------------------------------------------------------------------------
 
 
-class TestRepoTildeExpansion:
-    """Specs with `repo: ~/...` must be expanded before reaching subprocess cwd.
+class TestRepoWorkerPathNormalization:
+    """Specs with `repo: ~/...` must stay worker-relative through dispatch.
 
-    Python's asyncio.create_subprocess_exec does NOT tilde-expand the `cwd`
-    argument. Passing a literal `~/code/foo` raises FileNotFoundError inside
-    the activity with no log output — a catastrophic silent failure. Expansion
-    must happen at two layers so stray `~` can never reach subprocess.cwd:
-
-    1. dispatch.py when reading the repo from spec frontmatter.
-    2. translocase.translate() defensively, for specs reaching Temporal via
-       other clients.
-
-    Ganglion incident 2026-04-11: a spec with `repo: ~/code/recombinase`
-    produced a mysterious activity_failed in 10s with no logs, because
-    subprocess.cwd got the literal tilde path.
+    dispatch.py runs on macOS, while translocase runs on Ganglion. Expanding
+    `~/code/foo` on the Mac yields `/Users/terry/code/foo`, which does not
+    exist on the worker. The worker activity performs final expansion.
     """
 
-    def test_dispatch_expands_tilde_from_spec_frontmatter(self, tmp_path, monkeypatch):
-        """The spec-ingest path in dispatch.py must expand `~`."""
+    def test_dispatch_preserves_tilde_from_spec_frontmatter(self, tmp_path):
+        """The spec-ingest path in dispatch.py keeps `~` for the worker."""
         spec_file = tmp_path / "tilde-spec.md"
         spec_file.write_text(
             "---\n"
@@ -342,29 +333,31 @@ class TestRepoTildeExpansion:
             "Do something\n"
         )
 
-        # Pin HOME so the expansion is deterministic in CI.
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-
-        # Replicate the exact logic from dispatch.py that runs on ingest.
+        from mtor.dispatch import _normalize_spec_repo_for_worker
         from mtor.rptor import parse_spec
 
         parsed = parse_spec(spec_file)
         repo = parsed.get("repo", "~")
         spec: dict[str, str] = {}
         if repo != "~":
-            spec["repo"] = str(Path(repo).expanduser())
+            spec["repo"] = _normalize_spec_repo_for_worker(repo)
 
-        assert spec["repo"] == str(fake_home / "code/myproject")
-        # And critically: no leading tilde survived.
-        assert not spec["repo"].startswith("~")
+        assert spec["repo"] == "~/code/myproject"
 
     def test_dispatch_leaves_absolute_paths_untouched(self, tmp_path):
-        """Absolute paths must round-trip unchanged — expansion is a no-op."""
+        """Non-home absolute paths must round-trip unchanged."""
+        from mtor.dispatch import _normalize_spec_repo_for_worker
+
         absolute = "/var/lib/custom/repo"
-        result = str(Path(absolute).expanduser())
+        result = _normalize_spec_repo_for_worker(absolute)
         assert result == absolute
+
+    def test_dispatch_maps_local_home_absolute_path_back_to_tilde(self, tmp_path):
+        """A local macOS absolute path under HOME becomes worker-relative."""
+        from mtor.dispatch import _normalize_spec_repo_for_worker
+
+        result = _normalize_spec_repo_for_worker(str(Path.home() / "code/mtor"))
+        assert result == "~/code/mtor"
 
     def test_dispatch_skips_expansion_for_default_tilde_marker(self, tmp_path):
         """A bare `~` is the 'unspecified' sentinel and must NOT become HOME.

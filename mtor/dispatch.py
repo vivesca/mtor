@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import re
 import subprocess
 import sys
@@ -184,6 +185,21 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     return True
 
 
+def _normalize_spec_repo_for_worker(repo: str) -> str:
+    """Keep spec repo paths valid on the worker host."""
+    if repo == "~" or repo.startswith("~/"):
+        return repo
+
+    path = Path(repo)
+    if path.is_absolute():
+        with contextlib.suppress(ValueError):
+            rel = path.relative_to(Path.home())
+            return f"~/{rel.as_posix()}"
+        return repo
+
+    return repo
+
+
 def _dispatch_prompt(
     prompt: str,
     *,
@@ -302,22 +318,7 @@ def _dispatch_prompt(
             parsed = parse_spec(spec_path)
             repo = parsed.get("repo", "~")
             if repo != "~":
-                # Normalize repo to an absolute path.  Bare names like
-                # "terryli-hm" or "germline" must be resolved — expanduser()
-                # alone only handles `~` prefixes, leaving bare names as
-                # relative paths that crash translocase with FileNotFoundError
-                # when used as subprocess cwd.
-                resolved = Path(repo).expanduser()
-                if not resolved.is_absolute():
-                    # Try ~/code/<name> first (most repos), then ~/<name>
-                    for candidate in [Path.home() / "code" / repo, Path.home() / repo]:
-                        if candidate.is_dir():
-                            resolved = candidate
-                            break
-                    else:
-                        # Last resort: resolve relative to cwd
-                        resolved = Path(repo).resolve()
-                spec["repo"] = str(resolved)
+                spec["repo"] = _normalize_spec_repo_for_worker(str(repo))
 
         from temporalio.common import (
             SearchAttributeKey,
