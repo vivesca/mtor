@@ -310,6 +310,63 @@ class TestDeploy:
         assert result.healthy is False
         assert "restart failed" in result.error.lower()
 
+    def test_deploy_uses_remote_repo_for_worker_merge(self):
+        """deploy merges inside the worker checkout, not the local macOS path."""
+        from mtor.infra import HealthReport, deploy
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            result = deploy(
+                worker_host="test-host",
+                repo_dir="/Users/terry/code/mtor",
+                remote_repo_dir="/home/vivesca/code/mtor",
+            )
+
+        assert result.healthy is True
+        merge_cmd = next(cmd for cmd in calls if cmd[:2] == ["ssh", "test-host"] and "bash" in cmd)
+        assert "cd /home/vivesca/code/mtor" in merge_cmd[-1]
+        assert "/Users/terry/code/mtor" not in merge_cmd[-1]
+
+    def test_deploy_fails_closed_on_worker_merge_error(self):
+        """deploy does not report healthy when the worker merge fails."""
+        from mtor.infra import deploy
+
+        call_count = [0]
+
+        def fake_run(cmd, **kwargs):
+            call_count[0] += 1
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if call_count[0] == 2:
+                result.returncode = 1
+                result.stderr = "cd: no such file or directory"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            result = deploy(
+                worker_host="test-host",
+                repo_dir="/Users/terry/code/mtor",
+                remote_repo_dir="/missing/mtor",
+            )
+
+        assert result.healthy is False
+        assert result.steps[-1] == {"step": "merge", "ok": False}
+        assert "merge failed" in result.error
+
 
 # ---------------------------------------------------------------------------
 # clean tests
