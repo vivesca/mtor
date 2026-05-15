@@ -1191,6 +1191,26 @@ def scan() -> None:
 
 
 @app.command
+def audit(
+    *,
+    runs: Annotated[Path, Parameter(name=["--runs"])] = Path("~/germline/loci/ribosome-runs.jsonl"),
+    reviews: Annotated[Path, Parameter(name=["--reviews"])] = Path("~/germline/loci/ribosome-reviews.jsonl"),
+    logs_dir: Annotated[Path, Parameter(name=["--logs-dir"])] = Path("~/code/mtor/logs"),
+    limit: Annotated[int, Parameter(name=["--limit"])] = 10,
+) -> None:
+    """Summarize ribosome run/review ledgers without external services."""
+    from mtor.audit import summarize_audit
+
+    result = summarize_audit(
+        runs.expanduser(),
+        reviews.expanduser(),
+        logs_dir.expanduser(),
+        limit=limit,
+    )
+    _ok("mtor audit", result, version=VERSION)
+
+
+@app.command
 def scout(
     prompt: str,
     *,

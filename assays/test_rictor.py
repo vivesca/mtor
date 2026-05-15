@@ -209,6 +209,91 @@ class TestCheckHealth:
         assert process_check["ok"] is False
         assert "found 2" in str(process_check["detail"])
 
+    def test_check_health_reports_worker_head_match(self, tmp_path):
+        """Remote health includes a passing worker_repo_head check."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+        sha = "aaaaaaaa11111111222222223333333344444444"
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                result.stdout = f"{sha}\n"
+            elif "git rev-parse HEAD" in joined:
+                result.stdout = f"{sha}\n"
+            elif "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl show temporal-worker.service" in joined:
+                result.stdout = (
+                    "ActiveState=active\nSubState=running\nMainPID=123\n"
+                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
+                )
+            elif "ps -eo" in joined:
+                result.stdout = "1\n"
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(
+                worker_host="ganglion",
+                repo_dir=str(tmp_path),
+                remote_repo_dir="/home/vivesca/code/mtor",
+            )
+
+        head_check = next(c for c in report.checks if c["name"] == "worker_repo_head")
+        assert head_check["ok"] is True
+        assert "aaaaaaaa" in str(head_check["detail"])
+
+    def test_check_health_fails_when_worker_head_differs(self, tmp_path):
+        """Remote health fails when worker HEAD differs from local HEAD."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                result.stdout = "aaaaaaaa11111111222222223333333344444444\n"
+            elif "git rev-parse HEAD" in joined:
+                result.stdout = "bbbbbbbb11111111222222223333333344444444\n"
+            elif "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl show temporal-worker.service" in joined:
+                result.stdout = (
+                    "ActiveState=active\nSubState=running\nMainPID=123\n"
+                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
+                )
+            elif "ps -eo" in joined:
+                result.stdout = "1\n"
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(
+                worker_host="ganglion",
+                repo_dir=str(tmp_path),
+                remote_repo_dir="/home/vivesca/code/mtor",
+            )
+
+        head_check = next(c for c in report.checks if c["name"] == "worker_repo_head")
+        assert report.ok is False
+        assert head_check["ok"] is False
+        assert "aaaaaaaa" in str(head_check["detail"])
+        assert "bbbbbbbb" in str(head_check["detail"])
+
 
 # ---------------------------------------------------------------------------
 # deploy tests
@@ -366,6 +451,33 @@ class TestDeploy:
         assert result.healthy is False
         assert result.steps[-1] == {"step": "merge", "ok": False}
         assert "merge failed" in result.error
+
+    def test_deploy_health_uses_remote_repo_head_check(self):
+        """deploy passes local and worker repo paths into check_health."""
+        from mtor.infra import HealthReport, deploy
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            deploy(
+                worker_host="test-host",
+                repo_dir="/Users/terry/code/mtor",
+                remote_repo_dir="/home/vivesca/code/mtor",
+            )
+
+        mock_ch.assert_called_once_with(
+            worker_host="test-host",
+            repo_dir="/Users/terry/code/mtor",
+            remote_repo_dir="/home/vivesca/code/mtor",
+        )
 
 
 # ---------------------------------------------------------------------------

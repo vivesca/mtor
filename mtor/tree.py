@@ -129,6 +129,51 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
+    "audit",
+    "Summarize ribosome run/review ledgers and large log metadata",
+    params=[
+        {
+            "name": "--runs",
+            "type": "string",
+            "required": False,
+            "default": "~/germline/loci/ribosome-runs.jsonl",
+            "description": "Path to ribosome-runs JSONL",
+        },
+        {
+            "name": "--reviews",
+            "type": "string",
+            "required": False,
+            "default": "~/germline/loci/ribosome-reviews.jsonl",
+            "description": "Path to ribosome-reviews JSONL",
+        },
+        {
+            "name": "--logs-dir",
+            "type": "string",
+            "required": False,
+            "default": "~/code/mtor/logs",
+            "description": "Directory of worker log files",
+        },
+        {
+            "name": "--limit",
+            "type": "integer",
+            "required": False,
+            "default": 10,
+            "description": "Maximum entries for top flags and large logs",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "runs_total": "integer",
+            "reviews_total": "integer",
+            "buckets": "object",
+            "large_logs": "array",
+        },
+    },
+    annotations={"readonly": True},
+)
+tree.add_command(
     "terminate <workflow_id>",
     "Immediately terminate a running workflow. Idempotent.",
     params=[

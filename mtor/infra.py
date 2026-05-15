@@ -117,7 +117,52 @@ def check_health(
         all_ok = False
     checks.append({"name": "repo_dir", "ok": repo_ok, "detail": repo_detail})
 
-    # Check 3: Git working tree clean
+    # Check 3: Worker checkout HEAD matches the local checkout.
+    head_ok = False
+    head_detail = "Skipped (repo missing)"
+    if repo_ok:
+        try:
+            local_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo,
+            )
+            if local_head.returncode != 0:
+                head_detail = f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
+            elif host_is_local:
+                short = local_head.stdout.strip()[:8]
+                head_ok = True
+                head_detail = f"worker HEAD matches local HEAD: {short}"
+            else:
+                remote_head = subprocess.run(
+                    _host_command(
+                        host,
+                        f"cd {shlex.quote(remote_repo)} && git rev-parse HEAD",
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if remote_head.returncode != 0:
+                    head_detail = f"worker git rev-parse failed: {remote_head.stderr.strip()[:80]}"
+                else:
+                    local_sha = local_head.stdout.strip()
+                    remote_sha = remote_head.stdout.strip()
+                    head_ok = local_sha == remote_sha
+                    head_detail = (
+                        f"worker HEAD matches local HEAD: {local_sha[:8]}"
+                        if head_ok
+                        else f"worker HEAD differs: local {local_sha[:8]} worker {remote_sha[:8]}"
+                    )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            head_detail = f"git HEAD check failed: {exc}"
+    checks.append({"name": "worker_repo_head", "ok": head_ok, "detail": head_detail})
+    if not head_ok:
+        all_ok = False
+
+    # Check 4: Git working tree clean
     git_clean = False
     git_detail = "Skipped (repo missing)"
     if repo_ok:
@@ -152,7 +197,7 @@ def check_health(
     if not git_clean:
         all_ok = False
 
-    # Check 4: Disk space on worker (SSH)
+    # Check 5: Disk space on worker (SSH)
     disk_ok = False
     disk_detail = f"Skipped (host={host} is local)"
     if ssh_ok:
@@ -180,7 +225,7 @@ def check_health(
     if not disk_ok:
         all_ok = False
 
-    # Check 5: exactly one authoritative worker service/process tree.
+    # Check 6: exactly one authoritative worker service/process tree.
     service_ok = True
     service_detail = f"Skipped (host={host} unreachable)"
     process_ok = True
