@@ -212,6 +212,30 @@ async def _graceful_kill(
             await asyncio.wait_for(proc.wait(), timeout=2.0)
 
 
+def _cleanup_worktree(work_dir: str) -> None:
+    """Best-effort cleanup for failed ribosome worktree runs."""
+    root = Path(work_dir)
+    if not work_dir or not root.exists():
+        return
+
+    git_dir = root / ".git"
+    with contextlib.suppress(OSError):
+        (git_dir / "index.lock").unlink(missing_ok=True)
+
+    for state_name in ("rebase-merge", "rebase-apply", "MERGE_HEAD"):
+        state_path = git_dir / state_name
+        if not state_path.exists():
+            continue
+        command = ["git", "rebase", "--abort"] if "rebase" in state_name else ["git", "merge", "--abort"]
+        with contextlib.suppress(Exception):
+            _subprocess.run(command, capture_output=True, cwd=work_dir, timeout=10)
+        break
+
+    for command in (["git", "checkout", "--", "."], ["git", "clean", "-fd"]):
+        with contextlib.suppress(Exception):
+            _subprocess.run(command, capture_output=True, cwd=work_dir, timeout=10)
+
+
 def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     """Stage and commit pending changes in *repo_dir*.
 
@@ -1090,6 +1114,8 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
 
         rc = proc.returncode or 0
+        if rc != 0 and worktree_path:
+            _cleanup_worktree(str(worktree_path))
         # Always attempt auto-commit — GLM often exits non-zero (test failure,
         # lint, timeout) after producing good code. The function checks for
         # dirty tree + non-empty diff internally, so it's safe unconditionally.
