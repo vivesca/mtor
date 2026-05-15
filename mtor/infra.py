@@ -407,12 +407,11 @@ async def setup_search_attributes() -> dict[str, object]:
     """Register custom search attributes on the Temporal server."""
     from temporalio.api.enums.v1 import IndexedValueType
     from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
+    from temporalio.client import Client
 
-    from mtor.client import _get_client
+    from mtor import TEMPORAL_HOST
 
-    client, err = _get_client()
-    if err:
-        raise RuntimeError(f"Cannot connect to Temporal: {err}")
+    client = await Client.connect(TEMPORAL_HOST)
 
     # Attributes to register
     attrs = {
