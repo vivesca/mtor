@@ -198,6 +198,36 @@ _FAIL_MARK = "✘"
 _WARN_MARK = "⚠"
 
 
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _provider_health_explanation(provider: str, info: dict, now: float | None = None) -> str:
+    """Return a human-readable circuit-breaker explanation for one provider."""
+    now = time.time() if now is None else now
+    state = info.get("state", "closed")
+    active = info.get("active_count", 0)
+    limit = info.get("limit", 2)
+    failures = info.get("consecutive_failures", 0)
+    cooldown_until = info.get("cooldown_until")
+
+    if state == "closed":
+        return f"healthy ({active} active, limit {limit})"
+    if state == "half_open":
+        return f"probing recovery ({active} active, limit {limit})"
+    if state == "open":
+        if cooldown_until:
+            remaining = max(0.0, cooldown_until - now)
+            failure_note = f", {failures} failures" if failures else ""
+            return f"cooldown (reopens in {_format_duration(remaining)}{failure_note})"
+        return f"cooldown ({failures} failures)" if failures else "cooldown"
+    return f"{state} ({provider})"
+
+
 def format_health_display(checks: list[dict], provider_states: dict | None = None) -> str:
     """Render health checks as a human-readable table.
 
@@ -223,25 +253,11 @@ def format_health_display(checks: list[dict], provider_states: dict | None = Non
     if provider_states:
         lines.append("")
         lines.append("provider circuit-breaker states:")
-        lines.append(f"  {'provider':<12} {'state':<12} {'failures':<10} {'cooldown'}")
-        lines.append(f"  {'─' * 12} {'─' * 12} {'─' * 10} {'─' * 20}")
         now = time.time()
         for prov, info in provider_states.items():
             state = info.get("state", "closed")
-            failures = info.get("consecutive_failures", 0)
-            cooldown_epoch = info.get("cooldown_until")
-            if cooldown_epoch and state == "open":
-                remaining = max(0.0, cooldown_epoch - now)
-                if remaining < 60:
-                    cooldown_str = f"{remaining:.0f}s remaining"
-                elif remaining < 3600:
-                    cooldown_str = f"{remaining / 60:.1f}m remaining"
-                else:
-                    cooldown_str = f"{remaining / 3600:.1f}h remaining"
-            else:
-                cooldown_str = "—"
             mark = _OK_MARK if state == "closed" else (_WARN_MARK if state == "half_open" else _FAIL_MARK)
-            lines.append(f"  {mark} {prov:<10} {state:<12} {failures:<10} {cooldown_str}")
+            lines.append(f"  {mark} {prov:<10} {_provider_health_explanation(prov, info, now)}")
 
     lines.append("─" * 40)
     all_ok = all(c.get("ok", False) for c in checks)
@@ -497,11 +513,22 @@ def doctor(*, reconcile: bool = False) -> None:
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
+    default_provider_states = {}
     if pm is not None:
         route_parts = [
             f"{provider}({PROVIDER_MODELS.get(provider, provider)}, limit={pm.PROVIDER_LIMITS.get(provider, 2)})"
             for provider in pm.PROVIDER_PRIORITY
         ]
+        default_provider_states = {
+            provider: {
+                "state": "closed",
+                "cooldown_until": None,
+                "consecutive_failures": 0,
+                "active_count": pm._active_count.get(provider, 0),
+                "limit": pm.PROVIDER_LIMITS.get(provider, 2),
+            }
+            for provider in pm.PROVIDER_PRIORITY
+        }
         checks.append(
             {
                 "name": "provider_routing",
@@ -544,6 +571,8 @@ def doctor(*, reconcile: bool = False) -> None:
                         "state": state,
                         "cooldown_until": cooldown,
                         "consecutive_failures": failures,
+                        "active_count": pm._active_count.get(prov, 0),
+                        "limit": pm.PROVIDER_LIMITS.get(prov, 2),
                     }
                 detail_parts = []
                 for p, d in provider_states.items():
@@ -568,6 +597,7 @@ def doctor(*, reconcile: bool = False) -> None:
                         "detail": "No health records yet (all providers closed)",
                     }
                 )
+                result["provider_circuit_breaker"] = default_provider_states
         except (subprocess.TimeoutExpired, OSError):
             checks.append(
                 {
@@ -576,6 +606,7 @@ def doctor(*, reconcile: bool = False) -> None:
                     "detail": "Health file not accessible via SSH",
                 }
             )
+            result["provider_circuit_breaker"] = default_provider_states
         except Exception:
             checks.append(
                 {
@@ -584,6 +615,7 @@ def doctor(*, reconcile: bool = False) -> None:
                     "detail": "Could not read provider health state",
                 }
             )
+            result["provider_circuit_breaker"] = default_provider_states
     elif pm is not None and WORKER_HOST == "localhost":
         # Local mode: read health file directly
         try:
@@ -598,6 +630,8 @@ def doctor(*, reconcile: bool = False) -> None:
                     "state": state,
                     "cooldown_until": cooldown,
                     "consecutive_failures": failures,
+                    "active_count": pm._active_count.get(prov, 0),
+                    "limit": pm.PROVIDER_LIMITS.get(prov, 2),
                 }
             detail_parts = []
             for p, d in provider_states.items():

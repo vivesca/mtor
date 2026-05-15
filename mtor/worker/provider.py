@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -75,6 +76,54 @@ def _is_available(provider: str, health: dict[str, Any]) -> bool:
     return False
 
 
+def _ensure_entry(health: dict[str, Any], provider: str) -> dict[str, Any]:
+    """Return a mutable health entry for *provider*, creating defaults."""
+    if provider not in health:
+        health[provider] = {
+            "state": "closed",
+            "cooldown_until": None,
+            "consecutive_failures": 0,
+        }
+    return health[provider]
+
+
+def _format_seconds(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _log_transition(
+    provider: str,
+    before: str,
+    after: str,
+    reason: str,
+) -> None:
+    """Log circuit-breaker transitions once, when the state actually changes."""
+    if before == after:
+        return
+    print(f"[provider] {provider}: {before} -> {after} ({reason})", file=sys.stderr)
+
+
+def _advance_expired_cooldowns(health: dict[str, Any]) -> None:
+    """Move open providers with expired cooldowns into half_open."""
+    now = time.time()
+    for provider in PROVIDER_PRIORITY:
+        entry = health.get(provider)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("state") != "open":
+            continue
+        cooldown_until = entry.get("cooldown_until")
+        if cooldown_until is None or now < cooldown_until:
+            continue
+        before = entry.get("state", "closed")
+        entry["state"] = "half_open"
+        _log_transition(provider, before, "half_open", "cooldown expired")
+
+
 def _earliest_cooldown_provider(health: dict[str, Any]) -> str:
     """Return the provider with the earliest cooldown_until among open providers.
 
@@ -109,6 +158,8 @@ def select_provider(health: dict[str, Any], override: str | None = None) -> str:
         if override in RETIRED_PROVIDERS:
             raise ValueError(f"Provider '{override}' is retired: {RETIRED_PROVIDERS[override]}")
         return override
+
+    _advance_expired_cooldowns(health)
 
     # Filter to healthy providers
     healthy = [p for p in PROVIDER_PRIORITY if _is_available(p, health)]
@@ -145,23 +196,25 @@ def update_health(
     - exit  0 (success)     : close circuit, reset consecutive_failures.
     - exit  1 (code bug)    : no state change (not the provider's fault).
     """
-    if provider not in health:
-        health[provider] = {
-            "state": "closed",
-            "cooldown_until": None,
-            "consecutive_failures": 0,
-        }
-
-    entry = health[provider]
+    entry = _ensure_entry(health, provider)
+    before = entry.get("state", "closed")
 
     if exit_code == EXIT_RATE_LIMITED:
+        cooldown_seconds = window_hours * 3600
         entry["state"] = "open"
-        entry["cooldown_until"] = time.time() + window_hours * 3600
+        entry["cooldown_until"] = time.time() + cooldown_seconds
         entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
+        _log_transition(
+            provider,
+            before,
+            "open",
+            f"rate_limited, cooldown {_format_seconds(cooldown_seconds)}",
+        )
     elif exit_code == 0:
         entry["state"] = "closed"
         entry["cooldown_until"] = None
         entry["consecutive_failures"] = 0
+        _log_transition(provider, before, "closed", "success")
     # exit 1 -> no state change
 
 
