@@ -38,6 +38,7 @@ async def workflow_execution_state(
     *,
     now: datetime | None = None,
     heartbeat_fresh_seconds: int = 60,
+    heartbeat_stale_seconds: int = 900,
 ) -> dict[str, Any]:
     """Classify a running workflow as queued or executing from activity heartbeat data."""
     current_time = now or datetime.now(UTC)
@@ -63,4 +64,5 @@ async def workflow_execution_state(
         "execution_state": "executing" if heartbeat_age_seconds <= heartbeat_fresh_seconds else "queued",
         "last_heartbeat_iso": latest_heartbeat.isoformat(),
         "heartbeat_age_seconds": round(heartbeat_age_seconds, 1),
+        "heartbeat_stale": heartbeat_age_seconds > heartbeat_stale_seconds,
     }

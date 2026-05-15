@@ -86,7 +86,26 @@ class TestListExecutionState:
         workflow = data["result"]["workflows"][0]
         assert workflow["execution_state"] == "executing"
         assert workflow["heartbeat_age_seconds"] <= 60
+        assert workflow["heartbeat_stale"] is False
         assert "last_heartbeat_iso" in workflow
+
+    def test_old_heartbeat_shows_stale_queued(self):
+        """Workflow with heartbeat older than 15m is queued and stale."""
+        now = datetime.now(UTC)
+        client = _client_for(
+            _execution("wf-stale"),
+            heartbeat_by_id={"wf-stale": now - timedelta(minutes=47)},
+        )
+
+        with patch("mtor.cli._get_client", return_value=(client, None)), \
+             patch("mtor.cli.load_triage", return_value={}):
+            exit_code, data = invoke(["riboseq"])
+
+        assert exit_code == 0
+        workflow = data["result"]["workflows"][0]
+        assert workflow["execution_state"] == "queued"
+        assert workflow["heartbeat_age_seconds"] > 15 * 60
+        assert workflow["heartbeat_stale"] is True
 
     def test_no_heartbeat_shows_queued(self):
         """Workflow with no heartbeat or >60s ago → execution_state='queued'."""
