@@ -38,7 +38,7 @@ from mtor import (
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
-from mtor.client import _get_client
+from mtor.client import _get_client, workflow_execution_state
 from mtor.dedup import check_and_record as _check_dedup
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
@@ -508,6 +508,18 @@ def list_cmd(
 
         executions = asyncio.run(_list())
 
+        async def _execution_states():
+            states = {}
+            for execution in executions:
+                status_name = execution.status.name if execution.status else "UNKNOWN"
+                if status_name != "RUNNING":
+                    continue
+                with contextlib.suppress(Exception):
+                    states[execution.id] = await workflow_execution_state(client, execution.id)
+            return states
+
+        execution_states = asyncio.run(_execution_states()) if executions else {}
+
         reconciliation: dict[str, Any] | None = None
         if executions:
             with contextlib.suppress(Exception):
@@ -577,16 +589,17 @@ def list_cmd(
                     archived_hidden += 1
                     continue
 
-            workflows.append(
-                {
-                    "workflow_id": wf_id,
-                    "status": status_val,
-                    "verdict": sa_verdict,
-                    "provider": sa_provider,
-                    "start_time": start_time,
-                    "close_time": close_time,
-                }
-            )
+            workflow_result = {
+                "workflow_id": wf_id,
+                "status": status_val,
+                "verdict": sa_verdict,
+                "provider": sa_provider,
+                "start_time": start_time,
+                "close_time": close_time,
+            }
+            if wf_id in execution_states:
+                workflow_result.update(execution_states[wf_id])
+            workflows.append(workflow_result)
             next_actions.append(_action(f"mtor status {wf_id}", f"Get full status for {wf_id}"))
 
         # Count pending (unreviewed completed) for envelope
