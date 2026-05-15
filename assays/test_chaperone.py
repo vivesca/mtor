@@ -136,6 +136,8 @@ class TestFileShrinkage:
         )
         review = _run(chaperone(result))
         assert any("file_shrunk" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
 
     def test_pure_deletion_flagged(self):
         result = _make_result(
@@ -144,6 +146,8 @@ class TestFileShrinkage:
         )
         review = _run(chaperone(result))
         assert any("pure_deletion" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
 
 
 class TestThinOutput:
@@ -197,6 +201,8 @@ class TestApprovedWithFlags:
         result = _make_result(stdout="Traceback (most recent call last):\n  File...")
         review = _run(chaperone(result))
         assert any("errors" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
 
 
 class TestSatisfaction:

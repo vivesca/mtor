@@ -121,6 +121,51 @@ def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> floa
     return max(1.0, wait + jitter)
 
 
+def _write_attempt_summary(
+    *,
+    workflow_id: str,
+    provider: str,
+    exit_code: int,
+    duration_seconds: float,
+    stdout_bytes: int,
+    stderr_bytes: int,
+    work_dir: str | Path,
+) -> None:
+    """Append one machine-readable summary row for a ribosome attempt."""
+    diff_stat = {"added": 0, "removed": 0}
+    try:
+        numstat_r = _subprocess.run(
+            ["git", "diff", "--numstat", "main..HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=work_dir,
+        )
+        if numstat_r.returncode == 0:
+            for line in numstat_r.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    with contextlib.suppress(ValueError):
+                        diff_stat["added"] += int(parts[0]) if parts[0] != "-" else 0
+                        diff_stat["removed"] += int(parts[1]) if parts[1] != "-" else 0
+    except Exception:
+        pass
+
+    summary = {
+        "workflow_id": workflow_id,
+        "provider": provider,
+        "exit_code": exit_code,
+        "duration_seconds": round(duration_seconds, 2),
+        "diff_stat": diff_stat,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_DIR / f"{workflow_id}.jsonl", "a") as f:
+        f.write(json.dumps(summary) + "\n")
+
+
 def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill the entire process group (ribosome + claude + children).
 
@@ -912,7 +957,6 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             effective_task,
         ]
 
-        start_time = _time.time()
         _run_start = _time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1041,74 +1085,21 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 )
                 rc = EXIT_RATE_LIMITED
 
-        # Write per-attempt JSON summary to logs/<workflow_id>.jsonl
-        try:
-            _duration = _time.monotonic() - _run_start
-            _ds_r = _subprocess.run(
-                ["git", "diff", "--shortstat", "main..HEAD"],
-                capture_output=True, text=True, timeout=10, cwd=work_dir,
-            )
-            _ds_text = _ds_r.stdout.strip() if _ds_r.returncode == 0 else ""
-            _added, _removed = 0, 0
-            for _part in _ds_text.split(","):
-                _part = _part.strip()
-                _m = _re.search(r"(\d+) insertion", _part)
-                if _m:
-                    _added = int(_m.group(1))
-                _m = _re.search(r"(\d+) deletion", _part)
-                if _m:
-                    _removed = int(_m.group(1))
-            _wf_id = activity.info().workflow_id
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(LOG_DIR / f"{_wf_id}.jsonl", "a") as _f:
-                _f.write(json.dumps({
-                    "workflow_id": _wf_id,
-                    "provider": resolved_provider,
-                    "exit_code": rc,
-                    "duration_seconds": round(_duration, 2),
-                    "diff_stat": {"added": _added, "removed": _removed},
-                    "stdout_bytes": len(stdout_bytes),
-                    "stderr_bytes": len(stderr_bytes),
-                    "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-                }) + "\n")
-        except Exception:
-            pass
-
         # Update provider health state and persist
         window_hours = parse_rate_limit_window(stderr)
         update_health(resolved_provider, rc, health, window_hours)
         save_health(health)
 
-        # Write per-attempt JSON summary
         try:
-            diff_stat = {"added": 0, "removed": 0}
-            numstat_r = _subprocess.run(
-                ["git", "diff", "--numstat", "main..HEAD"],
-                capture_output=True, text=True, timeout=10, cwd=work_dir,
+            _write_attempt_summary(
+                workflow_id=workflow_id,
+                provider=resolved_provider,
+                exit_code=rc,
+                duration_seconds=_time.monotonic() - _run_start,
+                stdout_bytes=len(stdout_bytes),
+                stderr_bytes=len(stderr_bytes),
+                work_dir=work_dir,
             )
-            for _line in numstat_r.stdout.strip().splitlines():
-                _parts = _line.split("\t")
-                if len(_parts) >= 2:
-                    try:
-                        diff_stat["added"] += int(_parts[0]) if _parts[0] != "-" else 0
-                        diff_stat["removed"] += int(_parts[1]) if _parts[1] != "-" else 0
-                    except ValueError:
-                        pass
-
-            summary = {
-                "workflow_id": workflow_id,
-                "provider": resolved_provider,
-                "exit_code": rc,
-                "duration_seconds": round(_time.time() - start_time, 2),
-                "diff_stat": diff_stat,
-                "stdout_bytes": len(stdout_bytes),
-                "stderr_bytes": len(stderr_bytes),
-                "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-            log_file = LOG_DIR / f"{workflow_id}.jsonl"
-            with open(log_file, "a") as f:
-                f.write(json.dumps(summary) + "\n")
         except Exception as exc:
             print(f"WARNING: failed to write attempt summary: {exc}", file=sys.stderr)
 
@@ -1343,6 +1334,23 @@ _ERROR_PATTERNS = _re.compile(
     r"Traceback \(most recent|panic:|fatal:",
     _re.IGNORECASE,
 )
+
+
+def _is_blocking_review_flag(flag: str) -> bool:
+    """Return True for flags unsafe enough to block an automatic merge."""
+    if flag == "no_commit_on_success":
+        return True
+    return flag.startswith(
+        (
+            "destruction",
+            "errors",
+            "file_shrunk",
+            "pure_deletion",
+            "target_file_missing",
+            "py2_except_syntax",
+            "nested_test_file",
+        )
+    )
 
 
 def _merge_branch(repo_root: str, branch_name: str) -> bool:
@@ -1713,7 +1721,7 @@ async def chaperone(result: dict) -> dict:
             ]
         else:
             approved = exit_code == 0 and not any(
-                f.startswith("destruction") or f == "no_commit_on_success" for f in flags
+                _is_blocking_review_flag(f) for f in flags
             )
         verdict = "approved" if approved else "rejected"
         if flags and approved:
