@@ -242,7 +242,7 @@ class TestCheckHealth:
 
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(
-                worker_host="ganglion",
+                worker_host="remote-test-host",
                 repo_dir=str(tmp_path),
                 remote_repo_dir="/home/vivesca/code/mtor",
             )
@@ -283,7 +283,7 @@ class TestCheckHealth:
 
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(
-                worker_host="ganglion",
+                worker_host="remote-test-host",
                 repo_dir=str(tmp_path),
                 remote_repo_dir="/home/vivesca/code/mtor",
             )
