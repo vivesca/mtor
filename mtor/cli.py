@@ -199,6 +199,74 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
         return 0
     return 1
 
+
+def _parse_semver(version: str) -> tuple[int, int, int]:
+    import re as _re
+
+    match = _re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        raise ValueError(f"Invalid semantic version: {version}")
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def _bump_semver(version: str, bump: Literal["patch", "minor", "major"]) -> str:
+    major, minor, patch_v = _parse_semver(version)
+    if bump == "major":
+        return f"{major + 1}.0.0"
+    if bump == "minor":
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch_v + 1}"
+
+
+def _read_release_version(pyproject_path: Path, init_path: Path) -> str:
+    import re as _re
+
+    pyproject_text = pyproject_path.read_text(encoding="utf-8")
+    pyproject_match = _re.search(r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE)
+    if pyproject_match:
+        return pyproject_match.group(1)
+
+    init_text = init_path.read_text(encoding="utf-8")
+    init_match = _re.search(r'^VERSION = "(\d+\.\d+\.\d+)"$', init_text, flags=_re.MULTILINE)
+    if init_match:
+        return init_match.group(1)
+    raise ValueError("Cannot parse version from pyproject.toml or mtor/__init__.py")
+
+
+def _write_release_version(pyproject_path: Path, init_path: Path, new_version: str) -> None:
+    import re as _re
+
+    pyproject_text = pyproject_path.read_text(encoding="utf-8")
+    if _re.search(r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE):
+        pyproject_text = _re.sub(
+            r'^version = "\d+\.\d+\.\d+"$',
+            f'version = "{new_version}"',
+            pyproject_text,
+            count=1,
+            flags=_re.MULTILINE,
+        )
+    elif 'dynamic = [ "version" ]' in pyproject_text:
+        pyproject_text = pyproject_text.replace(
+            'dynamic = [ "version" ]',
+            f'version = "{new_version}"',
+            1,
+        )
+    else:
+        raise ValueError("Cannot update version in pyproject.toml")
+    pyproject_path.write_text(pyproject_text, encoding="utf-8")
+
+    init_text = init_path.read_text(encoding="utf-8")
+    if not _re.search(r'^VERSION = "(\d+\.\d+\.\d+)"$', init_text, flags=_re.MULTILINE):
+        raise ValueError("Cannot update VERSION in mtor/__init__.py")
+    init_text = _re.sub(
+        r'^VERSION = "\d+\.\d+\.\d+"$',
+        f'VERSION = "{new_version}"',
+        init_text,
+        count=1,
+        flags=_re.MULTILINE,
+    )
+    init_path.write_text(init_text, encoding="utf-8")
+
 # ---------------------------------------------------------------------------
 # Cyclopts CLI
 # ---------------------------------------------------------------------------
@@ -1383,72 +1451,117 @@ def reactivate(workflow_id: str) -> None:
 
 
 @app.command
+def release(
+    *,
+    minor: Annotated[bool, Parameter(name=["--minor"])] = False,
+    major: Annotated[bool, Parameter(name=["--major"])] = False,
+) -> None:
+    """Bump version, tag, and publish a release to PyPI."""
+    cmd = "mtor release"
+    if minor:
+        cmd += " --minor"
+    if major:
+        cmd += " --major"
+
+    if minor and major:
+        sys.exit(
+            _err(
+                cmd,
+                "Choose at most one version bump flag.",
+                "INVALID_BUMP",
+                "Use the default patch bump, or pass exactly one of --minor / --major.",
+            )
+        )
+
+    bump: Literal["patch", "minor", "major"] = "patch"
+    if major:
+        bump = "major"
+    elif minor:
+        bump = "minor"
+
+    repo_root = Path.cwd()
+    pyproject_path = repo_root / "pyproject.toml"
+    init_path = repo_root / "mtor" / "__init__.py"
+
+    if not pyproject_path.exists() or not init_path.exists():
+        sys.exit(
+            _err(
+                cmd,
+                "Release must run from the mtor repository root.",
+                "REPO_ROOT_REQUIRED",
+                "cd ~/code/mtor and retry.",
+            )
+        )
+
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if status_result.stdout.strip():
+        sys.exit(
+            _err(
+                cmd,
+                "Refusing to release from a dirty working tree.",
+                "DIRTY_REPO",
+                "Commit or stash local changes, then retry.",
+            )
+        )
+
+    try:
+        current_version = _read_release_version(pyproject_path, init_path)
+        new_version = _bump_semver(current_version, bump)
+        _write_release_version(pyproject_path, init_path, new_version)
+    except ValueError as exc:
+        sys.exit(_err(cmd, str(exc), "VERSION_PARSE_ERROR", "Check release version metadata."))
+
+    tag_name = f"v{new_version}"
+    try:
+        subprocess.run(
+            ["git", "add", "pyproject.toml", "mtor/__init__.py"],
+            cwd=repo_root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"chore: release {tag_name}"],
+            cwd=repo_root,
+            check=True,
+        )
+        subprocess.run(["git", "tag", tag_name], cwd=repo_root, check=True)
+        subprocess.run(["git", "push", "origin", tag_name], cwd=repo_root, check=True)
+        subprocess.run(["uv", "build"], cwd=repo_root, check=True)
+        subprocess.run(["uv", "publish"], cwd=repo_root, check=True)
+    except subprocess.CalledProcessError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                f"Release command failed: {exc}",
+                "RELEASE_FAILED",
+                "Check the command output, fix the failure, and retry.",
+            )
+        )
+
+    _ok(
+        cmd,
+        {
+            "version": new_version,
+            "tag": tag_name,
+            "published": True,
+            "next_step": "ganglion: uv tool upgrade mtor",
+        },
+        version=new_version,
+    )
+
+
+@app.command(show=False)
 def publish(
     *,
     bump: Annotated[Literal["patch", "minor", "major"], Parameter(name=["-b", "--bump"])] = "patch",
 ) -> None:
-    """Bump version, build, publish to PyPI, upgrade soma + ganglion."""
-    import re as _re
-
-    init_path = Path(__file__).parent / "__init__.py"
-    init_text = init_path.read_text()
-    match = _re.search(r'VERSION = "(\d+)\.(\d+)\.(\d+)"', init_text)
-    if not match:
-        sys.exit(_err("mtor publish", "Cannot parse VERSION", "VERSION_PARSE_ERROR", "Check mtor/__init__.py"))
-
-    major, minor, patch_v = int(match.group(1)), int(match.group(2)), int(match.group(3))
-    if bump == "major":
-        major += 1
-        minor = 0
-        patch_v = 0
-    elif bump == "minor":
-        minor += 1
-        patch_v = 0
-    else:
-        patch_v += 1
-    new_version = f"{major}.{minor}.{patch_v}"
-
-    # Step 1: bump version
-    init_path.write_text(init_text.replace(match.group(0), f'VERSION = "{new_version}"'))
-    print(f"[publish] bumped to {new_version}", file=sys.stderr)
-
-    # Step 2: commit + push
-    subprocess.run(["git", "add", "-A"], cwd=str(init_path.parent.parent), check=True)
-    subprocess.run(
-        ["git", "commit", "-m", f"chore: bump to v{new_version}"],
-        cwd=str(init_path.parent.parent), check=True,
-    )
-    subprocess.run(["git", "push"], cwd=str(init_path.parent.parent), check=True)
-    print("[publish] committed + pushed", file=sys.stderr)
-
-    # Step 3: build + publish
-    subprocess.run(["uv", "build"], cwd=str(init_path.parent.parent), check=True)
-
-    token_result = subprocess.run(
-        ["op", "item", "get", "pypi-token", "--vault", "Agents", "--fields", "credential", "--reveal"],
-        capture_output=True, text=True, timeout=10,
-    )
-    if token_result.returncode != 0:
-        sys.exit(_err("mtor publish", "Cannot get PyPI token from 1Password", "PYPI_TOKEN_ERROR", "op signin"))
-
-    subprocess.run(
-        ["uv", "publish", "--token", token_result.stdout.strip()],
-        cwd=str(init_path.parent.parent), check=True,
-    )
-    print(f"[publish] published {new_version} to PyPI", file=sys.stderr)
-
-    # Step 4: upgrade both machines
-    subprocess.run(["uv", "tool", "install", "mtor", "--upgrade"], check=True)
-    print("[publish] upgraded soma", file=sys.stderr)
-
-    subprocess.run(
-        ["ssh", WORKER_HOST,
-         "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH && uv tool install mtor --upgrade"],
-        timeout=30,
-    )
-    print("[publish] upgraded ganglion", file=sys.stderr)
-
-    _ok("mtor publish", {"version": new_version, "published": True}, version=new_version)
+    """Compatibility alias for the release workflow."""
+    release(minor=bump == "minor", major=bump == "major")
 
 
 @app.command
