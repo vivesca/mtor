@@ -53,26 +53,41 @@ def check_code_exists(file_or_function: str, repo_root: Path = Path.home() / "co
         return False
 
 
-async def list_workflows_for_spec(spec_path_str: str):
-    """List all workflows matching TranslationSpec = spec_path in search attributes."""
-    client, err = _get_client()
-    if err:
-        return []
-
-    query = f'TranslationSpec = "{spec_path_str}"'
-    workflows = []
+async def describe_workflow(workflow_id: str, client: Any | None = None):
+    """Return a workflow description for a workflow ID, or None if unavailable."""
+    if not workflow_id:
+        return None
+    if client is None:
+        client, err = _get_client()
+        if err:
+            return None
     try:
-        async for execution in client.list_workflows(query=query):
-            workflows.append(execution)
+        handle = client.get_workflow_handle(workflow_id)
+        return await handle.describe()
     except Exception:
-        return []
+        return None
 
-    # Sort by start time descending (newest first)
-    workflows.sort(
-        key=lambda w: w.start_time.timestamp() if w.start_time else 0,
-        reverse=True
-    )
-    return workflows
+
+def _status_name(execution: Any) -> str:
+    status = getattr(execution, "status", None)
+    return getattr(status, "name", "UNKNOWN") if status else "UNKNOWN"
+
+
+def _search_attr_value(execution: Any, wanted_key: str) -> str:
+    attrs = getattr(execution, "search_attributes", None)
+    if not attrs:
+        return ""
+    try:
+        items = attrs.items()
+    except AttributeError:
+        items = []
+    for key, value in items:
+        if wanted_key not in str(key):
+            continue
+        if isinstance(value, list):
+            return str(value[0]) if value else ""
+        return str(value)
+    return ""
 
 
 def has_commit_for_spec(spec_name: str) -> bool:
@@ -89,16 +104,19 @@ def has_commit_for_spec(spec_name: str) -> bool:
 
 def reconcile_spec(
     spec: dict[str, Any],
-    dry_run: bool = False
+    dry_run: bool = False,
+    client: Any | None = None,
+    workflow_description: Any | None = None,
 ) -> dict[str, Any]:
     """Reconcile a single spec's status against Temporal and git.
 
-    Follows the logic from the spec:
-    1. If status == "dispatched":
-       - if any workflow is RUNNING: skip (correct)
-       - elif latest workflow COMPLETED with commits on main: set status=done
-       - elif latest workflow COMPLETED/TERMINATED with no commits: set status=ready, clear workflow_id
-       - elif no matching workflows found: set status=ready, clear workflow_id
+    Follows the spec feedback loop:
+    1. If status == "dispatched" and workflow_id exists:
+       - RUNNING: skip
+       - COMPLETED + accepted verdict: done
+       - COMPLETED + rejected verdict: failed
+       - TERMINATED/CANCELED/FAILED: failed
+       - missing workflow: ready, clear workflow_id
 
     2. If status == "done":
        - if spec lists files/functions in "Files to edit": check if code exists
@@ -124,50 +142,57 @@ def reconcile_spec(
     spec_name = spec.get("name", "")
 
     if status == "dispatched":
-        workflows = asyncio.run(list_workflows_for_spec(str(spec_path)))
-
-        # Check if any running
-        has_running = any(
-            w.status and w.status.name == "RUNNING"
-            for w in workflows
-        )
-        if has_running:
-            # Already correct, no change
+        workflow_id = str(spec.get("workflow_id", "") or "")
+        if not workflow_id:
             return result
 
-        if len(workflows) > 0:
-            latest = workflows[0]
-            latest_status = latest.status.name if latest.status else "UNKNOWN"
+        latest = workflow_description
+        if latest is None:
+            latest = asyncio.run(describe_workflow(workflow_id, client=client))
+        if latest is None:
+            new_status = "ready"
+            result["now"] = new_status
+            result["reason"] = "workflow not found"
+            result["changed"] = True
+        else:
+            latest_status = _status_name(latest)
+            verdict = str(spec.get("verdict", "") or "") or _search_attr_value(latest, "mtor_verdict")
 
+            if latest_status == "RUNNING":
+                return result
             if latest_status == "COMPLETED":
-                if has_commit_for_spec(spec_name):
+                if verdict == "accepted":
                     new_status = "done"
                     result["now"] = new_status
-                    result["reason"] = "latest workflow completed with commits on main"
+                    result["reason"] = "workflow completed with accepted verdict"
+                    result["changed"] = True
+                elif verdict == "rejected":
+                    new_status = "failed"
+                    result["now"] = new_status
+                    result["reason"] = "workflow completed with rejected verdict"
+                    result["changed"] = True
+                elif has_commit_for_spec(spec_name):
+                    new_status = "done"
+                    result["now"] = new_status
+                    result["reason"] = "workflow completed with commits on main"
                     result["changed"] = True
                 else:
                     new_status = "ready"
                     result["now"] = new_status
-                    result["reason"] = "latest workflow completed but no commits found"
+                    result["reason"] = "workflow completed but verdict/commits were not found"
                     result["changed"] = True
-            else:
-                # TERMINATED, CANCELED, FAILED
-                new_status = "ready"
+            elif latest_status in {"TERMINATED", "CANCELED", "FAILED"}:
+                new_status = "failed"
                 result["now"] = new_status
-                result["reason"] = f"latest workflow was {latest_status.lower()}, no commits"
+                result["reason"] = f"workflow was {latest_status.lower()}"
                 result["changed"] = True
-        else:
-            # No workflows found
-            new_status = "ready"
-            result["now"] = new_status
-            result["reason"] = "no matching workflows found"
-            result["changed"] = True
+            else:
+                return result
 
         # Apply change if needed
         if result["changed"] and not dry_run and spec_path is not None:
             if new_status == "ready":
-                # Clear workflow_id by setting to None
-                update_spec_status(spec_path, new_status, workflow_id=None)
+                update_spec_status(spec_path, new_status, clear_workflow_id=True)
             else:
                 update_spec_status(spec_path, new_status)
 
@@ -226,6 +251,8 @@ def reconcile_spec(
 def reconcile_all(
     spec_dir: Path,
     dry_run: bool = False,
+    client: Any | None = None,
+    workflow_descriptions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reconcile all specs in a directory.
 
@@ -240,7 +267,16 @@ def reconcile_all(
     blocked: list[str] = []
 
     for spec in scanned:
-        result = reconcile_spec(spec, dry_run=dry_run)
+        workflow_id = str(spec.get("workflow_id", "") or "")
+        if workflow_descriptions is not None and workflow_id not in workflow_descriptions:
+            correct += 1
+            continue
+        result = reconcile_spec(
+            spec,
+            dry_run=dry_run,
+            client=client,
+            workflow_description=workflow_descriptions.get(workflow_id) if workflow_descriptions else None,
+        )
         if result["changed"]:
             fixed.append({
                 "name": result["name"],

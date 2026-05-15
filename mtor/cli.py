@@ -508,6 +508,17 @@ def list_cmd(
 
         executions = asyncio.run(_list())
 
+        reconciliation: dict[str, Any] | None = None
+        if executions:
+            with contextlib.suppress(Exception):
+                from mtor.reconcile import reconcile_all
+
+                reconciliation = reconcile_all(
+                    DEFAULT_SPEC_DIR.expanduser(),
+                    client=client,
+                    workflow_descriptions={ex.id: ex for ex in executions},
+                )
+
         # Load triage state
         triage = load_triage()
         reviewed_set = set(triage.get("reviewed", []))
@@ -595,6 +606,8 @@ def list_cmd(
             "reviewed_count": reviewed_count,
             "pending_count": pending_count,
         }
+        if reconciliation and reconciliation.get("fixed"):
+            result["reconciled"] = reconciliation["fixed"]
         _ok(cmd, result, next_actions, version=VERSION)
     except Exception as exc:
         sys.exit(

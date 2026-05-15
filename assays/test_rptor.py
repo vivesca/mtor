@@ -73,6 +73,8 @@ def test_parse_spec_frontmatter(tmp_path):
         "status: ready\n"
         "priority: high\n"
         "repo: ~/code/mtor\n"
+        "workflow_id: wf-123\n"
+        "verdict: accepted\n"
         "depends_on:\n"
         "  - other-spec\n"
         "  - another-spec\n"
@@ -99,6 +101,8 @@ def test_parse_spec_frontmatter(tmp_path):
     assert result["status"] == "ready"
     assert result["priority"] == "high"
     assert result["repo"] == "~/code/mtor"
+    assert result["workflow_id"] == "wf-123"
+    assert result["verdict"] == "accepted"
     assert result["depends_on"] == ["other-spec", "another-spec"]
     assert result["scope"] == ["mtor/rptor.py", "mtor/cli.py"]
     assert result["exclude"] == ["genome.md", "uv.lock"]

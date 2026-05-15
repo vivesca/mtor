@@ -134,6 +134,7 @@ def update_spec_status(
     status: str,
     workflow_id: str | None = None,
     verdict: str | None = None,
+    clear_workflow_id: bool = False,
 ) -> None:
     """Parse YAML frontmatter via regex, update status and metadata fields.
 
@@ -193,7 +194,14 @@ def update_spec_status(
         now_iso = datetime.now(UTC).isoformat()
         frontmatter = _set_field(frontmatter, "completed_at", now_iso)
 
-    # Set workflow_id
+    # Set or clear workflow_id
+    if clear_workflow_id:
+        frontmatter = re.sub(
+            r"^workflow_id:\s*.*\n?",
+            "",
+            frontmatter,
+            flags=re.MULTILINE,
+        ).rstrip()
     if workflow_id is not None:
         frontmatter = _set_field(frontmatter, "workflow_id", workflow_id)
 

@@ -158,6 +158,8 @@ def parse_spec(path: Path) -> dict[str, Any]:
       status     — from frontmatter (default: "ready")
       priority   — from frontmatter (default: "medium")
       repo       — from frontmatter (default: "~")
+      workflow_id — from frontmatter (default: "")
+      verdict    — from frontmatter (default: "")
       depends_on — list of spec names this one depends on (default: [])
       scope      — list of file/dir paths (default: [])
       exclude    — list of excluded paths (default: [])
@@ -207,6 +209,8 @@ def parse_spec(path: Path) -> dict[str, Any]:
         "status": fm.get("status", "ready"),
         "priority": fm.get("priority", "medium"),
         "repo": fm.get("repo", "~"),
+        "workflow_id": fm.get("workflow_id", ""),
+        "verdict": fm.get("verdict", ""),
         "depends_on": depends_on,
         "scope": scope,
         "exclude": exclude,

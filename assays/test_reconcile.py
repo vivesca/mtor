@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mtor.spec import update_spec_status
-from mtor.reconcile import check_code_exists, reconcile_spec
+from mtor.reconcile import check_code_exists, reconcile_all, reconcile_spec
 
 
 class TestReconcileCheckCodeExists:
@@ -36,6 +37,13 @@ class TestReconcileCheckCodeExists:
 
 class TestReconcileSpecs:
     """reconcile_specs scans dispatched specs and updates status from Temporal."""
+
+    def _workflow(self, status: str, verdict: str = ""):
+        wf = MagicMock()
+        wf.status = MagicMock()
+        wf.status.name = status
+        wf.search_attributes = {"mtor_verdict": [verdict]} if verdict else {}
+        return wf
 
     def test_completed_accepted_becomes_done(self, tmp_path: Path):
         """COMPLETED + accepted verdict → status: done."""
@@ -73,6 +81,113 @@ workflow_id: wf-12345
         assert result["changed"] is True
         assert result["was"] == "dispatched"
         assert result["now"] == "ready"
+
+    def test_completed_accepted_workflow_becomes_done(self, tmp_path: Path):
+        """dispatched + workflow_id + accepted Temporal verdict → done."""
+        spec_path = tmp_path / "accepted.md"
+        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-accepted\n---\nBody\n")
+        spec_dict = {
+            "name": "accepted",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-accepted",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(
+            spec_dict,
+            workflow_description=self._workflow("COMPLETED", "accepted"),
+        )
+
+        assert result["changed"] is True
+        assert result["now"] == "done"
+        text = spec_path.read_text()
+        assert "status: done" in text
+
+    def test_completed_rejected_workflow_becomes_failed(self, tmp_path: Path):
+        """dispatched + workflow_id + rejected Temporal verdict → failed."""
+        spec_path = tmp_path / "rejected.md"
+        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-rejected\n---\nBody\n")
+        spec_dict = {
+            "name": "rejected",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-rejected",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(
+            spec_dict,
+            workflow_description=self._workflow("COMPLETED", "rejected"),
+        )
+
+        assert result["changed"] is True
+        assert result["now"] == "failed"
+        assert "status: failed" in spec_path.read_text()
+
+    def test_running_workflow_stays_dispatched(self, tmp_path: Path):
+        """RUNNING workflow leaves the spec dispatched."""
+        spec_path = tmp_path / "running.md"
+        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-running\n---\nBody\n")
+        spec_dict = {
+            "name": "running",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-running",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(
+            spec_dict,
+            workflow_description=self._workflow("RUNNING"),
+        )
+
+        assert result["changed"] is False
+        assert result["now"] == "dispatched"
+        assert "status: dispatched" in spec_path.read_text()
+
+    def test_missing_workflow_clears_workflow_id(self, tmp_path: Path):
+        """Missing workflow returns spec to ready and clears stale workflow_id."""
+        spec_path = tmp_path / "missing.md"
+        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-missing\n---\nBody\n")
+        spec_dict = {
+            "name": "missing",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-missing",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(spec_dict)
+
+        text = spec_path.read_text()
+        assert result["changed"] is True
+        assert result["now"] == "ready"
+        assert "status: ready" in text
+        assert "workflow_id:" not in text
+
+    def test_reconcile_all_uses_known_workflow_descriptions(self, tmp_path: Path):
+        """Opportunistic list reconciliation updates only workflows already listed."""
+        matched = tmp_path / "matched.md"
+        unmatched = tmp_path / "unmatched.md"
+        matched.write_text("---\nstatus: dispatched\nworkflow_id: wf-matched\n---\nBody\n")
+        unmatched.write_text("---\nstatus: dispatched\nworkflow_id: wf-unmatched\n---\nBody\n")
+
+        result = reconcile_all(
+            tmp_path,
+            workflow_descriptions={"wf-matched": self._workflow("COMPLETED", "accepted")},
+        )
+
+        assert result["fixed"] == [
+            {
+                "name": "matched",
+                "was": "dispatched",
+                "now": "done",
+                "reason": "workflow completed with accepted verdict",
+            }
+        ]
+        assert "status: done" in matched.read_text()
+        assert "status: dispatched" in unmatched.read_text()
 
     def test_done_with_existing_code_no_warning(self, tmp_path: Path):
         """done + files exist → correct, no warning."""
