@@ -11,6 +11,7 @@ import json
 import sys
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.cli import app
@@ -896,6 +897,37 @@ class TestLogs:
         log_path = Path(data["result"]["log_path"])
         assert log_path == tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
         assert data["result"]["lines"] == ['{"workflow_id": "wf", "provider": "zhipu"}']
+
+    def test_logs_running_workflow_does_not_wait_for_result(self, tmp_path, monkeypatch):
+        """Live workflows must use log discovery instead of blocking on result()."""
+        import mtor.cli as _cli
+
+        workflow_id = "ribosome-glm51-spec-a989709c-6a06468c"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.log"
+        mock_client, wf_handle = make_mock_client()
+        desc = SimpleNamespace(status=SimpleNamespace(name="RUNNING"))
+        wf_handle.describe = AsyncMock(return_value=desc)
+        wf_handle.result = AsyncMock(return_value={"should": "not be awaited"})
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd and cmd[0] == "ssh" and "find " in cmd[-1]:
+                result.stdout = f"1 {remote_path}\n"
+            elif cmd and cmd[0] == "scp":
+                Path(cmd[-1]).write_text("header\nstill running\n")
+            return result
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["logs", workflow_id])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        wf_handle.result.assert_not_awaited()
+        assert data["result"]["lines"] == ["header", "still running"]
 
 
 # ---------------------------------------------------------------------------

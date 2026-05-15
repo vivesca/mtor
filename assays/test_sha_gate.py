@@ -193,13 +193,14 @@ class TestCheckWorkerSha:
             with pytest.raises(RuntimeError, match="restart failed"):
                 _check_worker_sha()
 
-    def test_deploy_pushes_main_to_deploy_sync(self):
-        """Auto-deploy pushes main:deploy-sync to DEPLOY_REMOTE."""
+    def test_deploy_pushes_main_to_unique_deploy_sync_branch(self):
+        """Auto-deploy pushes to a unique deploy-sync branch to avoid ref races."""
         from mtor.dispatch import _check_worker_sha
 
         with patch("mtor.dispatch.subprocess") as mock_sp, patch(
             "mtor.dispatch.time"
-        ):
+        ) as mock_time, patch("mtor.dispatch.os.getpid", return_value=12345):
+            mock_time.time.return_value = 42
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
@@ -213,7 +214,28 @@ class TestCheckWorkerSha:
         push_call = mock_sp.run.call_args_list[2]
         push_args = push_call[0][0]
         assert "push" in push_args
-        assert any("deploy-sync" in arg for arg in push_args)
+        assert "main:deploy-sync-12345-42000" in push_args
+
+        merge_call = mock_sp.run.call_args_list[3]
+        merge_cmd = merge_call[0][0][-1]
+        assert "git merge deploy-sync-12345-42000 --no-edit" in merge_cmd
+        assert "git branch -d deploy-sync-12345-42000" in merge_cmd
+
+    def test_merge_failure_raises(self):
+        """If worker merge fails during auto-deploy, raises RuntimeError."""
+        from mtor.dispatch import _check_worker_sha
+
+        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
+            "mtor.dispatch.time"
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa\n"),
+                MagicMock(returncode=0, stdout="bbb\n"),
+                MagicMock(returncode=0, stdout=""),  # push ok
+                MagicMock(returncode=1, stderr="merge conflict"),  # merge fail
+            ]
+            with pytest.raises(RuntimeError, match="merge failed"):
+                _check_worker_sha()
 
 
 # ---------------------------------------------------------------------------

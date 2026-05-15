@@ -80,6 +80,9 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
 
             async def _get_output_path():
                 handle = client.get_workflow_handle(workflow_id)
+                desc = await handle.describe()
+                if getattr(getattr(desc, "status", None), "name", None) == "RUNNING":
+                    return ""
                 wf_result = await handle.result()
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)
@@ -829,6 +832,9 @@ def logs(
 
             async def _get_output_path():
                 handle = client.get_workflow_handle(workflow_id)
+                desc = await handle.describe()
+                if getattr(getattr(desc, "status", None), "name", None) == "RUNNING":
+                    return ""
                 wf_result = await handle.result()
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)

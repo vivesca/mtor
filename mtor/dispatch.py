@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import contextlib
+import hashlib
+import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -160,19 +162,27 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     # otherwise dispatching from a non-`main` repo (e.g. quorate on master)
     # fails with bogus "src refspec main does not match any".
     germline_dir = str(Path.home() / "germline")
+    deploy_branch = f"deploy-sync-{os.getpid()}-{int(time.time() * 1000)}"
     push = subprocess.run(
         ["git", "-C", germline_dir, "push",
-         WORKER_HOST + ":~/germline", "main:deploy-sync", "--force"],
+         WORKER_HOST + ":~/germline", f"main:{deploy_branch}", "--force"],
         capture_output=True, text=True, timeout=120,
     )
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
-    subprocess.run(
+    quoted_branch = shlex.quote(deploy_branch)
+    merge = subprocess.run(
         ["ssh", WORKER_HOST,
-         "cd ~/germline && git merge deploy-sync --no-edit"],
+         (
+             "cd ~/germline && "
+             f"git merge {quoted_branch} --no-edit && "
+             f"git branch -d {quoted_branch}"
+         )],
         capture_output=True, text=True, timeout=30,
     )
+    if merge.returncode != 0:
+        raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
 
     restart = subprocess.run(
         ["ssh", WORKER_HOST, "sudo systemctl restart temporal-worker"],
@@ -437,12 +447,11 @@ def _inject_spec_constraints(
     if exclude:
         parts.append(f"Do NOT modify: {', '.join(exclude)}.")
 
-    # Repo context (only when non-default). Expand `~` defensively — the
-    # spec-ingest path above already expands, but prompts can reach this
-    # function via other callers.
+    # Repo context (only when non-default). Keep home-relative paths in worker
+    # form so prompts do not leak the local machine's absolute HOME.
     repo = spec.get("repo", "~")
     if repo != "~":
-        repo = str(Path(repo).expanduser())
+        repo = _normalize_spec_repo_for_worker(str(repo))
         parts.append(f"Working directory: {repo}")
 
     # Test run command and function list

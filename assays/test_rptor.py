@@ -450,6 +450,24 @@ def test_spec_injection_repo_context(tmp_path):
     assert "Working directory: /home/vivesca/code/mtor" in result
 
 
+def test_spec_injection_preserves_home_relative_worker_repo(tmp_path):
+    """Home-relative spec repos stay portable in worker prompts."""
+    spec_file = tmp_path / "repo-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/mtor\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Implement feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Implement feature.",
+    )
+
+    assert "Working directory: ~/code/mtor" in result
+    assert str(Path.home() / "code/mtor") not in result
+
+
 def test_spec_injection_no_spec_path_unchanged():
     """_inject_spec_constraints returns base prompt unchanged when spec_path is None."""
     result = _inject_spec_constraints(
