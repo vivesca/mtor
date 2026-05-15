@@ -21,7 +21,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from pathlib import Path
 
-    from mtor.worker.translocase import chaperone, merge_approved, translate, watch_cycle, _log_event
+    from mtor.worker.translocase import chaperone, create_pr, translate, watch_cycle, _log_event
 
 # Retry policy: 2 attempts max (translation tasks mutate files, not safely retriable)
 _RETRY_POLICY = RetryPolicy(
@@ -152,20 +152,36 @@ class TranslationWorkflow:
                 ]
             )
 
-        # Merge to main only after chaperone approves (verdict gate)
+        # Approved work becomes a PR. Main is no longer mutated by the worker;
+        # merge happens through GitHub review/CI or an explicit human action.
         if review.get("approved") and result.get("branch_name"):
             try:
-                merge_result = await workflow.execute_activity(
-                    merge_approved,
+                title = task.strip().splitlines()[0][:80] if task.strip() else result["branch_name"]
+                body = (
+                    "Dispatched by mtor\n\n"
+                    f"Workflow: {workflow.info().workflow_id}\n"
+                    f"Provider: {provider}"
+                )
+                pr_result = await workflow.execute_activity(
+                    create_pr,
                     args=[{
                         "repo_root": spec.get("repo", str(Path.home() / "germline")),
                         "branch_name": result["branch_name"],
+                        "title": title,
+                        "body": body,
                     }],
                     start_to_close_timeout=timedelta(minutes=2),
                 )
-                result = {**result, "merged": merge_result.get("merged", False)}
+                result = {
+                    **result,
+                    "merged": False,
+                    "pr_url": pr_result.get("pr_url", ""),
+                    "pr_number": pr_result.get("pr_number", 0),
+                    "pr_created": pr_result.get("created", False),
+                    "pr_error": pr_result.get("error", ""),
+                }
             except Exception as exc:
-                result = {**result, "merged": False, "merge_error": str(exc)[:200]}
+                result = {**result, "merged": False, "pr_error": str(exc)[:200]}
 
         return {
             **result,

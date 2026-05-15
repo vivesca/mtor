@@ -1920,7 +1920,7 @@ async def main() -> None:
         client=client,
         task_queue=TASK_QUEUE,
         workflows=[TranslationWorkflow, WatchWorkflow],
-        activities=[translate, chaperone, merge_approved, watch_cycle],
+        activities=[translate, chaperone, merge_approved, create_pr, watch_cycle],
         max_concurrent_activities=max_concurrent,
     )
     _gc_worktrees(str(Path.home() / "germline"))
