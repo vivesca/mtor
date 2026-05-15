@@ -1689,7 +1689,8 @@ def stats() -> None:
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async def _count(query: str) -> int:
-        return await client.count_workflows(query=query)
+        result = await client.count_workflows(query=query)
+        return int(getattr(result, "count", result))
 
     counts: dict[str, int] = {}
     queries = {

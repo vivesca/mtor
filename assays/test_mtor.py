@@ -94,6 +94,14 @@ def make_mock_client():
     return client, wf_handle
 
 
+class _WorkflowExecutionCount:
+    """Small stand-in for temporalio.client.WorkflowExecutionCount."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.groups = []
+
+
 # Modules that import _get_client — patch all of them to keep tests reliable.
 _CLIENT_PATCH_TARGETS = [
     "mtor.cli._get_client",
@@ -185,6 +193,24 @@ class TestBareInvocation:
         ]:
             assert app._registered_commands[visible].show is True
             assert app._registered_commands[hidden].show is False
+
+
+class TestStatsCommand:
+    def test_stats_serializes_temporal_count_objects(self):
+        """mtor stats emits plain integer counts, not Temporal SDK objects."""
+        client, _ = make_mock_client()
+
+        async def _fake_count(query=None):
+            return _WorkflowExecutionCount(7)
+
+        client.count_workflows = _fake_count
+
+        with _patch_client(client):
+            exit_code, data = invoke(["stats"])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert set(data["result"]["counts"].values()) == {7}
 
 
 class TestHelpSuppression:
