@@ -83,12 +83,12 @@ def test_riboseq_uses_search_attribute_filters(mock_get_client):
             assert "mtor_verdict = 'accepted'" in query
 
 
-@patch("mtor.client._get_client")
-def test_setup_search_attrs_cli(mock_get_client):
+@patch("temporalio.client.Client.connect")
+def test_setup_search_attrs_cli(mock_connect):
     """Verify setup-search-attrs command calls operator_service."""
     client = MagicMock()
     client.operator_service.add_search_attributes = AsyncMock()
-    mock_get_client.return_value = (client, None)
+    mock_connect.return_value = client
 
     exit_code, data = invoke(["rictor", "setup-search-attrs"])
 

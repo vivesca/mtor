@@ -418,7 +418,7 @@ async def setup_search_attributes() -> dict[str, object]:
         "mtor_provider": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
         "mtor_verdict": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
         "mtor_mode": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
-        "mtor_spec": IndexedValueType.INDEXED_VALUE_TYPE_TEXT,
+        "mtor_spec": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
         "mtor_risk": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
     }
 

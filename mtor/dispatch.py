@@ -333,7 +333,7 @@ def _dispatch_prompt(
             SearchAttributePair(SearchAttributeKey.for_keyword("mtor_risk"), classify_risk(full_prompt)),
         ]
         if spec_path:
-            search_attrs.append(SearchAttributePair(SearchAttributeKey.for_text("mtor_spec"), str(spec_path)))
+            search_attrs.append(SearchAttributePair(SearchAttributeKey.for_keyword("mtor_spec"), str(spec_path)))
 
         async def _start():
             handle = await client.start_workflow(
