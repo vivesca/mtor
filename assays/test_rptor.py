@@ -15,12 +15,14 @@ import pytest
 from mtor.cli import app
 from mtor.rptor import (
     CycleDetected,
+    audit_specs,
     display_dag,
     parse_spec,
     resolve_dag,
     scan_specs,
 )
 from mtor.dispatch import _inject_spec_constraints
+from mtor.spec import validate_spec
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +130,33 @@ def test_parse_spec_minimal(tmp_path):
     assert result["exclude"] == []
     assert result["tests"] == {}
     assert result["body"] == "Body text."
+
+
+def test_parse_spec_completion_metadata(tmp_path):
+    """Completion and audit metadata are available to quality checks."""
+    spec_file = tmp_path / "completed.md"
+    spec_file.write_text(
+        "---\n"
+        "status: done\n"
+        "completed_at: 2026-05-15T00:00:00+00:00\n"
+        "completed_commit: abc1234\n"
+        "completed_note: Verified with focused tests.\n"
+        "completed_by: codex\n"
+        "audit_status: audited_present\n"
+        "audit_reason: implementation present\n"
+        "---\n"
+        "Body text.\n",
+        encoding="utf-8",
+    )
+
+    result = parse_spec(spec_file)
+
+    assert result["completed_at"] == "2026-05-15T00:00:00+00:00"
+    assert result["completed_commit"] == "abc1234"
+    assert result["completed_note"] == "Verified with focused tests."
+    assert result["completed_by"] == "codex"
+    assert result["audit_status"] == "audited_present"
+    assert result["audit_reason"] == "implementation present"
 
 
 def test_parse_spec_missing_file():
@@ -295,6 +324,80 @@ def test_display_dag_buckets(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Spec audit
+# ---------------------------------------------------------------------------
+
+
+def test_audit_specs_flags_invalid_status(tmp_path):
+    """Audit reports status vocabulary drift."""
+    (tmp_path / "invalid.md").write_text("---\nstatus: open\n---\n", encoding="utf-8")
+
+    audit = audit_specs(scan_specs(tmp_path))
+
+    assert audit["ok"] is False
+    assert audit["counts"]["issues"]["invalid_status"] == 1
+    assert audit["issues"][0]["name"] == "invalid"
+
+
+def test_audit_specs_flags_done_without_evidence(tmp_path):
+    """Done specs need provenance, not just a status flip."""
+    (tmp_path / "weak.md").write_text("---\nstatus: done\n---\n", encoding="utf-8")
+
+    audit = audit_specs(scan_specs(tmp_path))
+
+    assert audit["ok"] is False
+    assert audit["counts"]["issues"]["done_without_evidence"] == 1
+
+
+def test_audit_specs_accepts_done_with_completion_evidence(tmp_path):
+    """A done spec with completion metadata passes the hard audit gates."""
+    (tmp_path / "done.md").write_text(
+        "---\nstatus: done\ncompleted_at: 2026-05-15T00:00:00+00:00\n---\n",
+        encoding="utf-8",
+    )
+
+    audit = audit_specs(scan_specs(tmp_path))
+
+    assert audit["ok"] is True
+    assert audit["counts"]["issues"] == {}
+
+
+def test_validate_spec_allows_archival_metadata(tmp_path):
+    """Historical plan metadata is not a hard validation failure."""
+    spec_file = tmp_path / "archive.md"
+    spec_file.write_text(
+        "---\nstatus: stale\naudited_at: 2026-05-15\nauthor: terry\n---\n",
+        encoding="utf-8",
+    )
+
+    assert validate_spec(spec_file) == []
+
+
+def test_validate_spec_ignores_archival_missing_dependencies(tmp_path):
+    """Stale historical specs may reference removed or renamed ancestors."""
+    spec_file = tmp_path / "archive.md"
+    spec_file.write_text(
+        "---\nstatus: stale\ndepends_on:\n  - removed-spec\n---\n",
+        encoding="utf-8",
+    )
+
+    assert validate_spec(spec_file) == []
+
+
+def test_validate_spec_checks_active_missing_dependencies(tmp_path):
+    """Ready specs still need resolvable dependencies."""
+    spec_file = tmp_path / "active.md"
+    spec_file.write_text(
+        "---\nstatus: ready\ndepends_on:\n  - missing-spec\n---\n",
+        encoding="utf-8",
+    )
+
+    errors = validate_spec(spec_file)
+
+    assert errors == [f"{spec_file}: depends_on target 'missing-spec' does not exist"]
+
+
+# ---------------------------------------------------------------------------
 # CLI: rptor command
 # ---------------------------------------------------------------------------
 
@@ -351,6 +454,32 @@ def test_rptor_empty_directory(tmp_path):
     assert data["result"]["counts"]["ready"] == 0
 
 
+def test_rptor_audit_command_reports_issues(tmp_path):
+    """mtor rptor --audit returns lifecycle quality findings."""
+    (tmp_path / "weak.md").write_text("---\nstatus: done\n---\n", encoding="utf-8")
+    (tmp_path / "invalid.md").write_text("---\nstatus: open\n---\n", encoding="utf-8")
+
+    exit_code, data = invoke(["rptor", "--audit", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["ok"] is False
+    assert data["result"]["counts"]["issues"]["done_without_evidence"] == 1
+    assert data["result"]["counts"]["issues"]["invalid_status"] == 1
+    assert data["result"]["directory"] == str(tmp_path)
+
+
+def test_rptor_audit_strict_exits_for_errors(tmp_path):
+    """mtor rptor --audit --strict can be used as a hard gate."""
+    (tmp_path / "weak.md").write_text("---\nstatus: done\n---\n", encoding="utf-8")
+
+    exit_code, data = invoke(["rptor", "--audit", "--strict", "--dir", str(tmp_path)])
+
+    assert exit_code == 1
+    assert data["ok"] is False
+    assert data["error"]["code"] == "SPEC_AUDIT_FAILED"
+
+
 def test_rptor_circular_dependency_reported(tmp_path):
     """mtor rptor exits with error when circular dependency is found."""
     (tmp_path / "x.md").write_text("---\nstatus: ready\ndepends_on:\n  - y\n---\n", encoding="utf-8")
@@ -398,6 +527,7 @@ def test_rptor_done_updates_status(tmp_path):
     # Verify the file was actually updated
     text = spec_file.read_text(encoding="utf-8")
     assert "status: done" in text
+    assert "completed_at:" in text
 
 
 def test_rptor_done_missing_spec(tmp_path):

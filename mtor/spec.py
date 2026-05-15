@@ -8,33 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from mtor.rptor import CANONICAL_STATUSES
 
-CANONICAL_FIELDS = {
-    "status",
-    "title",
-    "scope",
-    "repo",
-    "priority",
-    "depends_on",
-    "dispatched_at",
-    "workflow_id",
-    "completed_at",
-    "verdict",
-    "tests",
-    "exclude",
-    "files",
-    "dispatched",
-    "type",
-    "target",
-    "created",
-    "revised",
-    "goal",
-    "name",
-    "description",
-    "blocked_by",
-}
-
-VALID_STATUSES = {"ready", "dispatched", "done", "blocked", "abandoned", "failed", "stale", "queued"}
+VALID_STATUSES = CANONICAL_STATUSES
 REQUIRED_FIELDS = {"status"}
 DEFAULT_SPEC_DIR = Path("~/epigenome/chromatin/loci/plans/")
 
@@ -71,9 +47,6 @@ def _validate_one_spec(spec: dict[str, Any], spec_names: set[str]) -> list[str]:
     if not keys:
         return [f"{path}: missing YAML frontmatter"]
 
-    for key in sorted(keys - CANONICAL_FIELDS):
-        errors.append(f"{path}: unknown frontmatter field '{key}'")
-
     for field in sorted(REQUIRED_FIELDS - keys):
         errors.append(f"{path}: missing required frontmatter field '{field}'")
 
@@ -83,9 +56,10 @@ def _validate_one_spec(spec: dict[str, Any], spec_names: set[str]) -> list[str]:
             allowed = ", ".join(sorted(VALID_STATUSES))
             errors.append(f"{path}: invalid status '{status}' (expected one of: {allowed})")
 
-    for dep in _normalize_list(spec.get("depends_on", [])):
-        if dep not in spec_names:
-            errors.append(f"{path}: depends_on target '{dep}' does not exist")
+    if str(spec.get("status", "")) in {"ready", "dispatched"}:
+        for dep in _normalize_list(spec.get("depends_on", [])):
+            if dep not in spec_names:
+                errors.append(f"{path}: depends_on target '{dep}' does not exist")
 
     return errors
 

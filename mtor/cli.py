@@ -44,7 +44,14 @@ from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.harness import PROVIDER_HARNESS_MAP
-from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topological_sort
+from mtor.rptor import (
+    CycleDetected,
+    audit_specs,
+    display_dag,
+    resolve_dag,
+    scan_specs,
+    topological_sort,
+)
 from mtor.scan import _run_checks
 from mtor.triage import (
     archive_ids,
@@ -2068,12 +2075,30 @@ def rptor(
     *,
     dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
+    audit: Annotated[bool, Parameter(name=["--audit"])] = False,
+    strict: Annotated[bool, Parameter(name=["--strict"])] = False,
 ) -> None:
     """Display spec DAG — status, dependencies, and dispatchability."""
     cmd = "mtor rptor"
     directory = dir.expanduser()
 
     specs = scan_specs(directory)
+
+    if audit:
+        result = {**audit_specs(specs), "directory": str(directory)}
+        if strict and not result["ok"]:
+            sys.exit(
+                _err(
+                    cmd,
+                    "Spec audit failed",
+                    "SPEC_AUDIT_FAILED",
+                    "Fix invalid statuses or add completion evidence, then retry.",
+                    [_action(f"mtor rptor --audit --dir {directory}", "Inspect audit issues")],
+                    exit_code=1,
+                )
+            )
+        _ok(cmd, result, version=VERSION)
+        return
 
     if not specs:
         _ok(

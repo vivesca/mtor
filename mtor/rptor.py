@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+CANONICAL_STATUSES = {"ready", "dispatched", "done", "stale", "failed", "superseded"}
+DONE_EVIDENCE_FIELDS = (
+    "completed_at",
+    "completed_commit",
+    "completed_note",
+    "completed_by",
+    "audit_status",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +170,12 @@ def parse_spec(path: Path) -> dict[str, Any]:
       repo       — from frontmatter (default: "~")
       workflow_id — from frontmatter (default: "")
       verdict    — from frontmatter (default: "")
+      completed_at — from frontmatter (default: "")
+      completed_commit — from frontmatter (default: "")
+      completed_note — from frontmatter (default: "")
+      completed_by — from frontmatter (default: "")
+      audit_status — from frontmatter (default: "")
+      audit_reason — from frontmatter (default: "")
       depends_on — list of spec names this one depends on (default: [])
       scope      — list of file/dir paths (default: [])
       exclude    — list of excluded paths (default: [])
@@ -211,6 +227,12 @@ def parse_spec(path: Path) -> dict[str, Any]:
         "repo": fm.get("repo", "~"),
         "workflow_id": fm.get("workflow_id", ""),
         "verdict": fm.get("verdict", ""),
+        "completed_at": fm.get("completed_at", ""),
+        "completed_commit": fm.get("completed_commit", ""),
+        "completed_note": fm.get("completed_note", ""),
+        "completed_by": fm.get("completed_by", ""),
+        "audit_status": fm.get("audit_status", ""),
+        "audit_reason": fm.get("audit_reason", ""),
         "depends_on": depends_on,
         "scope": scope,
         "exclude": exclude,
@@ -238,6 +260,98 @@ def scan_specs(directory: Path) -> list[dict[str, Any]]:
             # Skip unreadable files
             pass
     return specs
+
+
+# ---------------------------------------------------------------------------
+# Spec audit
+# ---------------------------------------------------------------------------
+
+
+def _has_done_evidence(spec: dict[str, Any]) -> bool:
+    return any(str(spec.get(field, "")).strip() for field in DONE_EVIDENCE_FIELDS)
+
+
+def _issue(
+    spec: dict[str, Any],
+    *,
+    code: str,
+    severity: str,
+    message: str,
+) -> dict[str, str]:
+    return {
+        "code": code,
+        "severity": severity,
+        "name": str(spec.get("name", "")),
+        "status": str(spec.get("status", "")),
+        "path": str(spec.get("path", "")),
+        "message": message,
+    }
+
+
+def audit_specs(specs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Audit plan specs for lifecycle drift and weak completion provenance."""
+    issues: list[dict[str, str]] = []
+    status_counts = Counter(str(spec.get("status", "ready")) for spec in specs)
+
+    for spec in specs:
+        status = str(spec.get("status", "ready"))
+
+        if status not in CANONICAL_STATUSES:
+            allowed = ", ".join(sorted(CANONICAL_STATUSES))
+            issues.append(
+                _issue(
+                    spec,
+                    code="invalid_status",
+                    severity="error",
+                    message=f"status must be one of: {allowed}",
+                )
+            )
+
+        if status == "done" and not _has_done_evidence(spec):
+            fields = ", ".join(DONE_EVIDENCE_FIELDS)
+            issues.append(
+                _issue(
+                    spec,
+                    code="done_without_evidence",
+                    severity="error",
+                    message=f"done specs need completion evidence ({fields})",
+                )
+            )
+
+        if status in {"stale", "failed", "superseded"} and not str(
+            spec.get("audit_reason", "")
+        ).strip():
+            issues.append(
+                _issue(
+                    spec,
+                    code=f"{status}_without_reason",
+                    severity="warning",
+                    message=f"{status} specs should record audit_reason",
+                )
+            )
+
+        if status == "ready" and not spec.get("tests"):
+            issues.append(
+                _issue(
+                    spec,
+                    code="ready_without_tests",
+                    severity="warning",
+                    message="ready specs should include executable tests",
+                )
+            )
+
+    issue_counts = Counter(issue["code"] for issue in issues)
+    severity_counts = Counter(issue["severity"] for issue in issues)
+    return {
+        "ok": not any(issue["severity"] == "error" for issue in issues),
+        "counts": {
+            "specs": len(specs),
+            "statuses": dict(sorted(status_counts.items())),
+            "issues": dict(sorted(issue_counts.items())),
+            "severities": dict(sorted(severity_counts.items())),
+        },
+        "issues": sorted(issues, key=lambda issue: (issue["severity"], issue["code"], issue["name"])),
+    }
 
 
 # ---------------------------------------------------------------------------
