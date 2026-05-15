@@ -930,12 +930,10 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             worktree_path = await asyncio.to_thread(_create_worktree, repo_root, branch_name)
             work_dir = worktree_path
         except Exception as exc:
-            print(
-                f"WARNING: worktree creation failed ({exc}), falling back to repo root",
-                file=sys.stderr,
-            )
-            work_dir = repo_root
-            worktree_path = None
+            raise RuntimeError(
+                f"Worktree creation failed for {repo_root}: {exc}. "
+                "Build tasks must not run on main. Fix: clear stale index.lock or worktrees."
+            ) from exc
 
     prior_commits = await asyncio.to_thread(
         _detect_prior_commits, work_dir, time_window_minutes=40, author="ribosome"
