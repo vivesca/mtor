@@ -19,6 +19,42 @@ def _default_data() -> dict[str, Any]:
     return {"reviewed": [], "archived": [], "verdict_overrides": {}, "updated": None}
 
 
+def _normalize_archived_entry(entry: Any) -> dict[str, str | None] | None:
+    """Return the canonical archived record shape, accepting legacy string IDs."""
+    if isinstance(entry, str):
+        return {"workflow_id": entry, "reason": "legacy", "archived_at": None}
+    if isinstance(entry, dict):
+        workflow_id = entry.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id:
+            reason = entry.get("reason")
+            archived_at = entry.get("archived_at")
+            return {
+                "workflow_id": workflow_id,
+                "reason": reason if isinstance(reason, str) and reason else "legacy",
+                "archived_at": archived_at if isinstance(archived_at, str) else None,
+            }
+    return None
+
+
+def normalize_archived(entries: list[Any]) -> list[dict[str, str | None]]:
+    """Normalize archived entries and de-duplicate by workflow ID."""
+    records: dict[str, dict[str, str | None]] = {}
+    for entry in entries:
+        record = _normalize_archived_entry(entry)
+        if record is not None and record["workflow_id"] not in records:
+            records[record["workflow_id"]] = record
+    return [records[workflow_id] for workflow_id in sorted(records)]
+
+
+def archived_ids(data: dict[str, Any]) -> set[str]:
+    """Return archived workflow IDs from raw or normalized triage data."""
+    return {
+        record["workflow_id"]
+        for record in normalize_archived(data.get("archived", []))
+        if record["workflow_id"] is not None
+    }
+
+
 def load_triage() -> dict[str, Any]:
     """Load triage data from disk. Returns defaults if file missing."""
     if TRIAGE_PATH.exists():
@@ -32,6 +68,7 @@ def load_triage() -> dict[str, Any]:
                 data["verdict_overrides"] = {}
             if "updated" not in data:
                 data["updated"] = None
+            data["archived"] = normalize_archived(data["archived"])
             return data
         except (json.JSONDecodeError, OSError):
             pass
@@ -49,7 +86,7 @@ def review_ids(ids: list[str]) -> dict[str, Any]:
     """Add IDs to reviewed set. Idempotent. Returns envelope result dict."""
     data = load_triage()
     reviewed = set(data["reviewed"])
-    archived = set(data["archived"])
+    archived = archived_ids(data)
     for wid in ids:
         if wid not in archived:
             reviewed.add(wid)
@@ -58,17 +95,25 @@ def review_ids(ids: list[str]) -> dict[str, Any]:
     return {"reviewed": data["reviewed"], "count": len(data["reviewed"])}
 
 
-def archive_ids(ids: list[str]) -> dict[str, Any]:
+def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
     """Move IDs to archived set. Removes from reviewed. Returns envelope result dict."""
     data = load_triage()
-    archived = set(data["archived"])
+    records = {record["workflow_id"]: record for record in normalize_archived(data["archived"])}
     incoming = set(ids)
-    archived |= incoming
+    archived_at = datetime.now(UTC).isoformat()
+    for workflow_id in sorted(incoming):
+        if workflow_id not in records:
+            records[workflow_id] = {
+                "workflow_id": workflow_id,
+                "reason": reason,
+                "archived_at": archived_at,
+            }
     # Remove newly archived from reviewed
     data["reviewed"] = sorted(set(data["reviewed"]) - incoming)
-    data["archived"] = sorted(archived)
+    data["archived"] = [records[workflow_id] for workflow_id in sorted(records)]
     save_triage(data)
-    return {"archived": data["archived"], "count": len(data["archived"])}
+    archived = [record["workflow_id"] for record in data["archived"]]
+    return {"archived": archived, "archived_records": data["archived"], "count": len(archived)}
 
 
 def parse_duration(duration_str: str) -> timedelta:
@@ -109,4 +154,4 @@ def get_verdict_overrides() -> dict[str, str]:
 def get_triage_sets() -> tuple[set[str], set[str]]:
     """Return (reviewed_ids, archived_ids) sets."""
     data = load_triage()
-    return set(data["reviewed"]), set(data["archived"])
+    return set(data["reviewed"]), archived_ids(data)

@@ -1155,14 +1155,15 @@ class TestArchive:
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         # First review, then archive
         invoke(["review", "wf-001"])
-        exit_code, data = invoke(["archive", "wf-001"])
+        exit_code, data = invoke(["archive", "wf-001", "--reason", "reviewed diff"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "wf-001" in data["result"]["archived"]
         # Reload triage data and verify gone from reviewed
         raw = json.loads((tmp_path / "triage.json").read_text())
         assert "wf-001" not in raw["reviewed"]
-        assert "wf-001" in raw["archived"]
+        assert raw["archived"][0]["workflow_id"] == "wf-001"
+        assert raw["archived"][0]["reason"] == "reviewed diff"
 
     def test_archive_before_duration(self, tmp_path, monkeypatch):
         """Archive --before 3h archives completed workflows older than 3 hours."""
@@ -1187,7 +1188,7 @@ class TestArchive:
 
         mock_client.list_workflows = _fake_list_aged
         with _patch_client(mock_client):
-            exit_code, data = invoke(["archive", "--before", "3h"])
+            exit_code, data = invoke(["archive", "--before", "3h", "--force"])
         assert exit_code == 0
         assert data["ok"] is True
         # Should archive wf-old-1 (5h) and wf-old-2 (10h), not wf-old-0 (1h)
@@ -1204,18 +1205,29 @@ class TestArchive:
         # Review two IDs
         invoke(["review", "wf-a"])
         invoke(["review", "wf-b"])
-        exit_code, data = invoke(["archive", "--all-reviewed"])
+        exit_code, data = invoke(["archive", "--all-reviewed", "--force"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "wf-a" in data["result"]["archived"]
         assert "wf-b" in data["result"]["archived"]
 
-    def test_archive_without_review(self, tmp_path, monkeypatch):
-        """Archiving an ID that was never reviewed still works."""
+    def test_archive_requires_reason(self, tmp_path, monkeypatch):
+        """Archiving without --reason refuses with the review-first prompt."""
         import mtor.triage as triage_mod
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         exit_code, data = invoke(["archive", "wf-never-reviewed"])
+        assert exit_code == 2
+        assert data["ok"] is False
+        assert data["error"]["code"] == "ARCHIVE_REQUIRES_REASON"
+        assert "Review the diff first" in data["error"]["message"]
+
+    def test_archive_force_without_reason(self, tmp_path, monkeypatch):
+        """--force is an explicit opt-out for cleanup scripts."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        exit_code, data = invoke(["archive", "wf-never-reviewed", "--force"])
         assert exit_code == 0
         assert data["ok"] is True
         assert "wf-never-reviewed" in data["result"]["archived"]
@@ -1243,7 +1255,7 @@ class TestListTriage:
 
         mock_client.list_workflows = _fake_list_two
         # Archive one
-        invoke(["archive", "wf-hidden"])
+        invoke(["archive", "wf-hidden", "--force"])
         with _patch_client(mock_client):
             exit_code, data = invoke(["list"])
         assert exit_code == 0
@@ -1298,7 +1310,7 @@ class TestListTriage:
 
         mock_client.list_workflows = _fake_list_pending
         invoke(["review", "wf-reviewed"])
-        invoke(["archive", "wf-archived"])
+        invoke(["archive", "wf-archived", "--force"])
         with _patch_client(mock_client):
             exit_code, data = invoke(["list", "--pending"])
         assert exit_code == 0
@@ -1327,7 +1339,7 @@ class TestListTriage:
                 yield execution
 
         mock_client.list_workflows = _fake_list_all
-        invoke(["archive", "wf-archived"])
+        invoke(["archive", "wf-archived", "--force"])
         with _patch_client(mock_client):
             exit_code, data = invoke(["list", "--all"])
         assert exit_code == 0
@@ -1381,7 +1393,7 @@ class TestTriageStorage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         invoke(["review", "wf-001"])
-        exit_code, data = invoke(["archive", "wf-001"])
+        exit_code, data = invoke(["archive", "wf-001", "--reason", "reviewed diff"])
         assert exit_code == 0
         assert "wf-001" in data["result"]["archived"]
 

@@ -12,6 +12,7 @@ from mtor.triage import (
     archive_ids,
     get_triage_sets,
     get_verdict_overrides,
+    load_triage,
     override_verdict,
     parse_duration,
     review_ids,
@@ -42,7 +43,7 @@ def test_archive_ids_moves_from_reviewed(tmp_path: Path) -> None:
     with _patch_triage_path(tmp_path):
         save_triage({"reviewed": ["wf-1", "wf-2"], "archived": [], "verdict_overrides": {}})
 
-        result = archive_ids(["wf-1"])
+        result = archive_ids(["wf-1"], reason="reviewed diff")
         assert "wf-1" in result["archived"]
         assert result["count"] == 1
 
@@ -50,6 +51,38 @@ def test_archive_ids_moves_from_reviewed(tmp_path: Path) -> None:
         assert "wf-1" not in reviewed
         assert "wf-2" in reviewed
         assert "wf-1" in archived
+
+
+def test_archive_ids_stores_reason_records(tmp_path: Path) -> None:
+    """archive_ids stores audit metadata for newly archived workflows."""
+    with _patch_triage_path(tmp_path):
+        result = archive_ids(["wf-1"], reason="reviewed diff")
+
+        assert result["archived"] == ["wf-1"]
+        data = load_triage()
+        assert data["archived"] == [
+            {
+                "workflow_id": "wf-1",
+                "reason": "reviewed diff",
+                "archived_at": data["archived"][0]["archived_at"],
+            }
+        ]
+        assert data["archived"][0]["archived_at"] is not None
+
+
+def test_load_triage_normalizes_legacy_archived_strings(tmp_path: Path) -> None:
+    """Legacy archived string IDs remain readable as archived records."""
+    with _patch_triage_path(tmp_path):
+        (tmp_path / "triage.json").write_text(
+            '{"reviewed": [], "archived": ["wf-old"], "verdict_overrides": {}, "updated": null}\n'
+        )
+
+        data = load_triage()
+        assert data["archived"] == [
+            {"workflow_id": "wf-old", "reason": "legacy", "archived_at": None}
+        ]
+        _, archived = get_triage_sets()
+        assert archived == {"wf-old"}
 
 
 def test_override_verdict_roundtrip(tmp_path: Path) -> None:

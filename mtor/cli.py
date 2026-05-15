@@ -47,6 +47,7 @@ from mtor.rptor import CycleDetected, display_dag, resolve_dag, scan_specs, topo
 from mtor.scan import _run_checks
 from mtor.triage import (
     archive_ids,
+    archived_ids,
     get_verdict_overrides,
     load_triage,
     override_verdict,
@@ -432,12 +433,8 @@ def list_cmd(
     cmd = "mtor riboseq" + (f" --status {status}" if status else "") + f" --count {count}"
 
     if archived:
-        import json
-
-        triage_path = Path.home() / ".config" / "mtor" / "triage.json"
-        with open(triage_path) as f:
-            triage = json.load(f)
-        for workflow_id in triage.get("archived", []):
+        triage = load_triage()
+        for workflow_id in sorted(archived_ids(triage)):
             print(workflow_id)
         return
 
@@ -497,7 +494,7 @@ def list_cmd(
         # Load triage state
         triage = load_triage()
         reviewed_set = set(triage.get("reviewed", []))
-        archived_set = set(triage.get("archived", []))
+        archived_set = archived_ids(triage)
         verdict_overrides = triage.get("verdict_overrides", {})
 
         workflows = []
@@ -1809,12 +1806,28 @@ def archive(
     *,
     before: Annotated[str | None, Parameter(name=["--before"])] = None,
     all_reviewed: Annotated[bool, Parameter(name=["--all-reviewed"])] = False,
+    reason: Annotated[str | None, Parameter(name=["--reason"])] = None,
+    force: Annotated[bool, Parameter(name=["--force"])] = False,
 ) -> None:
     """Archive task(s) — hide from default list."""
+    if not force and not reason:
+        sys.exit(
+            _err(
+                "mtor archive",
+                "Review the diff first, then archive with --reason 'your assessment'",
+                "ARCHIVE_REQUIRES_REASON",
+                "Review the diff first, then archive with --reason 'your assessment'",
+                [_action("mtor logs <workflow_id>", "Review workflow output")],
+                exit_code=2,
+            )
+        )
+
+    archive_reason = reason if reason else "force"
+
     if all_reviewed:
         triage = load_triage()
         ids_to_archive = list(triage.get("reviewed", []))
-        result = archive_ids(ids_to_archive)
+        result = archive_ids(ids_to_archive, reason=archive_reason)
         _ok(
             "mtor archive --all-reviewed",
             result,
@@ -1858,7 +1871,7 @@ def archive(
                 if close_time < cutoff:
                     ids_to_archive.append(ex.id)
 
-        result = archive_ids(ids_to_archive)
+        result = archive_ids(ids_to_archive, reason=archive_reason)
         _ok(
             f"mtor archive --before {before}",
             result,
@@ -1877,7 +1890,7 @@ def archive(
             )
         )
 
-    result = archive_ids([workflow_id])
+    result = archive_ids([workflow_id], reason=archive_reason)
     _ok(
         f"mtor archive {workflow_id}",
         result,
