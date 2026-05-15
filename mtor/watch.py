@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from mtor.sync import sync_from_ganglion
+from mtor.worker.provider import feedback_dispatch_blocked
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +372,32 @@ def run_watch(
                     fetched=0,
                     merged=False,
                     error="paused",
+                    elapsed_s=0.0,
+                )
+                stats.record(cycle)
+
+                if on_cycle is not None:
+                    on_cycle(cycle)
+
+                if once:
+                    break
+
+                if max_cycles is not None and stats.cycles >= max_cycles:
+                    break
+
+                try:
+                    time.sleep(interval)
+                except KeyboardInterrupt:
+                    stopped = True
+                continue
+
+            load = check_ganglion_load(running_tasks=0, load_avg=0.0)
+            if feedback_dispatch_blocked(load.running_tasks, load.load_avg):
+                cycle = WatchCycle(
+                    cycle=cycle_num,
+                    fetched=0,
+                    merged=False,
+                    error="dispatch_blocked",
                     elapsed_s=0.0,
                 )
                 stats.record(cycle)

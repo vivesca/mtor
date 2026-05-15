@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -65,3 +66,18 @@ class TestDispatchGatingWired:
         for _ in range(4):
             tracker.record(False)
         assert tracker.should_throttle() is False
+
+    def test_watch_skips_when_dispatch_blocked(self, tmp_path):
+        """run_watch records a blocked cycle instead of syncing when gate blocks."""
+        from mtor.watch import run_watch
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        with patch("mtor.watch.feedback_dispatch_blocked", return_value=True), \
+             patch("mtor.watch.sync_from_ganglion") as sync:
+            stats = run_watch(str(repo), once=True)
+
+        sync.assert_not_called()
+        assert stats.cycles == 1
+        assert stats.total_errors == 1
+        assert stats.cycles_run[0].error == "dispatch_blocked"
