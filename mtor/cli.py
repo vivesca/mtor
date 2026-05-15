@@ -908,9 +908,21 @@ def logs(
         )
 
     # Try local file first (avoids SSH round-trip); fetch + cache if missing.
-    # Remote worker paths such as /home/vivesca/... are not valid local cache roots.
+    # Remote worker paths such as /home/vivesca/... are not valid local cache
+    # roots unless this CLI is itself running as that worker home.
     local_path = Path(log_path)
-    if not local_path.is_absolute():
+    worker_path_is_local = (
+        local_path.is_absolute()
+        and str(local_path).startswith("/home/vivesca/")
+        and Path.home() == Path("/home/vivesca")
+    )
+    if (
+        local_path.is_absolute()
+        and str(local_path).startswith("/home/vivesca/")
+        and not worker_path_is_local
+    ):
+        local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
+    elif not local_path.is_absolute():
         local_path = Path.home() / log_path.lstrip("~/")
     if not local_path.exists():
         # Fetch single file from worker host into local mirror
