@@ -70,9 +70,14 @@ ROUTE_PATTERNS: dict[str, list[str]] = {
 ROUTE_TO_PROVIDER: dict[str, str] = {
     "explore": "droid",
     "bugfix": "goose",
-    "build": "volcano",
+    "build": "zhipu",
     "test": "zhipu",
     "research": "zhipu",
+}
+
+RETIRED_PROVIDERS: dict[str, str] = {
+    "infini": "Infini CodingPlan subscription is inactive",
+    "volcano": "Volcano Engine CodingPlan subscription is inactive",
 }
 
 
@@ -262,6 +267,18 @@ def _dispatch_prompt(
         spec_mode = "experiment"
     else:
         spec_mode = "build"
+
+    if provider in RETIRED_PROVIDERS:
+        sys.exit(
+            _err(
+                cmd,
+                f"Provider '{provider}' is retired: {RETIRED_PROVIDERS[provider]}",
+                "PROVIDER_RETIRED",
+                "Use zhipu for coding dispatch, or gemini/codex only as explicit escape hatches.",
+                [_action("mtor tsc", "Show current provider routing")],
+                exit_code=2,
+            )
+        )
 
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter

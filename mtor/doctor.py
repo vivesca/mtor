@@ -23,8 +23,6 @@ HEARTBEAT_STALE_THRESHOLD = 120
 
 PROVIDER_MODELS = {
     "zhipu": "glm-5.1",
-    "infini": "minimax-m2.7",
-    "volcano": "doubao-seed-2-0-code",
     "gemini": "gemini",
 }
 
@@ -90,20 +88,16 @@ def _probe_provider(provider: str) -> ProbeResult:
     """Send a real HTTP request to the provider's Anthropic Messages API.
 
     Args:
-        provider: One of "zhipu", "volcano", "infini".
+        provider: One of the active coding providers.
 
     Returns:
         ProbeResult with ok, latency, and detail.
     """
     endpoints = {
         "zhipu": "https://open.bigmodel.cn/api/anthropic/v1/messages",
-        "volcano": "https://ark.cn-beijing.volces.com/api/coding/v1/messages",
-        "infini": "https://cloud.infini-ai.com/maas/coding/v1/messages",
     }
     models = {
         "zhipu": "glm-5.1",
-        "volcano": "doubao-seed-2-0-code",
-        "infini": "minimax-m2.7",
     }
 
     endpoint = endpoints[provider]
@@ -470,7 +464,7 @@ def doctor(*, reconcile: bool = False) -> None:
 
         import threading
 
-        for p in ("zhipu", "volcano", "infini"):
+        for p in ("zhipu",):
             t = threading.Thread(target=_run_probe, args=(p,))
             t.start()
             probe_providers.append((p, t))

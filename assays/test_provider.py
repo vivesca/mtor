@@ -44,27 +44,27 @@ def test_select_closed_first():
     """Closed provider is selected before open ones."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() + 3600},
-        "infini": {"state": "closed"},
+        "gemini": {"state": "closed"},
     }
     result = select_provider(health)
-    assert result == "infini"
+    assert result == "gemini"
 
 
 def test_select_skips_open():
     """Open provider with active cooldown is skipped."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() + 3600},
-        "infini": {"state": "closed"},
+        "gemini": {"state": "closed"},
     }
     result = select_provider(health)
-    assert result == "infini"
+    assert result == "gemini"
 
 
 def test_select_half_open_on_cooldown_expiry():
     """Open provider with expired cooldown is tried in half_open state."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() - 1},
-        "infini": {"state": "open", "cooldown_until": time.time() + 3600},
+        "gemini": {"state": "open", "cooldown_until": time.time() + 3600},
     }
     result = select_provider(health)
     # zhipu's cooldown has expired — should be selected (half_open)
@@ -76,13 +76,10 @@ def test_select_all_open_picks_earliest_cooldown():
     now = time.time()
     health = {
         "zhipu": {"state": "open", "cooldown_until": now + 300},
-        "infini": {"state": "open", "cooldown_until": now + 60},
-        "volcano": {"state": "open", "cooldown_until": now + 600},
-        "gemini": {"state": "open", "cooldown_until": now + 900},
+        "gemini": {"state": "open", "cooldown_until": now + 60},
     }
     result = select_provider(health)
-    # infini has the earliest cooldown_until
-    assert result == "infini"
+    assert result == "gemini"
 
 
 def test_select_all_open_half_open_wins():
@@ -90,20 +87,26 @@ def test_select_all_open_half_open_wins():
     now = time.time()
     health = {
         "zhipu": {"state": "open", "cooldown_until": now + 3600},
-        "infini": {"state": "half_open", "cooldown_until": None},
+        "gemini": {"state": "half_open", "cooldown_until": None},
     }
     result = select_provider(health)
-    assert result == "infini"
+    assert result == "gemini"
 
 
 def test_override_bypasses_routing():
     """When override is set it is returned directly, bypassing health checks."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() + 3600},
-        "infini": {"state": "closed"},
+        "gemini": {"state": "closed"},
     }
-    result = select_provider(health, override="volcano")
-    assert result == "volcano"
+    result = select_provider(health, override="gemini")
+    assert result == "gemini"
+
+
+def test_retired_override_is_rejected():
+    """Retired coding providers fail before dispatch."""
+    with pytest.raises(ValueError, match="retired"):
+        select_provider({}, override="infini")
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +247,7 @@ def test_load_health_corrupt_file_returns_empty(tmp_path, monkeypatch):
 
 def test_provider_priority_exports():
     """PROVIDER_PRIORITY is a list of expected provider names."""
-    assert PROVIDER_PRIORITY == ["zhipu", "infini", "volcano", "gemini"]
+    assert PROVIDER_PRIORITY == ["zhipu", "gemini"]
 
 
 def test_exit_rate_limited_value():

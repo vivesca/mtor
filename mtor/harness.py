@@ -20,8 +20,6 @@ from typing import Any
 PROVIDER_HARNESS_MAP: dict[str, str] = {
     "claude": "claude",
     "zhipu": "claude",
-    "infini": "claude",
-    "volcano": "claude",
     "gemini": "claude",
     "codex": "codex",
     "goose": "goose",

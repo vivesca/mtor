@@ -68,12 +68,12 @@ class TestExecute:
             ),
             HarnessResult(
                 stdout="success", stderr="", exit_code=0,
-                provider="infini", command=["claude"],
+                provider="gemini", command=["claude"],
             ),
         ]
 
         result = execute("fix the bug", provider="zhipu", fallback=True)
 
         assert result["success"] is True
-        assert result["provider"] == "infini"
+        assert result["provider"] == "gemini"
         assert mock_run.call_count == 2

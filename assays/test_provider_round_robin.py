@@ -78,9 +78,9 @@ class TestRoundRobinPersistence:
     def test_index_resumes_from_existing(self):
         """Pre-existing RR_KEY is honoured on next call."""
         health = _all_closed()
-        health[RR_KEY] = 2  # third provider next
-        assert select_provider(health) == PROVIDER_PRIORITY[2]
-        assert health[RR_KEY] == 3
+        health[RR_KEY] = 1  # second provider next
+        assert select_provider(health) == PROVIDER_PRIORITY[1]
+        assert health[RR_KEY] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -95,52 +95,38 @@ class TestRoundRobinWithCircuitBreaker:
         now = time.time()
         health = {
             "zhipu": {"state": "open", "cooldown_until": now + 3600},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "closed"},
-            "gemini": {"state": "open", "cooldown_until": now + 3600},
+            "gemini": {"state": "closed"},
         }
-        # Only infini and volcano are available
-        r1 = select_provider(health)
-        r2 = select_provider(health)
-        assert {r1, r2} == {"infini", "volcano"}
+        assert select_provider(health) == "gemini"
 
     def test_single_available_always_returns_it(self):
         """When only one provider is available, always return it."""
         now = time.time()
         health = {
             "zhipu": {"state": "open", "cooldown_until": now + 3600},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "open", "cooldown_until": now + 3600},
-            "gemini": {"state": "open", "cooldown_until": now + 3600},
+            "gemini": {"state": "closed"},
         }
-        assert select_provider(health) == "infini"
-        assert select_provider(health) == "infini"
+        assert select_provider(health) == "gemini"
+        assert select_provider(health) == "gemini"
 
     def test_half_open_included_in_rotation(self):
         """half_open providers participate in round-robin."""
         now = time.time()
         health = {
             "zhipu": {"state": "closed"},
-            "infini": {"state": "half_open"},
-            "volcano": {"state": "closed"},
-            "gemini": {"state": "open", "cooldown_until": now + 3600},
+            "gemini": {"state": "half_open"},
         }
         results = [select_provider(health) for _ in range(4)]
-        # zhipu, infini, volcano, zhipu — cycling through 3 available
-        assert results == ["zhipu", "infini", "volcano", "zhipu"]
+        assert results == ["zhipu", "gemini", "zhipu", "gemini"]
 
     def test_expired_cooldown_included(self):
         """Open provider with expired cooldown is available for rotation."""
         now = time.time()
         health = {
             "zhipu": {"state": "open", "cooldown_until": now - 10},
-            "infini": {"state": "closed"},
             "gemini": {"state": "open", "cooldown_until": now + 3600},
         }
-        # zhipu and infini both available
-        r1 = select_provider(health)
-        r2 = select_provider(health)
-        assert {r1, r2} == {"zhipu", "infini"}
+        assert select_provider(health) == "zhipu"
 
 
 # ---------------------------------------------------------------------------
@@ -152,18 +138,25 @@ class TestOverrideBypass:
 
     def test_override_returns_directly(self):
         health = _all_closed()
-        assert select_provider(health, override="volcano") == "volcano"
+        assert select_provider(health, override="gemini") == "gemini"
 
     def test_override_does_not_advance_index(self):
         health = _all_closed()
-        select_provider(health, override="volcano")
+        select_provider(health, override="gemini")
         assert RR_KEY not in health
 
     def test_override_then_rr_resumes_from_zero(self):
         health = _all_closed()
-        select_provider(health, override="volcano")
+        select_provider(health, override="gemini")
         # RR index still at 0 → zhipu next
         assert select_provider(health) == PROVIDER_PRIORITY[0]
+
+    def test_retired_override_raises(self):
+        health = _all_closed()
+        import pytest
+
+        with pytest.raises(ValueError, match="retired"):
+            select_provider(health, override="volcano")
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +170,9 @@ class TestAllOpenFallback:
         now = time.time()
         health = {
             "zhipu": {"state": "open", "cooldown_until": now + 300},
-            "infini": {"state": "open", "cooldown_until": now + 60},
-            "volcano": {"state": "open", "cooldown_until": now + 600},
-            "gemini": {"state": "open", "cooldown_until": now + 900},
+            "gemini": {"state": "open", "cooldown_until": now + 60},
         }
-        assert select_provider(health) == "infini"
+        assert select_provider(health) == "gemini"
 
 
 # ---------------------------------------------------------------------------
@@ -201,48 +192,37 @@ class TestConcurrencyAwareRouting:
         for p in PROVIDER_PRIORITY:
             _active_count[p] = 0
 
-    def test_distributes_7_tasks_across_3_providers(self):
-        """7 tasks with limit 2 each: first 6 distribute 2-2-2, 7th gets least loaded."""
+    def test_distributes_tasks_across_active_providers(self):
+        """Tasks distribute across active providers and respect limits."""
         now = time.time()
         health = {
             "zhipu": {"state": "closed"},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "closed"},
-            "gemini": {"state": "open", "cooldown_until": now + 3600},
+            "gemini": {"state": "closed"},
         }
 
         selections = []
-        for _ in range(7):
+        for _ in range(5):
             provider = select_provider(health)
             selections.append(provider)
             _active_count[provider] += 1
 
-        # First 6 tasks: 2 each for zhipu, infini, volcano
-        first6 = Counter(selections[:6])
-        assert first6["zhipu"] == 2
-        assert first6["infini"] == 2
-        assert first6["volcano"] == 2
-
-        # gemini never selected (unhealthy)
         counts = Counter(selections)
-        assert counts.get("gemini", 0) == 0
+        assert counts["zhipu"] == 3
+        assert counts["gemini"] == 2
 
-        # 7th task goes to a valid provider (least-loaded fallback)
-        assert selections[6] in ("zhipu", "infini", "volcano")
+        assert selections[-1] in PROVIDER_PRIORITY
 
     def test_unhealthy_provider_skipped(self):
         """Open provider with active cooldown is never selected."""
         now = time.time()
         health = {
             "zhipu": {"state": "open", "cooldown_until": now + 3600},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "closed"},
-            "gemini": {"state": "open", "cooldown_until": now + 3600},
+            "gemini": {"state": "closed"},
         }
 
         for _ in range(4):
             result = select_provider(health)
-            assert result not in ("zhipu", "gemini")
+            assert result == "gemini"
 
     def test_all_at_limit_falls_back_to_least_loaded(self):
         """When all providers are at concurrency limit, least-loaded healthy is returned."""
@@ -257,32 +237,28 @@ class TestConcurrencyAwareRouting:
     def test_provider_at_limit_skipped(self):
         """Provider at its concurrency limit is excluded from available."""
         _active_count["zhipu"] = PROVIDER_LIMITS["zhipu"]  # at limit
-        _active_count["infini"] = 0
+        _active_count["gemini"] = 0
 
         health = {
             "zhipu": {"state": "closed"},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "closed"},
             "gemini": {"state": "closed"},
         }
 
         result = select_provider(health)
-        assert result != "zhipu"
+        assert result == "gemini"
 
     def test_active_count_drives_selection(self):
         """Provider with lower active count is preferred over higher-count provider."""
         _active_count["zhipu"] = 1
-        _active_count["infini"] = 0
+        _active_count["gemini"] = 0
 
         health = {
             "zhipu": {"state": "closed"},
-            "infini": {"state": "closed"},
-            "volcano": {"state": "closed"},
             "gemini": {"state": "closed"},
         }
 
         result = select_provider(health)
-        assert result == "infini"
+        assert result == "gemini"
 
     def test_is_available_closed(self):
         """Closed provider is available."""

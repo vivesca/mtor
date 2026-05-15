@@ -17,14 +17,19 @@ from typing import Any
 # Exit code emitted by ribosome when rate-limited by the provider API.
 EXIT_RATE_LIMITED = 42
 
+# Providers retired from coding dispatch because their CodingPlan subscriptions
+# are no longer active.
+RETIRED_PROVIDERS: dict[str, str] = {
+    "infini": "Infini CodingPlan subscription is inactive",
+    "volcano": "Volcano Engine CodingPlan subscription is inactive",
+}
+
 # Priority order for provider selection (highest first).
-PROVIDER_PRIORITY = ["zhipu", "infini", "volcano", "gemini"]
+PROVIDER_PRIORITY = ["zhipu", "gemini"]
 
 # Per-provider concurrency limits (max simultaneous tasks).
 PROVIDER_LIMITS: dict[str, int] = {
     "zhipu": 3,    # Max tier
-    "infini": 2,   # Secondary tier
-    "volcano": 2,  # Secondary tier
     "gemini": 1,   # Intermittent key rejection — rely on ribosome retry
     "codex": 2,
 }
@@ -101,6 +106,8 @@ def select_provider(health: dict[str, Any], override: str | None = None) -> str:
     6. All unhealthy: return the one with earliest cooldown.
     """
     if override:
+        if override in RETIRED_PROVIDERS:
+            raise ValueError(f"Provider '{override}' is retired: {RETIRED_PROVIDERS[override]}")
         return override
 
     # Filter to healthy providers

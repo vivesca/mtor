@@ -53,7 +53,7 @@ class TestRunHarness:
 
     def test_provider_to_harness_mapping(self):
         """Each provider in PROVIDER_HARNESS_MAP maps to a known harness."""
-        expected_providers = {"claude", "zhipu", "infini", "volcano", "gemini", "codex", "goose", "droid"}
+        expected_providers = {"claude", "zhipu", "gemini", "codex", "goose", "droid"}
         assert set(PROVIDER_HARNESS_MAP.keys()) == expected_providers
         # Every harness value should have a command builder
         for provider, harness in PROVIDER_HARNESS_MAP.items():

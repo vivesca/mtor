@@ -18,7 +18,7 @@ from mtor.harness import (
 )
 
 # Providers that support fallback (ordered by priority).
-_FALLBACK_ORDER: list[str] = ["zhipu", "infini", "volcano", "gemini"]
+_FALLBACK_ORDER: list[str] = ["zhipu", "gemini"]
 
 
 def _inject_coaching(task: str, coaching: str | None) -> str:
