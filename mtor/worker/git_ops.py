@@ -14,6 +14,31 @@ from subprocess import run as _run_branch_command
 
 # Serialize merges so concurrent ribosomes queue instead of racing.
 _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
+_AUTO_COMMIT_DENYLIST = (
+    "loci/ribosome-dossiers/",
+    "loci/ribosome-heartbeats/",
+    "loci/ribosome-outputs/",
+    "loci/ribosome-runs.jsonl",
+)
+
+
+def _status_paths_for_auto_commit(status_output: str) -> list[str]:
+    """Return explicit, non-runtime paths from git porcelain output."""
+    paths: list[str] = []
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        raw_path = line[3:]
+        candidates = raw_path.split(" -> ") if " -> " in raw_path else [raw_path]
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if not normalized or any(
+                normalized == denied.rstrip("/") or normalized.startswith(denied)
+                for denied in _AUTO_COMMIT_DENYLIST
+            ):
+                continue
+            paths.append(normalized)
+    return paths
 
 def _cleanup_worktree(work_dir: str) -> None:
     """Best-effort cleanup for failed ribosome worktree runs."""
@@ -79,8 +104,12 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
         if not status.stdout.strip():
             return False
 
-        # 2. Stage everything
-        run(["git", "add", "-A"], cwd=repo_dir, check=True, timeout=10)
+        # 2. Stage only explicit non-runtime paths. Never use git add -A here:
+        # scout/read-only runs can dirty ribosome bookkeeping in the main repo.
+        paths = _status_paths_for_auto_commit(status.stdout)
+        if not paths:
+            return False
+        run(["git", "add", "--", *paths], cwd=repo_dir, check=True, timeout=10)
 
         # 3. Check if staged diff is empty (no substantive changes)
         diff = run(

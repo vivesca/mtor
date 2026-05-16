@@ -59,6 +59,11 @@ OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
 LOG_DIR = Path.home() / "code" / "mtor" / "logs"
 
 
+def _mode_allows_auto_commit(mode: str) -> bool:
+    """Return whether a translation mode may commit generated code."""
+    return mode not in {"scout", "research"}
+
+
 # Rate-limit detection: patterns that signal 429/quota errors in provider output
 _RATE_LIMIT_PATTERNS = _re.compile(
     r"429\b"
@@ -695,7 +700,12 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
-            env={**os.environ, "RIBOSOME_PROVIDER": harness or resolved_provider, "HOME": str(Path.home())},
+            env={
+                **os.environ,
+                "RIBOSOME_PROVIDER": harness or resolved_provider,
+                "RIBOSOME_TASK_ID": workflow_id,
+                "HOME": str(Path.home()),
+            },
             start_new_session=True,  # process group kill — prevents orphan ribosome processes
         )
         _log_event(workflow_id, "subprocess_started", pid=proc.pid)
@@ -811,10 +821,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         rc = proc.returncode or 0
         if rc != 0 and worktree_path:
             _cleanup_worktree(str(worktree_path))
-        # Always attempt auto-commit — GLM often exits non-zero (test failure,
-        # lint, timeout) after producing good code. The function checks for
-        # dirty tree + non-empty diff internally, so it's safe unconditionally.
-        if work_dir:
+        # Build tasks get an auto-commit safety net; read-only modes must never
+        # commit runtime bookkeeping from the main repo.
+        if work_dir and _mode_allows_auto_commit(mode):
             _auto_commit(str(work_dir), wf_id)
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
