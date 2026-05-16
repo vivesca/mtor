@@ -95,3 +95,103 @@ def test_setup_search_attrs_cli(mock_connect):
     assert exit_code == 0
     assert client.operator_service.add_search_attributes.called
     assert data["result"]["status"] == "success"
+
+
+@patch("mtor.dispatch._worker_sha_plan")
+@patch("mtor.dispatch._get_client")
+def test_spec_explain_is_read_only_and_includes_dispatch_plan(mock_get_client, mock_worker_sha, tmp_path):
+    """Spec explanation returns dispatch inputs without starting Temporal or mutating the spec."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "assays").mkdir()
+    (repo / "assays" / "test_mtor.py").write_text("def test_ok():\n    assert True\n")
+    spec_path = tmp_path / "spec.md"
+    spec_text = f"""---
+title: Explain Test
+status: ready
+repo: {repo}
+scope:
+  - mtor/dispatch.py
+exclude:
+  - secrets.txt
+tests:
+  run: "uv run pytest assays/test_mtor.py -q"
+---
+
+# Explain this dispatch
+
+Update dispatch explanation.
+"""
+    spec_path.write_text(spec_text)
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": False,
+        "auto_deploy_would_occur": True,
+        "local_sha": "local",
+        "worker_sha": "remote",
+        "error": "",
+    }
+
+    exit_code, data = invoke(["--spec", str(spec_path), "--explain"])
+
+    assert exit_code == 0
+    assert data["ok"] is True
+    result = data["result"]
+    assert result["would_dispatch"] is True
+    assert result["validation"]["ok"] is True
+    assert result["spec"]["path"] == str(spec_path)
+    assert result["spec"]["scope"] == ["mtor/dispatch.py"]
+    assert result["worker_sha"]["auto_deploy_would_occur"] is True
+    assert result["workflow_id"].startswith("ribosome-")
+    assert result["search_attributes"]["mtor_spec"] == str(spec_path)
+    assert result["planned_spec_frontmatter_mutation"]["status"] == "dispatched"
+    assert "workflow_id:" not in spec_path.read_text()
+    assert not mock_get_client.called
+
+
+@patch("mtor.dispatch._worker_sha_plan")
+@patch("mtor.dispatch._get_client")
+def test_prompt_explain_reports_dedup_and_risk_without_dispatch(mock_get_client, mock_worker_sha):
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": True,
+        "auto_deploy_would_occur": False,
+        "local_sha": "same",
+        "worker_sha": "same",
+        "error": "",
+    }
+
+    exit_code, data = invoke(["Write tests for mtor dispatch explanation", "--explain"])
+
+    assert exit_code == 0
+    result = data["result"]
+    assert result["prompt_hash"]
+    assert result["dedup"]["key"]
+    assert result["dedup"]["blocked"] is False
+    assert result["risk"] == "low"
+    assert result["provider"]["selected"] == "zhipu"
+    assert result["would_dispatch"] is True
+    assert not mock_get_client.called
+
+
+@patch("mtor.dispatch._worker_sha_plan")
+def test_explain_reports_pause_and_freeze_as_blocked_plan(mock_worker_sha):
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": True,
+        "auto_deploy_would_occur": False,
+        "local_sha": "same",
+        "worker_sha": "same",
+        "error": "",
+    }
+
+    with patch("mtor.cli._is_paused", return_value=True), patch("mtor.cli._is_frozen", return_value=True):
+        exit_code, data = invoke(["Improve mtor robustness safely", "--explain"])
+
+    assert exit_code == 0
+    result = data["result"]
+    assert result["would_dispatch"] is False
+    assert "paused" in result["blocked_reasons"]
+    assert "frozen" in result["blocked_reasons"]
+    assert result["pause"]["paused"] is True
+    assert result["freeze"]["frozen"] is True

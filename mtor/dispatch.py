@@ -16,6 +16,7 @@ from porin import action as _action
 
 from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST, WORKFLOW_TYPE
 from mtor.client import _get_client
+from mtor.dedup import DEFAULT_STATE_PATH, DEFAULT_WINDOW_S, _load_state, _prune, compute_identity
 from mtor.envelope import _err, _ok
 
 
@@ -198,6 +199,209 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
 
     time.sleep(3)
     return True
+
+
+def _worker_sha_plan(*, skip: bool = False) -> dict:
+    """Return worker SHA state without deploying or restarting anything."""
+    if skip:
+        return {
+            "skipped": True,
+            "in_sync": True,
+            "auto_deploy_would_occur": False,
+            "local_sha": "",
+            "worker_sha": "",
+            "error": "",
+        }
+
+    state = {
+        "skipped": False,
+        "in_sync": False,
+        "auto_deploy_would_occur": False,
+        "local_sha": "",
+        "worker_sha": "",
+        "error": "",
+    }
+    try:
+        local = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if local.returncode != 0:
+            state["error"] = f"local git HEAD lookup failed: {local.stderr.strip()}"
+            return state
+        remote = subprocess.run(
+            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if remote.returncode != 0:
+            state["error"] = f"worker git HEAD lookup failed: {remote.stderr.strip()}"
+            return state
+        state["local_sha"] = local.stdout.strip()
+        state["worker_sha"] = remote.stdout.strip()
+        state["in_sync"] = state["local_sha"] == state["worker_sha"]
+        state["auto_deploy_would_occur"] = not state["in_sync"]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        state["error"] = str(exc)
+    return state
+
+
+def _dedup_plan(prompt: str, spec_path: Path | None = None) -> dict:
+    """Return dedup identity and block status without recording a dispatch."""
+    key = compute_identity(prompt, spec_path)
+    now = time.time()
+    state = _prune(_load_state(DEFAULT_STATE_PATH), now, DEFAULT_WINDOW_S)
+    last_seen = state.get(key)
+    blocked = last_seen is not None and (now - last_seen) < DEFAULT_WINDOW_S
+    return {
+        "key": key,
+        "blocked": blocked,
+        "window_seconds": DEFAULT_WINDOW_S,
+        "seconds_since_last": round(now - last_seen, 3) if last_seen is not None else None,
+    }
+
+
+def _search_attr_preview(
+    *,
+    provider: str,
+    mode: str,
+    risk: str,
+    spec_path: Path | None,
+) -> dict[str, str]:
+    attrs = {
+        "mtor_provider": provider,
+        "mtor_mode": mode,
+        "mtor_risk": risk,
+    }
+    if spec_path:
+        attrs["mtor_spec"] = str(spec_path)
+    return attrs
+
+
+def _dispatch_explanation(
+    prompt: str,
+    *,
+    provider: str | None = None,
+    experiment: bool = False,
+    mode: str | None = None,
+    skip_sha_check: bool = False,
+    chain: list[str] | None = None,
+    spec_path: Path | None = None,
+    harness: str = "",
+    paused: bool = False,
+    frozen: bool = False,
+) -> dict:
+    """Build a read-only dispatch plan explanation."""
+    if spec_path is not None:
+        prompt = _inject_spec_constraints(
+            prompt,
+            spec_path=spec_path,
+            prompt_for_cmd=prompt[:60],
+        )
+
+    if mode:
+        spec_mode = mode
+    elif experiment:
+        spec_mode = "experiment"
+    else:
+        spec_mode = "build"
+
+    if spec_mode == "scout":
+        full_prompt = prompt + (
+            "\n\nThis is a READ-ONLY analysis task. Do NOT modify any files. "
+            "Report your findings as structured output. Format: list each finding with: "
+            "file path, issue, recommendation."
+        )
+    elif spec_mode == "research":
+        full_prompt = prompt + (
+            "\n\nThis is a RESEARCH task. Search external sources (web, docs, papers) "
+            "to answer the question. Use rheotaxis, curl, or any available search tools. "
+            "Do NOT modify any files in the repository. "
+            "Format findings as:\n"
+            "## Key Findings\n- finding 1 (source: URL)\n- finding 2 (source: URL)\n"
+            "## Synthesis\nOne paragraph summary.\n"
+            "## Recommendations\n- actionable item 1\n- actionable item 2"
+        )
+    else:
+        full_prompt = prompt
+
+    resolved_provider = provider or _resolve_default_provider(spec_mode)
+    risk = classify_risk(full_prompt)
+    workflow_id = _make_workflow_id(full_prompt, resolved_provider, harness=harness or "ribosome")
+    prompt_hash = hashlib.sha256(full_prompt.encode()).hexdigest()[:16]
+
+    spec_data = {}
+    validation_errors: list[str] = []
+    if spec_path is not None:
+        from mtor.rptor import parse_spec
+
+        spec_data = parse_spec(spec_path)
+        repo = Path(spec_data.get("repo", ".")).expanduser()
+        validation_errors = validate_spec(spec_path, repo)
+
+    dedup = _dedup_plan(prompt, spec_path=spec_path) if prompt.strip() else {}
+    worker_sha = (
+        {"skipped": True, "in_sync": True, "auto_deploy_would_occur": False, "local_sha": "", "worker_sha": "", "error": ""}
+        if spec_mode in ("scout", "research")
+        else _worker_sha_plan(skip=skip_sha_check)
+    )
+    blocked_reasons = []
+    if frozen:
+        blocked_reasons.append("frozen")
+    if paused:
+        blocked_reasons.append("paused")
+    if validation_errors:
+        blocked_reasons.append("spec_invalid")
+    if dedup.get("blocked"):
+        blocked_reasons.append("dedup_blocked")
+    if provider in RETIRED_PROVIDERS:
+        blocked_reasons.append("provider_retired")
+    if worker_sha.get("error"):
+        blocked_reasons.append("worker_sha_unknown")
+
+    search_attrs = _search_attr_preview(
+        provider=resolved_provider,
+        mode=spec_mode,
+        risk=risk,
+        spec_path=spec_path,
+    )
+
+    return {
+        "would_dispatch": not blocked_reasons,
+        "blocked_reasons": blocked_reasons,
+        "prompt_preview": full_prompt[:200],
+        "prompt_hash": prompt_hash,
+        "spec": {
+            "path": str(spec_path) if spec_path else "",
+            "repo": spec_data.get("repo", ""),
+            "scope": spec_data.get("scope", []),
+            "exclude": spec_data.get("exclude", []),
+            "tests": spec_data.get("tests", {}),
+        },
+        "validation": {
+            "ok": not validation_errors,
+            "errors": validation_errors,
+        },
+        "dedup": dedup,
+        "pause": {"paused": paused},
+        "freeze": {"frozen": frozen},
+        "worker_sha": worker_sha,
+        "risk": risk,
+        "provider": {
+            "selected": resolved_provider,
+            "why": "explicit provider" if provider else f"default for {spec_mode}",
+            "retired_reason": RETIRED_PROVIDERS.get(provider or "", ""),
+        },
+        "workflow_id": workflow_id,
+        "search_attributes": search_attrs,
+        "planned_spec_frontmatter_mutation": (
+            {"status": "dispatched", "workflow_id": workflow_id} if spec_path else {}
+        ),
+        "chain": chain or [],
+        "next_actions": [
+            _action(f"mtor status {workflow_id}", "Poll workflow status after real dispatch"),
+            _action(f"mtor --spec {spec_path}", "Dispatch this spec") if spec_path else _action("mtor <prompt>", "Dispatch this prompt"),
+        ],
+    }
 
 
 def _normalize_spec_repo_for_worker(repo: str) -> str:

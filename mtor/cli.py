@@ -456,6 +456,7 @@ def default_handler(
     then: Annotated[list[str] | None, Parameter(name=["--then"])] = None,
     spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
     harness: Annotated[str, Parameter(name=["--harness"])] = "",
+    explain: Annotated[bool, Parameter(name=["--explain"])] = False,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
@@ -533,6 +534,28 @@ def default_handler(
                     exit_code=2,
                 )
             )
+
+        if explain:
+            from mtor.dispatch import _dispatch_explanation
+
+            plan = _dispatch_explanation(
+                prompt,
+                provider=provider,
+                experiment=experiment,
+                skip_sha_check=skip_sha_check,
+                chain=then,
+                spec_path=spec,
+                harness=harness,
+                paused=_is_paused(),
+                frozen=_is_frozen(),
+            )
+            _ok(
+                f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''} --explain",
+                plan,
+                plan["next_actions"],
+                version=VERSION,
+            )
+            return
 
         # Freeze check — block dispatch when frozen (deptor lock)
         if _is_frozen():
