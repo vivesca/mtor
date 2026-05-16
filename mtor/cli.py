@@ -164,6 +164,30 @@ def _build_failure_reason(task_result: dict) -> str:
     return "; ".join(parts) if parts else "No diagnostic information available"
 
 
+def _cached_log_path(workflow_id: str) -> str:
+    """Return the newest local cached log path for a workflow, if present."""
+    cache_dir = Path.home() / ".cache" / "mtor" / "logs"
+    if not cache_dir.exists():
+        return ""
+
+    wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+    candidates: list[Path] = []
+    for pattern in (
+        f"{workflow_id}.jsonl",
+        f"{workflow_id}.log",
+        f"{workflow_id}.txt",
+        f"*{workflow_id}*",
+        f"*{wf_suffix}*",
+    ):
+        candidates.extend(cache_dir.glob(pattern))
+
+    files = [path for path in candidates if path.is_file()]
+    if not files:
+        return ""
+
+    return str(max(files, key=lambda path: path.stat().st_mtime))
+
+
 def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
     """Poll workflow until done, then print logs. Returns exit code."""
     client, err = _get_client()
@@ -696,6 +720,10 @@ def status(workflow_id: str, short: bool = False) -> None:
                 result_payload["output_path"] = task_result.get("review", {}).get(
                     "output_path", ""
                 ) or task_result.get("output_path", "")
+                if not result_payload["output_path"]:
+                    cached_log_path = _cached_log_path(workflow_id)
+                    if cached_log_path:
+                        result_payload["cached_log_path"] = cached_log_path
                 result_payload["merged"] = task_result.get("merged")
                 result_payload["verdict"] = task_result.get("review", {}).get("verdict")
 
