@@ -164,6 +164,56 @@ def _build_failure_reason(task_result: dict) -> str:
     return "; ".join(parts) if parts else "No diagnostic information available"
 
 
+_APPROVED_VERDICTS = {"accepted", "approved", "approved_with_flags", "false_positive", "early_exit_clean"}
+
+
+def _operator_state(status_val: str, result_payload: dict[str, Any]) -> str:
+    """Return the operator-facing outcome, not just the process lifecycle state."""
+    verdict = result_payload.get("verdict")
+    success = result_payload.get("success")
+
+    if status_val == "RUNNING":
+        return "running"
+    if status_val == "COMPLETED":
+        if verdict in _APPROVED_VERDICTS:
+            return "approved"
+        if verdict == "rejected":
+            return "failed_review"
+        if verdict == "incomplete":
+            return "incomplete"
+        if success is False:
+            return "failed_process"
+        return "completed_unreviewed"
+    if status_val == "FAILED":
+        return "failed_workflow"
+    if status_val == "TERMINATED":
+        return "terminated"
+    if status_val == "CANCELED":
+        return "canceled"
+    return status_val.lower()
+
+
+def _status_next_actions(workflow_id: str, operator_state: str) -> list[dict[str, str]]:
+    """Choose status actions that make sense for the current operator state."""
+    actions = [_action(f"mtor logs {workflow_id}", "Fetch last 30 lines of output")]
+    if operator_state == "running":
+        actions.append(_action(f"mtor cancel {workflow_id}", "Cancel this workflow"))
+    elif operator_state in {"approved", "completed_unreviewed"}:
+        actions.extend([
+            _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
+            _action(f"mtor archive {workflow_id}", "Archive after review"),
+        ])
+    elif operator_state in {"failed_review", "incomplete", "failed_process"}:
+        actions.extend([
+            _action(f"mtor verdict {workflow_id} --set false_positive", "Override if review was wrong"),
+            _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
+            _action(f"mtor archive {workflow_id}", "Archive after triage"),
+        ])
+    else:
+        actions.append(_action(f"mtor archive {workflow_id}", "Archive after triage"))
+    return actions
+
+
 def _cached_log_path(workflow_id: str) -> str:
     """Return the newest local cached log path for a workflow, if present."""
     cache_dir = Path.home() / ".cache" / "mtor" / "logs"
@@ -734,10 +784,13 @@ def status(workflow_id: str, short: bool = False) -> None:
         vo = get_verdict_overrides()
         if workflow_id in vo:
             result_payload["verdict"] = vo[workflow_id]
+        result_payload["operator_state"] = _operator_state(status_val, result_payload)
 
         # Add failure_reason for non-approved terminal states
         if status_val in ("FAILED", "CANCELED", "TERMINATED") or (
-            status_val == "COMPLETED" and result_payload.get("verdict") not in ("approved", "approved_with_flags", "false_positive", None)
+            status_val == "COMPLETED"
+            and result_payload.get("verdict") is not None
+            and result_payload.get("verdict") not in _APPROVED_VERDICTS
         ):
             failure_reason = "No diagnostic information available"
             if wf_result and isinstance(wf_result, dict):
@@ -763,10 +816,7 @@ def status(workflow_id: str, short: bool = False) -> None:
         _ok(
             cmd,
             result_payload,
-            [
-                _action(f"mtor logs {workflow_id}", "Fetch last 30 lines of output"),
-                _action(f"mtor cancel {workflow_id}", "Cancel this workflow"),
-            ],
+            _status_next_actions(workflow_id, result_payload["operator_state"]),
             version=VERSION,
         )
     except Exception as exc:

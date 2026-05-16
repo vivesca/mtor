@@ -104,6 +104,51 @@ workflow_id: wf-12345
         text = spec_path.read_text()
         assert "status: done" in text
 
+    def test_completed_approved_workflow_becomes_done(self, tmp_path: Path):
+        """dispatched + workflow_id + approved Temporal verdict → done."""
+        spec_path = tmp_path / "approved.md"
+        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-approved\n---\nBody\n")
+        spec_dict = {
+            "name": "approved",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-approved",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(
+            spec_dict,
+            workflow_description=self._workflow("COMPLETED", "approved"),
+        )
+
+        assert result["changed"] is True
+        assert result["now"] == "done"
+        assert result["reason"] == "workflow completed with approved verdict"
+        assert "status: done" in spec_path.read_text()
+
+    def test_completed_approved_with_flags_workflow_becomes_done(self, tmp_path: Path):
+        """approved_with_flags is a policy-approved terminal verdict."""
+        spec_path = tmp_path / "approved-with-flags.md"
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-approved-flags\n---\nBody\n"
+        )
+        spec_dict = {
+            "name": "approved-with-flags",
+            "path": str(spec_path),
+            "status": "dispatched",
+            "workflow_id": "wf-approved-flags",
+            "body": "Body",
+        }
+
+        result = reconcile_spec(
+            spec_dict,
+            workflow_description=self._workflow("COMPLETED", "approved_with_flags"),
+        )
+
+        assert result["changed"] is True
+        assert result["now"] == "done"
+        assert "status: done" in spec_path.read_text()
+
     def test_completed_rejected_workflow_becomes_failed(self, tmp_path: Path):
         """dispatched + workflow_id + rejected Temporal verdict → failed."""
         spec_path = tmp_path / "rejected.md"

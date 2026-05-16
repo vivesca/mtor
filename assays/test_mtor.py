@@ -452,6 +452,74 @@ class TestStatus:
         )
         assert "syntax error" in data["result"]["failure_reason"]
 
+    def test_status_derives_failed_review_operator_state(self):
+        """A successful process with rejected review is operator-facing failure."""
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {
+                            "verdict": "rejected",
+                            "flags": ["no_commit_on_success"],
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", "ribosome-test1234"])
+
+        assert exit_code == 0
+        assert data["result"]["success"] is True
+        assert data["result"]["verdict"] == "rejected"
+        assert data["result"]["operator_state"] == "failed_review"
+        commands = [action["command"] for action in data["next_actions"]]
+        assert "mtor cancel ribosome-test1234" not in commands
+        assert "mtor verdict ribosome-test1234 --set false_positive" in commands
+
+    def test_status_running_keeps_cancel_next_action(self):
+        """Cancel remains available only for running workflows."""
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "RUNNING"
+        mock_handle.result = AsyncMock(return_value={})
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", "ribosome-test1234"])
+
+        assert exit_code == 0
+        assert data["result"]["operator_state"] == "running"
+        commands = [action["command"] for action in data["next_actions"]]
+        assert "mtor cancel ribosome-test1234" in commands
+
+    def test_status_approved_terminal_does_not_suggest_cancel(self):
+        """Approved terminal workflows offer review/archive, not cancel."""
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", "ribosome-test1234"])
+
+        assert exit_code == 0
+        assert data["result"]["operator_state"] == "approved"
+        commands = [action["command"] for action in data["next_actions"]]
+        assert "mtor cancel ribosome-test1234" not in commands
+        assert "mtor review ribosome-test1234" in commands
+
     def test_status_includes_cached_log_path_when_output_path_missing(self, tmp_path, monkeypatch):
         """Status should point at a cached log when Temporal did not preserve output_path."""
         workflow_id = "ribosome-glm51-status-output-f87f040a-6a07bd75"

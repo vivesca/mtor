@@ -11,6 +11,8 @@ from mtor.client import _get_client
 from mtor.spec import update_spec_status
 from mtor.rptor import scan_specs
 
+ACCEPTED_VERDICTS = {"accepted", "approved", "approved_with_flags", "early_exit_clean"}
+
 
 def check_code_exists(file_or_function: str, repo_root: Path = Path.home() / "code" / "mtor") -> bool:
     """Check if a function or file exists in the codebase.
@@ -161,10 +163,10 @@ def reconcile_spec(
             if latest_status == "RUNNING":
                 return result
             if latest_status == "COMPLETED":
-                if verdict == "accepted":
+                if verdict in ACCEPTED_VERDICTS:
                     new_status = "done"
                     result["now"] = new_status
-                    result["reason"] = "workflow completed with accepted verdict"
+                    result["reason"] = f"workflow completed with {verdict} verdict"
                     result["changed"] = True
                 elif verdict == "rejected":
                     new_status = "failed"
