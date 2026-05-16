@@ -351,3 +351,88 @@ class TestFailureReason:
         }
         reason = _build_failure_reason(task_result)
         assert "no_commit_on_success" in reason
+
+
+class TestPrimaryDiffAuthority:
+    """Primary git diff/commit evidence dominates derivative empty-diff or shrink metadata.
+
+    When post_diff has commits, patch content, or net-positive numstat, derivative
+    flags like no_commit_on_success, file_shrunk, and pure_deletion must not fire.
+    True destructive changes are still blocked.
+    """
+
+    def test_commits_list_overrides_empty_stat(self):
+        """Non-empty post_diff.commits list prevents no_commit_on_success even with empty stat."""
+        result = _make_result(
+            post_diff={
+                "stat": "",
+                "numstat": "",
+                "commits": ["fd922842d ribosome: stream claude output as json"],
+                "commit_count": 1,
+            }
+        )
+        review = _run(chaperone(result))
+        assert "no_commit_on_success" not in review["flags"]
+
+    def test_nonempty_patch_overrides_empty_stat(self):
+        """Non-empty patch prevents no_commit_on_success even with empty stat and no commits."""
+        result = _make_result(
+            post_diff={
+                "stat": "",
+                "numstat": "",
+                "commits": [],
+                "commit_count": 0,
+                "patch": "+def new_function():\n+    pass\n",
+            }
+        )
+        review = _run(chaperone(result))
+        assert "no_commit_on_success" not in review["flags"]
+
+    def test_net_positive_diff_not_flagged_as_deletion(self):
+        """Overall net-positive diff suppresses pure_deletion for individual files.
+
+        A refactoring that adds 1000 lines to new_feature.py while removing 50 lines
+        from old_code.py should not be treated as destructive.
+        """
+        result = _make_result(
+            post_diff={
+                "stat": " new_feature.py | 1000 ++++++++++++++\n old_code.py | 50 -------\n",
+                "numstat": "1000\t0\tnew_feature.py\n0\t50\told_code.py",
+                "commits": ["abc1234 feat: big refactor"],
+                "commit_count": 1,
+            },
+            pre_diff={"stat": "", "numstat": ""},
+        )
+        review = _run(chaperone(result))
+        assert not any("pure_deletion" in f for f in review["flags"])
+        assert not any("file_shrunk" in f for f in review["flags"])
+
+    def test_genuine_pure_deletion_still_flagged(self):
+        """Genuine pure deletion with net-negative diff is still flagged and rejected."""
+        result = _make_result(
+            post_diff={
+                "stat": " target.py | 50 -------\n",
+                "numstat": "0\t50\ttarget.py",
+                "commits": ["abc1234 remove target"],
+                "commit_count": 1,
+            },
+            pre_diff={"stat": "", "numstat": ""},
+        )
+        review = _run(chaperone(result))
+        assert any("pure_deletion" in f for f in review["flags"])
+        assert review["approved"] is False
+
+    def test_genuine_file_shrunk_still_flagged(self):
+        """Genuine file shrink with net-negative diff is still flagged and rejected."""
+        result = _make_result(
+            post_diff={
+                "stat": " bigfile.py | 50 +----\n",
+                "numstat": "2\t48\tbigfile.py",
+                "commits": ["abc1234 shrink bigfile"],
+                "commit_count": 1,
+            },
+            pre_diff={"stat": "", "numstat": ""},
+        )
+        review = _run(chaperone(result))
+        assert any("file_shrunk" in f for f in review["flags"])
+        assert review["approved"] is False

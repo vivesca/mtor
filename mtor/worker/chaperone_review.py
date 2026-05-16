@@ -119,7 +119,25 @@ async def chaperone(result: dict) -> dict:
             if fname.startswith("assays/") and fname.count("/") > 1 and "test_" in fname:
                 flags.append(f"nested_test_file: {fname}")
 
-    if exit_code == 0 and not post_stat_text.strip() and commit_count == 0:
+    # Primary diff evidence: commits list, patch content, or stat — any of these
+    # means real work was done, even if one derivative signal is empty/truncated.
+    post_patch = (
+        result.get("post_diff", {}).get("patch", "")
+        if isinstance(result.get("post_diff"), dict)
+        else ""
+    )
+    commits_list = (
+        result.get("post_diff", {}).get("commits", [])
+        if isinstance(result.get("post_diff"), dict)
+        else []
+    )
+    has_primary_evidence = (
+        bool(post_stat_text.strip())
+        or commit_count > 0
+        or bool(commits_list)
+        or bool(post_patch.strip())
+    )
+    if exit_code == 0 and not has_primary_evidence:
         flags.append("no_commit_on_success")
 
     # Extract ALL file paths mentioned in the task and check if they appear in the diff.
@@ -161,6 +179,20 @@ async def chaperone(result: dict) -> dict:
     post_stat = post_diff.get("stat", "") if isinstance(post_diff, dict) else str(post_diff)
 
     if post_numstat and post_numstat != pre_numstat:
+        # Compute overall net additions from numstat to detect false-positive
+        # per-file shrink/deletion flags caused by truncated diff text.
+        total_added = 0
+        total_removed = 0
+        for line in post_numstat.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                try:
+                    total_added += int(parts[0])
+                    total_removed += int(parts[1])
+                except ValueError:
+                    pass
+        net_positive = total_added > total_removed
+
         for line in post_numstat.splitlines():
             parts = line.split("\t")
             if len(parts) == 3:
@@ -168,9 +200,11 @@ async def chaperone(result: dict) -> dict:
                 try:
                     a, r = int(added), int(removed)
                     if r > a * 3 and r > 10:
-                        flags.append(f"file_shrunk: {fname} +{a}/-{r}")
+                        if not net_positive:
+                            flags.append(f"file_shrunk: {fname} +{a}/-{r}")
                     if a == 0 and r > 5:
-                        flags.append(f"pure_deletion: {fname} -{r}")
+                        if not net_positive:
+                            flags.append(f"pure_deletion: {fname} -{r}")
                 except ValueError:
                     pass
 
