@@ -1712,6 +1712,127 @@ def research(
 
 
 @app.command
+def receptor(
+    prompt: str | None = None,
+    *,
+    spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
+    provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
+    skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
+    harness: Annotated[str, Parameter(name=["--harness"])] = "",
+    explain: Annotated[bool, Parameter(name=["--explain"])] = False,
+) -> None:
+    """Dispatch protected receptor/skill work through mTOR's stricter route."""
+    cmd = "mtor receptor"
+    if spec is None:
+        sys.exit(
+            _err(
+                cmd,
+                "Receptor dispatch requires --spec",
+                "SPEC_REQUIRED",
+                "Create a spec with scope under membrane/receptors/ and a tests: run command.",
+                [_action("mtor spec new <name>", "Scaffold a spec")],
+                exit_code=2,
+            )
+        )
+
+    import re as _re
+
+    frontmatter_errors = validate_spec(spec)
+    if frontmatter_errors:
+        msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in frontmatter_errors)
+        sys.exit(_err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1))
+
+    from mtor.dispatch import validate_receptor_spec
+    from mtor.dispatch import validate_spec as validate_dispatch_spec
+    from mtor.rptor import parse_spec
+
+    spec_data = parse_spec(spec)
+    repo = Path(spec_data.get("repo", ".")).expanduser()
+    dispatch_errors = validate_dispatch_spec(spec, repo)
+    receptor_errors = validate_receptor_spec(spec)
+    if dispatch_errors or receptor_errors:
+        errors = dispatch_errors + receptor_errors
+        msg = "Receptor spec validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        sys.exit(
+            _err(
+                cmd,
+                msg,
+                "RECEPTOR_SPEC_INVALID",
+                "Use scope under membrane/receptors/ and include a populated tests: field.",
+                [],
+                exit_code=1,
+            )
+        )
+
+    spec_contents = spec.read_text(encoding="utf-8").strip()
+    spec_contents = _re.sub(
+        r"\A---\n.*?\n---\n*", "", spec_contents, count=1, flags=_re.DOTALL
+    ).strip()
+    dispatch_prompt = spec_contents if prompt is None else spec_contents + "\n" + prompt
+
+    if harness and harness not in PROVIDER_HARNESS_MAP:
+        allowed = ", ".join(sorted(PROVIDER_HARNESS_MAP))
+        sys.exit(
+            _err(
+                cmd,
+                f"Unknown harness '{harness}'",
+                "UNKNOWN_HARNESS",
+                f"Use one of: {allowed}",
+                [],
+                exit_code=2,
+            )
+        )
+
+    if explain:
+        from mtor.dispatch import _dispatch_explanation
+
+        plan = _dispatch_explanation(
+            dispatch_prompt,
+            provider=provider,
+            mode="receptor",
+            skip_sha_check=skip_sha_check,
+            spec_path=spec,
+            harness=harness,
+            paused=_is_paused(),
+            frozen=_is_frozen(),
+        )
+        _ok(cmd, plan, plan["next_actions"], version=VERSION)
+        return
+
+    if _is_frozen():
+        sys.exit(
+            _err(
+                cmd,
+                "Dispatching is frozen. Use 'mtor dedeptor' to unfreeze.",
+                "FROZEN",
+                "Run: mtor dedeptor",
+                [_action("mtor dedeptor", "Unfreeze dispatching")],
+                exit_code=1,
+            )
+        )
+    if _is_paused():
+        sys.exit(
+            _err(
+                cmd,
+                "Dispatching is paused. Use 'mtor derapa' to resume.",
+                "PAUSED",
+                "Run: mtor derapa",
+                [_action("mtor derapa", "Resume dispatching")],
+                exit_code=1,
+            )
+        )
+
+    _dispatch_prompt(
+        dispatch_prompt,
+        provider=provider,
+        mode="receptor",
+        skip_sha_check=skip_sha_check,
+        spec_path=spec,
+        harness=harness,
+    )
+
+
+@app.command
 def auto(
     *,
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",

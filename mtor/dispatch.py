@@ -66,6 +66,7 @@ ROUTE_PATTERNS: dict[str, list[str]] = {
         "pricing",
         "benchmark",
     ],
+    "receptor": ["receptor", "skill", "membrane/receptors"],
 }
 
 ROUTE_TO_PROVIDER: dict[str, str] = {
@@ -74,6 +75,7 @@ ROUTE_TO_PROVIDER: dict[str, str] = {
     "build": "zhipu",
     "test": "zhipu",
     "research": "zhipu",
+    "receptor": "zhipu",
 }
 
 RETIRED_PROVIDERS: dict[str, str] = {
@@ -85,6 +87,16 @@ RETIRED_PROVIDERS: dict[str, str] = {
 def _resolve_default_provider(spec_mode: str) -> str:
     """Return the default provider for a spec mode."""
     return ROUTE_TO_PROVIDER.get(spec_mode, "zhipu")
+
+
+def _receptor_suffix() -> str:
+    return (
+        "\n\nThis is a RECEPTOR task for Vivesca skill files. "
+        "Only edit files allowed by the spec scope under membrane/receptors/. "
+        "Preserve frontmatter, triggers, and existing local style. "
+        "Do not edit genome.md, epigenome/marks/, or unrelated skills. "
+        "Run the verification command from the spec before committing."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +333,8 @@ def _dispatch_explanation(
             "## Synthesis\nOne paragraph summary.\n"
             "## Recommendations\n- actionable item 1\n- actionable item 2"
         )
+    elif spec_mode == "receptor":
+        full_prompt = prompt + _receptor_suffix()
     else:
         full_prompt = prompt
 
@@ -508,6 +522,8 @@ def _dispatch_prompt(
             "## Recommendations\n- actionable item 1\n- actionable item 2"
         )
         full_prompt = prompt + research_suffix
+    elif spec_mode == "receptor":
+        full_prompt = prompt + _receptor_suffix()
     else:
         full_prompt = prompt
 
@@ -731,3 +747,34 @@ def validate_spec(spec_path: Path, repo: Path) -> list[str]:
                 errors.append(f"Test file not found: {tf}")
 
     return errors
+
+
+def validate_receptor_spec(spec_path: Path) -> list[str]:
+    """Validate receptor-route constraints beyond ordinary spec readiness."""
+    from mtor.rptor import parse_spec
+
+    spec = parse_spec(spec_path)
+    scope = spec.get("scope", [])
+    if not scope:
+        return ["Receptor route requires scope under membrane/receptors/"]
+
+    receptor_scopes = [
+        str(item)
+        for item in scope
+        if str(item).startswith("membrane/receptors/")
+    ]
+    if not receptor_scopes:
+        return ["Receptor route scope must include membrane/receptors/<name>/..."]
+
+    invalid = [
+        str(item)
+        for item in scope
+        if not str(item).startswith("membrane/receptors/") and str(item) != "typos.toml"
+    ]
+    if invalid:
+        return [
+            "Receptor route scope may only include membrane/receptors/... plus typos.toml; "
+            f"invalid: {', '.join(invalid)}"
+        ]
+
+    return []

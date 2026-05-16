@@ -382,6 +382,57 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
+    "receptor [prompt]",
+    "Dispatch protected Vivesca receptor/skill work with stricter spec validation.",
+    params=[
+        {
+            "name": "prompt",
+            "type": "string",
+            "required": False,
+            "description": "Optional extra instruction appended after the spec body",
+        },
+        {
+            "name": "--spec",
+            "type": "string",
+            "required": True,
+            "description": "Spec with scope under membrane/receptors/ and populated tests",
+        },
+        {
+            "name": "--provider",
+            "type": "string",
+            "required": False,
+            "default": "zhipu",
+            "description": "Provider to use for dispatch",
+        },
+        {
+            "name": "--harness",
+            "type": "string",
+            "required": False,
+            "default": "",
+            "description": "Optional harness override",
+        },
+        {
+            "name": "--explain",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Return dispatch plan without starting a workflow",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "workflow_id": "string",
+            "status": "string",
+            "provider": "string",
+            "spec": "string",
+        },
+        "next_actions": "array",
+    },
+    annotations={"readonly": False, "destructive": False},
+)
+tree.add_command(
     "scan",
     "Run deterministic checks: TODO/FIXME, missing tests, stale marks.",
     params=[],
