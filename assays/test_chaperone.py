@@ -435,6 +435,24 @@ class TestCompletionEvidence:
         assert dossier["artifact"]["changed_paths"] == ["mtor/worker/chaperone_review.py"]
         assert dossier["review"]["verdict"] == "approved"
 
+    def test_dossier_distinguishes_requested_and_resolved_provider(self, tmp_path, monkeypatch):
+        workflow_id = "ribosome-provider-fallback-test"
+        monkeypatch.setattr(chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers")
+        result = _make_result(provider="gemini")
+        result.update({
+            "workflow_id": workflow_id,
+            "requested_provider": "zhipu",
+            "attempted_providers": ["gemini"],
+        })
+
+        review = _run(chaperone(result))
+
+        dossier = review["completion_dossier"]
+        assert dossier["requested_provider"] == "zhipu"
+        assert dossier["resolved_provider"] == "gemini"
+        assert dossier["attempted_providers"] == ["gemini"]
+        assert dossier["completion_evidence"]["execution"]["provider"] == "gemini"
+
 
 class TestFailureReason:
     """Test that cli.py failure_reason surfaces chaperone flags."""

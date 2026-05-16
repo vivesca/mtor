@@ -135,6 +135,26 @@ def _is_coaching_bloat_error(rc: int, stderr: str) -> bool:
     return rc == 1 and "coaching file" in stderr.lower() and "limit 10kb" in stderr.lower()
 
 
+def _select_attempt_provider(
+    health: dict,
+    requested_provider: str,
+    attempted: set[str],
+) -> str:
+    """Choose the provider for the next subprocess attempt."""
+    if requested_provider and not attempted:
+        return select_provider(health, requested_provider)
+    if not attempted:
+        return select_provider(health, override=None)
+
+    available = [p for p in PROVIDER_PRIORITY if p not in attempted]
+    if available:
+        tmp_health = {p: health.get(p, {"state": "closed"}) for p in PROVIDER_PRIORITY}
+        for p in attempted:
+            tmp_health[p] = {"state": "open", "cooldown_until": _time.time() + 3600}
+        return select_provider(tmp_health, override=None)
+    return select_provider(health, override=None)
+
+
 def _write_attempt_summary(
     *,
     workflow_id: str,
@@ -650,12 +670,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     stderr = ""
 
     while True:
-        # Skip providers we've already tried; select next available
-        available = [p for p in PROVIDER_PRIORITY if p not in _attempted]
-        if available:
-            # Build a temporary health view that pretends unchecked providers are closed
-            tmp_health = {p: health.get(p, {"state": "closed"}) for p in available}
-            resolved_provider = select_provider(tmp_health, override=None)
+        resolved_provider = _select_attempt_provider(health, provider, _attempted)
 
         _attempted.add(resolved_provider)
         _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
@@ -742,7 +757,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 _r = {
                     "success": False,
                     "exit_code": -1,
-                    "provider": provider,
+                    "provider": resolved_provider,
                     "workflow_id": workflow_id,
                     "repo_root": repo_root,
                     "base_sha": pre_sha or "",
@@ -772,7 +787,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 _r = {
                     "success": False,
                     "exit_code": -1,
-                    "provider": provider,
+                    "provider": resolved_provider,
                     "workflow_id": workflow_id,
                     "repo_root": repo_root,
                     "base_sha": pre_sha or "",
@@ -907,7 +922,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 _r = {
                     "success": False,
                     "exit_code": 0,
-                    "provider": provider,
+                    "provider": resolved_provider,
                     "workflow_id": workflow_id,
                     "repo_root": repo_root,
                     "base_sha": pre_sha or "",
@@ -971,7 +986,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 _r = {
                     "success": True,
                     "exit_code": 0,
-                    "provider": provider,
+                    "provider": resolved_provider,
                     "workflow_id": workflow_id,
                     "repo_root": repo_root,
                     "base_sha": pre_sha or "",
@@ -1072,7 +1087,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     _r = {
         "success": rc == 0,
         "exit_code": rc,
-        "provider": provider,
+        "provider": resolved_provider,
         "workflow_id": workflow_id,
         "repo_root": repo_root,
         "base_sha": pre_sha or "",
