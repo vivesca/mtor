@@ -10,6 +10,7 @@ from pathlib import Path
 from temporalio import activity
 
 REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
+DOSSIER_DIR = Path.home() / "germline" / "loci" / "ribosome-dossiers"
 
 _DESTRUCTION_PATTERNS = _re.compile(
     r"rm -rf|rmdir|replaced entire|overwrote|deleted all|"
@@ -88,6 +89,91 @@ def _detected_test_commands(output: str) -> list[str]:
         if command and command not in commands:
             commands.append(command)
     return commands
+
+
+def _dossier_operator_state(exit_code: int, verdict: str, approved: bool) -> str:
+    """Return the terminal operator state visible from review evidence alone."""
+    if approved:
+        return "approved"
+    if verdict == "incomplete":
+        return "incomplete"
+    if verdict == "rejected":
+        return "failed_review" if exit_code == 0 else "failed_process"
+    if exit_code != 0:
+        return "failed_process"
+    return "completed_unreviewed"
+
+
+def _build_completion_dossier(
+    result: dict,
+    review: dict,
+    completion_evidence: dict,
+    *,
+    approved: bool,
+    verdict: str,
+    score: int,
+) -> dict:
+    """Build the durable per-workflow evidence index."""
+    workflow_id = str(result.get("workflow_id") or "")
+    exit_code = int(result.get("exit_code", -1))
+    artifact = completion_evidence.get("artifact", {})
+    verification = completion_evidence.get("verification", {})
+    decision = completion_evidence.get("decision", {})
+    output_path = result.get("output_path", "") or review.get("output_path", "")
+    cached_log_path = result.get("cached_log_path", "")
+    operator_state = _dossier_operator_state(exit_code, verdict, approved)
+
+    next_action = {}
+    if workflow_id:
+        if operator_state == "approved":
+            next_action = {
+                "command": f"mtor review {workflow_id}",
+                "description": "Mark approved workflow as reviewed",
+            }
+        else:
+            next_action = {
+                "command": f"mtor logs {workflow_id}",
+                "description": "Inspect preserved output",
+            }
+
+    return {
+        "workflow_id": workflow_id,
+        "repo_root": result.get("repo_root", ""),
+        "base_sha": result.get("base_sha", ""),
+        "requested_provider": result.get("requested_provider", result.get("provider", "")),
+        "resolved_provider": result.get("provider", ""),
+        "attempted_providers": result.get("attempted_providers", []),
+        "mode": result.get("mode", "build"),
+        "task_preview": result.get("task", "")[:200],
+        "artifact": {
+            "branch_name": result.get("branch_name", artifact.get("branch_name", "")),
+            "commit_count": artifact.get("commit_count", 0),
+            "commits": artifact.get("commits", []),
+            "changed_paths": artifact.get("changed_paths", []),
+            "has_patch": artifact.get("has_patch", False),
+            "patch_bytes": artifact.get("patch_bytes", 0),
+            "output_path": output_path,
+            "cached_log_path": cached_log_path,
+            "pr_url": result.get("pr_url", ""),
+            "pr_number": result.get("pr_number", 0),
+        },
+        "verification": verification,
+        "review": {
+            "approved": approved,
+            "verdict": verdict,
+            "flags": review.get("flags", []),
+            "blocking_flags": decision.get("blocking_flags", []),
+            "warnings": decision.get("warnings", []),
+            "satisfaction": score,
+        },
+        "operator": {
+            "state": operator_state,
+            "next_action": next_action,
+        },
+        "completion_evidence": completion_evidence,
+        "created_at": review.get("ts", ""),
+        "reviewed_at": review.get("ts", ""),
+    }
 
 
 
@@ -349,8 +435,9 @@ async def chaperone(result: dict) -> dict:
         },
     }
 
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%S")
     review = {
-        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ts": ts,
         "task": task[:200],
         "provider": provider,
         "exit_code": exit_code,
@@ -367,6 +454,29 @@ async def chaperone(result: dict) -> dict:
     if verdict == "incomplete" and branch_name:
         review["branch_name"] = branch_name
 
+    completion_dossier = _build_completion_dossier(
+        result,
+        review,
+        completion_evidence,
+        approved=approved,
+        verdict=verdict,
+        score=score,
+    )
+    workflow_id = completion_dossier.get("workflow_id", "")
+    if workflow_id:
+        dossier_path = DOSSIER_DIR / f"{workflow_id}.json"
+        try:
+            DOSSIER_DIR.mkdir(parents=True, exist_ok=True)
+            review["dossier_path"] = str(dossier_path)
+            completion_dossier["dossier_path"] = str(dossier_path)
+            dossier_path.write_text(
+                json.dumps(completion_dossier, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    review["completion_dossier"] = completion_dossier
+
     try:
         REVIEW_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(REVIEW_LOG, "a") as f:
@@ -381,4 +491,6 @@ async def chaperone(result: dict) -> dict:
         "satisfaction": score,
         "requeue_prompt": requeue_prompt,
         "completion_evidence": completion_evidence,
+        "completion_dossier": completion_dossier,
+        "dossier_path": review.get("dossier_path", ""),
     }

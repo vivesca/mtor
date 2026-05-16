@@ -7,6 +7,7 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_chaperone.py -v
 from __future__ import annotations
 
 import asyncio
+import json
 
 
 def _run(coro):
@@ -45,6 +46,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mtor.worker.translocase import chaperone
+import mtor.worker.chaperone_review as chaperone_review
 
 
 class TestVerdictBasics:
@@ -396,6 +398,43 @@ class TestCompletionEvidence:
         assert evidence["artifact"]["commit_count"] == 0
         assert evidence["artifact"]["has_stat"] is False
         assert evidence["decision"]["approved"] is True
+
+    def test_workflow_result_writes_completion_dossier(self, tmp_path, monkeypatch):
+        workflow_id = "ribosome-glm51-dossier-test"
+        monkeypatch.setattr(chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers")
+        result = _make_result(
+            task="Update mtor/worker/chaperone_review.py",
+            post_diff={
+                "stat": " mtor/worker/chaperone_review.py | 30 ++++++++++\n",
+                "numstat": "30\t0\tmtor/worker/chaperone_review.py",
+                "commits": ["abc1234 add dossier"],
+                "commit_count": 1,
+                "patch": "+completion_dossier = {}\n",
+            },
+            branch_name="ribosome/dossier",
+        )
+        result.update({
+            "workflow_id": workflow_id,
+            "repo_root": "/home/vivesca/code/mtor",
+            "base_sha": "base123",
+            "requested_provider": "zhipu",
+            "attempted_providers": ["zhipu"],
+            "output_path": "/home/vivesca/germline/loci/ribosome-outputs/wf.txt",
+        })
+
+        review = _run(chaperone(result))
+
+        dossier_path = tmp_path / "ribosome-dossiers" / f"{workflow_id}.json"
+        assert review["dossier_path"] == str(dossier_path)
+        assert review["completion_dossier"]["workflow_id"] == workflow_id
+        assert review["completion_dossier"]["operator"]["state"] == "approved"
+        dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
+        assert dossier["workflow_id"] == workflow_id
+        assert dossier["repo_root"] == "/home/vivesca/code/mtor"
+        assert dossier["base_sha"] == "base123"
+        assert dossier["artifact"]["commit_count"] == 1
+        assert dossier["artifact"]["changed_paths"] == ["mtor/worker/chaperone_review.py"]
+        assert dossier["review"]["verdict"] == "approved"
 
 
 class TestFailureReason:

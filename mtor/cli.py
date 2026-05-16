@@ -849,22 +849,25 @@ def status(workflow_id: str, short: bool = False) -> None:
         if wf_result and isinstance(wf_result, dict):
             task_result = _extract_first_result(wf_result)
             if task_result:
+                review = task_result.get("review", {})
                 result_payload["success"] = task_result.get("success")
                 result_payload["exit_code"] = task_result.get("exit_code")
                 result_payload["provider"] = task_result.get("provider")
                 result_payload["task_preview"] = task_result.get("task", "")[:120]
-                result_payload["output_path"] = task_result.get("review", {}).get(
-                    "output_path", ""
-                ) or task_result.get("output_path", "")
+                result_payload["output_path"] = review.get("output_path", "") or task_result.get("output_path", "")
                 if not result_payload["output_path"]:
                     cached_log_path = _cached_log_path(workflow_id)
                     if cached_log_path:
                         result_payload["cached_log_path"] = cached_log_path
                 result_payload["merged"] = task_result.get("merged")
-                result_payload["verdict"] = task_result.get("review", {}).get("verdict")
-                completion_evidence = task_result.get("review", {}).get("completion_evidence")
+                result_payload["verdict"] = review.get("verdict")
+                completion_evidence = review.get("completion_evidence")
                 if completion_evidence:
                     result_payload["completion_evidence"] = completion_evidence
+                if review.get("dossier_path"):
+                    result_payload["dossier_path"] = review.get("dossier_path")
+                if review.get("completion_dossier"):
+                    result_payload["completion_dossier"] = review.get("completion_dossier")
 
         # Apply local verdict override (false-positive corrections)
         vo = get_verdict_overrides()
@@ -1008,6 +1011,8 @@ def trace(workflow_id: str) -> None:
                 "flags": review.get("flags", []),
                 "satisfaction": review.get("satisfaction"),
                 "completion_evidence": review.get("completion_evidence"),
+                "completion_dossier": review.get("completion_dossier"),
+                "dossier_path": review.get("dossier_path", ""),
             }
             if review.get("verdict") not in _APPROVED_VERDICTS:
                 result_payload["failure_reason"] = _build_failure_reason(task_result)

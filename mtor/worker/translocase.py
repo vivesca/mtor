@@ -494,6 +494,9 @@ async def _heartbeat_stall_check(
 @activity.defn
 async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None, harness: str = "") -> dict:
     """Execute a single ribosome task as a subprocess."""
+    workflow_id = ""
+    with contextlib.suppress(RuntimeError):
+        workflow_id = activity.info().workflow_id
     # Match the actual ribosome effector invocation, not any process containing
     # "ribosome" in argv (e.g. rsync of ribosome-outputs/ paths). The bash effector
     # is always invoked with `--provider`, so that's the precise marker.
@@ -516,6 +519,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 "success": False,
                 "exit_code": -1,
                 "provider": provider,
+                "workflow_id": workflow_id,
                 "task": task[:200],
                 "stdout": "",
                 "stderr": f"CAPABILITY_GATE: blocked keyword '{keyword}' detected in task",
@@ -534,6 +538,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": True,
                     "exit_code": 0,
                     "provider": provider,
+                    "workflow_id": workflow_id,
                     "task": task[:200],
                     "stdout": "(cached from prior attempt)",
                     "stderr": "",
@@ -562,7 +567,6 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         pass
 
     # Create Langfuse trace for this task execution (no-op if langfuse not installed)
-    workflow_id = activity.info().workflow_id
     _log_event(workflow_id, "dispatch", task=task[:200], mode=mode)
     _trace = create_task_trace(task, provider, workflow_id)
 
@@ -740,6 +744,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": False,
                     "exit_code": -1,
                     "provider": provider,
+                    "workflow_id": workflow_id,
+                    "repo_root": repo_root,
+                    "base_sha": pre_sha or "",
+                    "requested_provider": provider,
+                    "attempted_providers": sorted(_attempted),
                     "task": task[:200],
                     "stdout": "",
                     "stderr": "timeout after 30m",
@@ -765,6 +774,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": False,
                     "exit_code": -1,
                     "provider": provider,
+                    "workflow_id": workflow_id,
+                    "repo_root": repo_root,
+                    "base_sha": pre_sha or "",
+                    "requested_provider": provider,
+                    "attempted_providers": sorted(_attempted),
                     "task": task[:200],
                     "stdout": stdout_bytes.decode(errors="replace")[:1000],
                     "stderr": f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}",
@@ -796,6 +810,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 "success": False,
                 "exit_code": rc,
                 "provider": resolved_provider,
+                "workflow_id": workflow_id,
+                "repo_root": repo_root,
+                "base_sha": pre_sha or "",
+                "requested_provider": provider,
+                "attempted_providers": sorted(_attempted),
                 "task": task[:200],
                 "stdout": stdout[:1000],
                 "stderr": stderr[:1000],
@@ -857,6 +876,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": False,
                     "exit_code": rc,
                     "provider": resolved_provider,
+                    "workflow_id": workflow_id,
+                    "repo_root": repo_root,
+                    "base_sha": pre_sha or "",
+                    "requested_provider": provider,
+                    "attempted_providers": sorted(_attempted),
                     "task": task[:200],
                     "stdout": stdout[:1000],
                     "stderr": f"All providers rate-limited: {sorted(_attempted)}",
@@ -885,6 +909,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": False,
                     "exit_code": 0,
                     "provider": provider,
+                    "workflow_id": workflow_id,
+                    "repo_root": repo_root,
+                    "base_sha": pre_sha or "",
+                    "requested_provider": provider,
+                    "attempted_providers": sorted(_attempted),
                     "task": task[:200],
                     "stdout": stdout[:1000],
                     "stderr": stderr[:500],
@@ -944,6 +973,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "success": True,
                     "exit_code": 0,
                     "provider": provider,
+                    "workflow_id": workflow_id,
+                    "repo_root": repo_root,
+                    "base_sha": pre_sha or "",
+                    "requested_provider": provider,
+                    "attempted_providers": sorted(_attempted),
                     "task": task[:200],
                     "stdout": stdout[:1000],
                     "stderr": stderr[:500],
@@ -1040,6 +1074,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         "success": rc == 0,
         "exit_code": rc,
         "provider": provider,
+        "workflow_id": workflow_id,
+        "repo_root": repo_root,
+        "base_sha": pre_sha or "",
+        "requested_provider": provider,
+        "attempted_providers": sorted(_attempted),
         "task": task[:200],
         "stdout": stdout[:1000],
         "stderr": stderr[:500],

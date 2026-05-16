@@ -591,6 +591,11 @@ class TestStatus:
                 "blocking_flags": [],
             },
         }
+        dossier = {
+            "workflow_id": "ribosome-test1234",
+            "artifact": {"commit_count": 1},
+            "operator": {"state": "approved"},
+        }
         mock_client, mock_handle = make_mock_client()
         mock_handle.result = AsyncMock(
             return_value={
@@ -601,6 +606,8 @@ class TestStatus:
                         "review": {
                             "verdict": "approved",
                             "completion_evidence": evidence,
+                            "completion_dossier": dossier,
+                            "dossier_path": "/home/vivesca/germline/loci/ribosome-dossiers/ribosome-test1234.json",
                         },
                     }
                 ]
@@ -612,6 +619,8 @@ class TestStatus:
 
         assert exit_code == 0
         assert data["result"]["completion_evidence"] == evidence
+        assert data["result"]["completion_dossier"] == dossier
+        assert data["result"]["dossier_path"].endswith("ribosome-test1234.json")
 
 
 class TestTrace:
@@ -619,6 +628,11 @@ class TestTrace:
         evidence = {
             "artifact": {"commit_count": 1, "changed_paths": ["mtor/cli.py"]},
             "decision": {"approved": True, "verdict": "approved"},
+        }
+        dossier = {
+            "workflow_id": "ribosome-test1234",
+            "artifact": {"changed_paths": ["mtor/cli.py"]},
+            "operator": {"state": "approved"},
         }
         mock_client, mock_handle = make_mock_client()
         desc = mock_handle.describe.return_value
@@ -637,6 +651,8 @@ class TestTrace:
                             "flags": [],
                             "satisfaction": 100,
                             "completion_evidence": evidence,
+                            "completion_dossier": dossier,
+                            "dossier_path": "/home/vivesca/germline/loci/ribosome-dossiers/ribosome-test1234.json",
                         },
                     }
                 ]
@@ -650,6 +666,8 @@ class TestTrace:
         result = data["result"]
         assert result["operator_state"] == "approved"
         assert result["review"]["completion_evidence"] == evidence
+        assert result["review"]["completion_dossier"] == dossier
+        assert result["review"]["dossier_path"].endswith("ribosome-test1234.json")
         assert result["diagnosis"] == "workflow completed and review approved the artifact"
         assert result["next_action"]["command"] == "mtor review ribosome-test1234"
 
