@@ -614,6 +614,127 @@ class TestStatus:
         assert data["result"]["completion_evidence"] == evidence
 
 
+class TestTrace:
+    def test_trace_completed_approved_includes_review_evidence(self):
+        evidence = {
+            "artifact": {"commit_count": 1, "changed_paths": ["mtor/cli.py"]},
+            "decision": {"approved": True, "verdict": "approved"},
+        }
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.search_attributes = {"mtor_provider": ["zhipu"]}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "provider": "zhipu",
+                        "mode": "build",
+                        "review": {
+                            "approved": True,
+                            "verdict": "approved",
+                            "flags": [],
+                            "satisfaction": 100,
+                            "completion_evidence": evidence,
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["operator_state"] == "approved"
+        assert result["review"]["completion_evidence"] == evidence
+        assert result["diagnosis"] == "workflow completed and review approved the artifact"
+        assert result["next_action"]["command"] == "mtor review ribosome-test1234"
+
+    def test_trace_completed_rejected_includes_failure_diagnosis(self):
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.search_attributes = {"mtor_verdict": ["rejected"]}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "stderr": "",
+                        "review": {
+                            "approved": False,
+                            "verdict": "rejected",
+                            "flags": ["no_commit_on_success"],
+                            "satisfaction": 40,
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["operator_state"] == "failed_review"
+        assert result["review"]["flags"] == ["no_commit_on_success"]
+        assert "no_commit_on_success" in result["failure_reason"]
+        assert result["diagnosis"] == "workflow process completed but chaperone review rejected the artifact"
+
+    def test_trace_running_includes_heartbeat_and_active_log_hint(self):
+        from datetime import UTC, datetime
+
+        import mtor.cli as _cli
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "RUNNING"
+        desc.search_attributes = {}
+        desc.pending_activities = [
+            SimpleNamespace(
+                activity_id="act-1",
+                activity_type=SimpleNamespace(name="translate"),
+                state="STARTED",
+                attempt=1,
+                last_heartbeat_time=datetime(2026, 5, 16, 12, 0, tzinfo=UTC),
+                last_failure=None,
+            )
+        ]
+        mock_handle.result = AsyncMock(return_value={})
+
+        with _patch_client(mock_client), \
+             patch.object(_cli, "_active_log_entries", return_value=[{"filename": "ribosome-test1234.log"}]):
+            exit_code, data = invoke(["trace", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["operator_state"] == "running"
+        assert result["pending_activities"][0]["activity_type"] == "translate"
+        assert result["active_logs"] == [{"filename": "ribosome-test1234.log"}]
+        assert result["next_action"]["command"] == "mtor logs --active"
+
+    def test_trace_failed_workflow_surfaces_temporal_result_error(self):
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "FAILED"
+        desc.search_attributes = {}
+        desc.pending_activities = []
+        mock_handle.result = AsyncMock(side_effect=Exception("activity translate failed: boom"))
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["operator_state"] == "failed_workflow"
+        assert "activity translate failed" in result["temporal_result_error"]
+        assert result["diagnosis"] == "workflow failed during execution"
+
+
 # ---------------------------------------------------------------------------
 # Cancel tests
 # ---------------------------------------------------------------------------
@@ -1195,6 +1316,28 @@ class TestLogs:
         exit_code, data = invoke(["logs", "wf-x", "--lines", "0"])
         assert exit_code != 0
         assert data["error"]["code"] == "INVALID_LINES"
+
+    def test_logs_not_found_points_to_trace(self):
+        """Missing logs should route to trace instead of manual archaeology."""
+        import mtor.cli as _cli
+
+        mock_client, wf_handle = make_mock_client()
+        wf_handle.result = AsyncMock(return_value={"results": [{"review": {}}]})
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["logs", "wf-missing-log"])
+
+        assert exit_code == 4
+        assert data["error"]["code"] == "LOG_NOT_FOUND"
+        assert "mtor trace wf-missing-log" in data["fix"]
+        assert data["next_actions"][0]["command"] == "mtor trace wf-missing-log"
 
 
 # ---------------------------------------------------------------------------

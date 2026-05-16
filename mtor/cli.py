@@ -214,6 +214,92 @@ def _status_next_actions(workflow_id: str, operator_state: str) -> list[dict[str
     return actions
 
 
+def _search_attributes_dict(execution: Any) -> dict[str, Any]:
+    """Return a JSON-friendly mapping of Temporal search attributes."""
+    attrs = getattr(execution, "search_attributes", None)
+    if not attrs:
+        return {}
+    try:
+        items = attrs.items()
+    except AttributeError:
+        return {}
+
+    result: dict[str, Any] = {}
+    for key, value in items:
+        name = str(key)
+        if "." in name:
+            name = name.rsplit(".", 1)[-1]
+        if isinstance(value, (list, tuple)):
+            result[name] = list(value)
+        else:
+            result[name] = value
+    return result
+
+
+def _failure_text(value: Any) -> str:
+    if value is None:
+        return ""
+    for attr in ("message", "cause", "application_failure_info"):
+        candidate = getattr(value, attr, None)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return str(value)
+
+
+def _pending_activity_details(desc: Any) -> list[dict[str, Any]]:
+    """Extract compact pending activity details from Temporal describe output."""
+    details: list[dict[str, Any]] = []
+    for activity in getattr(desc, "pending_activities", None) or []:
+        heartbeat_time = getattr(activity, "last_heartbeat_time", None)
+        activity_type = getattr(activity, "activity_type", None)
+        if not isinstance(activity_type, str):
+            activity_type = getattr(activity_type, "name", None) or str(activity_type or "")
+        last_failure = _failure_text(getattr(activity, "last_failure", None))
+        details.append({
+            "activity_id": getattr(activity, "activity_id", "") or "",
+            "activity_type": activity_type,
+            "state": str(getattr(activity, "state", "") or ""),
+            "attempt": getattr(activity, "attempt", None),
+            "last_heartbeat_time": heartbeat_time.isoformat() if heartbeat_time else None,
+            "last_failure": last_failure[:500] if last_failure else "",
+        })
+    return details
+
+
+def _trace_diagnosis(payload: dict[str, Any]) -> str:
+    operator_state = payload.get("operator_state")
+    if operator_state == "running":
+        execution_state = payload.get("execution_state", {})
+        if execution_state.get("heartbeat_stale"):
+            return "running workflow has a stale activity heartbeat"
+        if execution_state.get("execution_state") == "queued":
+            return "workflow is running in Temporal but no fresh activity heartbeat is visible"
+        return "workflow is currently executing"
+    if operator_state == "approved":
+        return "workflow completed and review approved the artifact"
+    if operator_state == "failed_review":
+        return "workflow process completed but chaperone review rejected the artifact"
+    if operator_state == "incomplete":
+        return "workflow produced partial work but did not complete cleanly"
+    if operator_state in {"failed_process", "failed_workflow"}:
+        return "workflow failed during execution"
+    if operator_state in {"terminated", "canceled"}:
+        return f"workflow was {operator_state}"
+    return "workflow state requires review"
+
+
+def _trace_next_action(workflow_id: str, operator_state: str) -> dict[str, str]:
+    if operator_state == "running":
+        return _action(f"mtor logs --active", "Inspect active worker logs")
+    if operator_state == "approved":
+        return _action(f"mtor review {workflow_id}", "Mark approved workflow as reviewed")
+    if operator_state in {"failed_review", "incomplete", "failed_process"}:
+        return _action(f"mtor logs {workflow_id}", "Inspect output before retry or override")
+    if operator_state in {"terminated", "canceled", "failed_workflow"}:
+        return _action(f"mtor logs {workflow_id}", "Inspect any preserved output")
+    return _action(f"mtor status {workflow_id}", "Re-check workflow status")
+
+
 def _cached_log_path(workflow_id: str) -> str:
     """Return the newest local cached log path for a workflow, if present."""
     cache_dir = Path.home() / ".cache" / "mtor" / "logs"
@@ -844,6 +930,138 @@ def status(workflow_id: str, short: bool = False) -> None:
 
 
 @app.command
+def trace(workflow_id: str) -> None:
+    """Trace a workflow across Temporal status, review evidence, logs, and next action."""
+    cmd = f"mtor trace {workflow_id}"
+
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
+                "TEMPORAL_UNREACHABLE",
+                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
+                exit_code=3,
+            )
+        )
+
+    try:
+        async def _trace():
+            handle = client.get_workflow_handle(workflow_id)
+            desc = await handle.describe()
+            wf_result = None
+            result_error = ""
+            status_name = desc.status.name if desc.status else "UNKNOWN"
+            if status_name != "RUNNING":
+                try:
+                    wf_result = await handle.result()
+                except Exception as exc:
+                    result_error = str(exc)[:1000]
+            execution_state = {}
+            if status_name == "RUNNING":
+                with contextlib.suppress(Exception):
+                    execution_state = await workflow_execution_state(client, workflow_id)
+            return desc, wf_result, result_error, execution_state
+
+        desc, wf_result, result_error, execution_state = asyncio.run(_trace())
+        status_val = desc.status.name if desc.status else "UNKNOWN"
+        task_result = _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        review = task_result.get("review", {}) if task_result else {}
+
+        output_path = ""
+        cached_log_path = _cached_log_path(workflow_id)
+        if task_result:
+            output_path = review.get("output_path", "") or task_result.get("output_path", "")
+
+        result_payload: dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "status": status_val,
+            "start_time": desc.start_time.isoformat() if desc.start_time else None,
+            "close_time": desc.close_time.isoformat() if desc.close_time else None,
+            "search_attributes": _search_attributes_dict(desc),
+            "pending_activities": _pending_activity_details(desc),
+            "execution_state": execution_state,
+            "output_path": output_path,
+            "cached_log_path": cached_log_path,
+        }
+
+        if result_error:
+            result_payload["temporal_result_error"] = result_error
+
+        if task_result:
+            result_payload["result_summary"] = {
+                "success": task_result.get("success"),
+                "exit_code": task_result.get("exit_code"),
+                "provider": task_result.get("provider"),
+                "mode": task_result.get("mode"),
+                "merged": task_result.get("merged"),
+                "branch_name": task_result.get("branch_name", ""),
+                "pr_url": task_result.get("pr_url", ""),
+                "pr_number": task_result.get("pr_number", 0),
+                "task_preview": task_result.get("task", "")[:120],
+            }
+            result_payload["review"] = {
+                "verdict": review.get("verdict"),
+                "approved": review.get("approved"),
+                "flags": review.get("flags", []),
+                "satisfaction": review.get("satisfaction"),
+                "completion_evidence": review.get("completion_evidence"),
+            }
+            if review.get("verdict") not in _APPROVED_VERDICTS:
+                result_payload["failure_reason"] = _build_failure_reason(task_result)
+
+        if status_val == "RUNNING":
+            active_logs = _active_log_entries(workflow_id)
+            if active_logs:
+                result_payload["active_logs"] = active_logs
+
+        # Reuse status verdict overrides so trace matches the visible operator surface.
+        vo = get_verdict_overrides()
+        visible_status = {
+            "success": task_result.get("success") if task_result else None,
+            "verdict": review.get("verdict") if review else None,
+        }
+        if workflow_id in vo:
+            visible_status["verdict"] = vo[workflow_id]
+            result_payload["verdict_override"] = vo[workflow_id]
+        operator_state = _operator_state(status_val, visible_status)
+        result_payload["operator_state"] = operator_state
+        result_payload["diagnosis"] = _trace_diagnosis(result_payload)
+        primary_action = _trace_next_action(workflow_id, operator_state)
+        result_payload["next_action"] = primary_action
+
+        next_actions = [primary_action, _action(f"mtor status {workflow_id}", "Return lightweight status")]
+        if primary_action["command"] != f"mtor logs {workflow_id}":
+            next_actions.append(_action(f"mtor logs {workflow_id}", "Fetch preserved output"))
+
+        _ok(cmd, result_payload, next_actions, version=VERSION)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                cmd,
+                exc_str,
+                "TRACE_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
+
+
+@app.command
 def wait(
     workflow_id: str,
     timeout: int = 1800,
@@ -957,7 +1175,18 @@ def wait(
 def _active_logs() -> None:
     """SSH to ganglion, find log files modified in last 5 minutes, show filename + last 3 lines."""
     cmd = "mtor logs --active"
+    entries = _active_log_entries(strict=True)
+    _ok(cmd, {"active_logs": entries, "count": len(entries)}, version=VERSION)
+
+
+def _active_log_entries(
+    workflow_id: str | None = None,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """Return active worker log entries, optionally filtered to a workflow ID."""
     find_cmd = r"find ~/code/mtor/logs -name '*.log' -mmin -5 -printf '%T@ %p\n' | sort -rn"
+    cmd = "mtor logs --active"
     try:
         result = subprocess.run(
             ["ssh", WORKER_HOST, find_cmd],
@@ -966,13 +1195,19 @@ def _active_logs() -> None:
             timeout=15,
         )
         if result.returncode != 0:
-            sys.exit(
-                _err(cmd, result.stderr.strip() or "SSH find failed", "SSH_ERROR", f"Verify worker host: ssh {WORKER_HOST}", [])
-            )
+            if strict:
+                sys.exit(
+                    _err(cmd, result.stderr.strip() or "SSH find failed", "SSH_ERROR", f"Verify worker host: ssh {WORKER_HOST}", [])
+                )
+            return []
     except subprocess.TimeoutExpired:
-        sys.exit(_err(cmd, f"SSH to {WORKER_HOST} timed out", "SSH_TIMEOUT", f"Check connectivity: ping {WORKER_HOST}", []))
+        if strict:
+            sys.exit(_err(cmd, f"SSH to {WORKER_HOST} timed out", "SSH_TIMEOUT", f"Check connectivity: ping {WORKER_HOST}", []))
+        return []
     except FileNotFoundError:
-        sys.exit(_err(cmd, "ssh binary not found", "SSH_NOT_FOUND", "Install openssh-client", []))
+        if strict:
+            sys.exit(_err(cmd, "ssh binary not found", "SSH_NOT_FOUND", "Install openssh-client", []))
+        return []
 
     entries: list[dict[str, Any]] = []
     for line in result.stdout.strip().splitlines():
@@ -981,6 +1216,8 @@ def _active_logs() -> None:
             continue
         log_path = parts[1]
         fname = log_path.rsplit("/", 1)[-1] if "/" in log_path else log_path
+        if workflow_id and workflow_id not in fname:
+            continue
         try:
             tail = subprocess.run(
                 ["ssh", WORKER_HOST, f"tail -3 {log_path}"],
@@ -993,7 +1230,7 @@ def _active_logs() -> None:
             last_lines = []
         entries.append({"filename": fname, "path": log_path, "last_lines": last_lines})
 
-    _ok(cmd, {"active_logs": entries, "count": len(entries)}, version=VERSION)
+    return entries
 
 
 @app.command
@@ -1101,8 +1338,8 @@ def logs(
                 cmd,
                 f"No log file found for workflow {workflow_id}",
                 "LOG_NOT_FOUND",
-                f"Verify the workflow ID with: mtor status {workflow_id}",
-                [_action(f"mtor status {workflow_id}", "Check if workflow exists")],
+                f"Trace workflow diagnostics with: mtor trace {workflow_id}",
+                [_action(f"mtor trace {workflow_id}", "Inspect Temporal and review evidence")],
                 exit_code=4,
             )
         )
@@ -1167,8 +1404,8 @@ def logs(
                         cmd,
                         f"Log file not found on worker host: {log_path}",
                         "LOG_NOT_FOUND",
-                        f"Verify the workflow ID with: mtor status {workflow_id}",
-                        [_action(f"mtor status {workflow_id}", "Check if workflow exists")],
+                        f"Trace workflow diagnostics with: mtor trace {workflow_id}",
+                        [_action(f"mtor trace {workflow_id}", "Inspect Temporal and review evidence")],
                         exit_code=4,
                     )
                 )

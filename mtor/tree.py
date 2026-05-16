@@ -106,6 +106,31 @@ tree.add_command(
     annotations={"readonly": True},
 )
 tree.add_command(
+    "trace <workflow_id>",
+    "Trace a workflow across Temporal status, review evidence, logs, and next action",
+    params=[
+        {
+            "name": "workflow_id",
+            "type": "string",
+            "required": True,
+            "description": "Temporal workflow ID",
+        }
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "workflow_id": "string",
+            "status": "string",
+            "operator_state": "string",
+            "diagnosis": "string",
+            "next_action": "object",
+        },
+        "next_actions": "array",
+    },
+    annotations={"readonly": True},
+)
+tree.add_command(
     "logs <workflow_id>",
     f"Fetch last {LOG_TAIL_LINES} lines of workflow output from worker host",
     params=[
