@@ -39,6 +39,7 @@ def _is_blocking_review_flag(flag: str) -> bool:
             "target_file_missing",
             "py2_except_syntax",
             "nested_test_file",
+            "reflex_ban",
         )
     )
 
@@ -54,6 +55,13 @@ _TEST_COMMAND = _re.compile(
 _TEST_PASSED = _re.compile(
     r"\b\d+\s+passed\b|\btests?\s+passed\b|\ball\s+tests\s+pass(?:ed)?\b",
     _re.IGNORECASE,
+)
+_REFLEX_BAN_PATTERNS: tuple[tuple[str, _re.Pattern[str]], ...] = (
+    ("inline_bypass", _re.compile(r"#\s*(?:noqa|type:\s*ignore|pragma:\s*no\s*cover)\b")),
+    ("todo_marker", _re.compile(r"#\s*(?:TODO|FIXME)\b", _re.IGNORECASE)),
+    ("typing_optional", _re.compile(r"\b(?:from\s+typing\s+import\s+Optional|Optional\[)")),
+    ("os_path_join", _re.compile(r"\bos\.path\.join\(")),
+    ("per_class_logger", _re.compile(r"self\.logger\s*=\s*logging\.getLogger\(__name__\)")),
 )
 
 
@@ -89,6 +97,30 @@ def _detected_test_commands(output: str) -> list[str]:
         if command and command not in commands:
             commands.append(command)
     return commands
+
+
+def _added_patch_lines(patch_text: str) -> str:
+    """Return added code lines from a unified diff, excluding diff metadata."""
+    lines: list[str] = []
+    for line in patch_text.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        lines.append(line[1:])
+    return "\n".join(lines)
+
+
+def _reflex_ban_flags(patch_text: str) -> list[str]:
+    """Return deterministic flags for promoted GLM coaching bans."""
+    added = _added_patch_lines(patch_text)
+    flags: list[str] = []
+    for name, pattern in _REFLEX_BAN_PATTERNS:
+        if pattern.search(added):
+            flags.append(f"reflex_ban:{name}")
+
+    if _re.search(r"except\s+Exception\s*:\s*\n\s*(?:pass|(?:self\.)?logger\.|logging\.|print\()", added):
+        flags.append("reflex_ban:broad_exception_swallow")
+
+    return flags
 
 
 def _dossier_operator_state(exit_code: int, verdict: str, approved: bool) -> str:
@@ -254,6 +286,7 @@ async def chaperone(result: dict) -> dict:
         if isinstance(result.get("post_diff"), dict)
         else ""
     )
+    flags.extend(_reflex_ban_flags(post_patch))
     commits_list = (
         result.get("post_diff", {}).get("commits", [])
         if isinstance(result.get("post_diff"), dict)

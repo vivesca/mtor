@@ -126,6 +126,44 @@ class TestPromotedChecks:
         review = _run(chaperone(result))
         assert any("dupe_future_import" in f for f in review["flags"])
 
+    def test_reflex_ban_scans_added_patch_lines(self):
+        result = _make_result(
+            post_diff={
+                "stat": " foo.py | 2 ++\n",
+                "numstat": "2\t0\tfoo.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/foo.py b/foo.py\n"
+                    "+++ b/foo.py\n"
+                    "@@\n"
+                    "+from typing import Optional\n"
+                    "+value: Optional[str] = None  # type: ignore[assignment]\n"
+                ),
+            },
+        )
+
+        review = _run(chaperone(result))
+
+        assert "reflex_ban:typing_optional" in review["flags"]
+        assert "reflex_ban:inline_bypass" in review["flags"]
+        assert review["approved"] is False
+
+    def test_reflex_ban_ignores_diff_metadata(self):
+        result = _make_result(
+            post_diff={
+                "stat": " foo.py | 1 +\n",
+                "numstat": "1\t0\tfoo.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": "diff --git a/foo.py b/foo.py\n+++ b/foo.py\n@@\n+value = 1\n",
+            },
+        )
+
+        review = _run(chaperone(result))
+
+        assert not any(flag.startswith("reflex_ban") for flag in review["flags"])
+
 
 class TestFileShrinkage:
     """Detection of suspicious deletions."""
