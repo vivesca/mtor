@@ -452,6 +452,64 @@ class TestStatus:
         )
         assert "syntax error" in data["result"]["failure_reason"]
 
+    def test_status_includes_cached_log_path_when_output_path_missing(self, tmp_path, monkeypatch):
+        """Status should point at a cached log when Temporal did not preserve output_path."""
+        workflow_id = "ribosome-glm51-status-output-f87f040a-6a07bd75"
+        cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text('{"workflow_id": "wf", "provider": "zhipu"}\n')
+
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "rejected"},
+                        "output_path": "",
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", workflow_id])
+
+        assert exit_code == 0
+        assert data["result"]["output_path"] == ""
+        assert data["result"]["cached_log_path"] == str(cache_path)
+
+    def test_status_prefers_remote_output_path_over_cached_log_path(self, tmp_path, monkeypatch):
+        """Remote output_path remains authoritative when both remote and cached paths exist."""
+        workflow_id = "ribosome-glm51-status-output-f87f040a-6a07bd75"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.jsonl"
+        cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text("cached\n")
+
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved", "output_path": remote_path},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", workflow_id])
+
+        assert exit_code == 0
+        assert data["result"]["output_path"] == remote_path
+        assert "cached_log_path" not in data["result"]
+
 
 # ---------------------------------------------------------------------------
 # Cancel tests
