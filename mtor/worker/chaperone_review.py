@@ -46,6 +46,48 @@ _PLACEHOLDER_PATTERNS = _re.compile(r"\bTODO\b|\bFIXME\b|\bstub\b", _re.IGNORECA
 _HARDCODED_HOME = _re.compile(r"/Users/terry/|/home/terry/")
 _PY2_EXCEPT = _re.compile(r"^\s*except\s+\w+\s*,\s*\w+\s*:", _re.MULTILINE)
 _DUPE_FUTURE = _re.compile(r"from\s+__future__\s+import\s+annotations")
+_TEST_COMMAND = _re.compile(
+    r"\b(?:uv\s+run\s+pytest|pytest|npm\s+test|pnpm\s+test|bun\s+test)\b[^\n\r]*",
+    _re.IGNORECASE,
+)
+_TEST_PASSED = _re.compile(
+    r"\b\d+\s+passed\b|\btests?\s+passed\b|\ball\s+tests\s+pass(?:ed)?\b",
+    _re.IGNORECASE,
+)
+
+
+def _changed_paths_from_stat(stat_text: str) -> list[str]:
+    """Extract changed file paths from git diff --stat text."""
+    paths: list[str] = []
+    for line in stat_text.splitlines():
+        if "|" not in line:
+            continue
+        path = line.strip().split("|", 1)[0].strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _task_file_paths(task: str) -> set[str]:
+    """Extract likely file paths mentioned in task text."""
+    paths = set(_re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)", task))
+    return {path for path in paths if not path.startswith("http") and len(path) > 4}
+
+
+def _normalize_task_path(path: str) -> str:
+    path = path.lstrip("~/")
+    for prefix in ("germline/", "home/vivesca/germline/"):
+        path = path.removeprefix(prefix)
+    return path
+
+
+def _detected_test_commands(output: str) -> list[str]:
+    commands: list[str] = []
+    for match in _TEST_COMMAND.findall(output):
+        command = match.strip()
+        if command and command not in commands:
+            commands.append(command)
+    return commands
 
 
 
@@ -140,28 +182,17 @@ async def chaperone(result: dict) -> dict:
     if exit_code == 0 and not has_primary_evidence:
         flags.append("no_commit_on_success")
 
+    changed_paths = _changed_paths_from_stat(post_stat_text)
+
     # Extract ALL file paths mentioned in the task and check if they appear in the diff.
     # Catches "task mentions dispatch.py but diff only touches cli.py" mismatches.
-    task_files = set(_re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)", task))
-    # Filter out common false positives (URLs, example paths in code blocks)
-    task_files = {f for f in task_files if not f.startswith("http") and len(f) > 4}
+    task_files = _task_file_paths(task)
+    missing_requested_paths: list[str] = []
     if task_files and exit_code == 0 and post_stat_text:
-        # Normalize: strip ~/ and leading path prefixes to match git diff short paths
-        def _normalize(path: str) -> str:
-            path = path.lstrip("~/")
-            # Strip common prefixes that git diff won't show
-            for prefix in ("germline/", "home/vivesca/germline/"):
-                path = path.removeprefix(prefix)
-            return path
-
-        diff_files = set()
-        for line in post_stat_text.splitlines():
-            fname = line.strip().split("|")[0].strip() if "|" in line else ""
-            if fname:
-                diff_files.add(fname)
+        diff_files = set(changed_paths)
 
         for task_file in task_files:
-            norm = _normalize(task_file)
+            norm = _normalize_task_path(task_file)
             if (
                 norm
                 and not any(norm in df or df.endswith(norm) for df in diff_files)
@@ -170,6 +201,7 @@ async def chaperone(result: dict) -> dict:
                     for kw in ["modify", "edit", "change", "add to", "update", "fix", "create"]
                 )
             ):
+                missing_requested_paths.append(norm)
                 flags.append(f"target_file_missing: {norm}")
 
     pre_diff = result.get("pre_diff", {})
@@ -229,28 +261,6 @@ async def chaperone(result: dict) -> dict:
         if flags and approved:
             verdict = "approved_with_flags"
 
-    review = {
-        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "task": task[:200],
-        "provider": provider,
-        "exit_code": exit_code,
-        "flags": flags,
-        "verdict": verdict,
-        "stdout_len": len(stdout),
-        "stderr_len": len(stderr),
-        "diff": post_stat[:500] if post_stat else "",
-        "cost_info": result.get("cost_info", ""),
-    }
-    if verdict == "incomplete" and branch_name:
-        review["branch_name"] = branch_name
-
-    try:
-        REVIEW_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(REVIEW_LOG, "a") as f:
-            f.write(json.dumps(review) + "\n")
-    except OSError:
-        pass
-
     # Satisfaction scoring: 0-100 based on objective signals
     score = 100
 
@@ -293,10 +303,82 @@ async def chaperone(result: dict) -> dict:
             + " -- IMPORTANT: Read the entire file before modifying. Preserve ALL existing content."
         )
 
+    detected_commands = _detected_test_commands(combined)
+    verification_status = "unknown"
+    if detected_commands:
+        verification_status = "passed" if _TEST_PASSED.search(combined) else "detected"
+    blocking_flags = [
+        flag for flag in flags
+        if flag.startswith("exit_code=") or _is_blocking_review_flag(flag)
+    ]
+    warnings = [flag for flag in flags if flag not in blocking_flags]
+
+    completion_evidence = {
+        "execution": {
+            "provider": provider,
+            "exit_code": exit_code,
+            "mode": result.get("mode", "build"),
+            "output_path": result.get("output_path", ""),
+            "cached_log_path": result.get("cached_log_path", ""),
+        },
+        "artifact": {
+            "branch_name": branch_name,
+            "commit_count": commit_count,
+            "commits": commits_list,
+            "has_stat": bool(post_stat_text.strip()),
+            "has_numstat": bool(post_numstat.strip()),
+            "has_patch": bool(post_patch.strip()),
+            "patch_bytes": len(post_patch.encode("utf-8")),
+            "changed_paths": changed_paths,
+        },
+        "verification": {
+            "status": verification_status,
+            "detected_commands": detected_commands,
+        },
+        "scope": {
+            "requested_paths": sorted(_normalize_task_path(path) for path in task_files),
+            "changed_paths": changed_paths,
+            "missing_requested_paths": sorted(set(missing_requested_paths)),
+        },
+        "decision": {
+            "approved": approved,
+            "verdict": verdict,
+            "blocking_flags": blocking_flags,
+            "warnings": warnings,
+            "satisfaction": score,
+        },
+    }
+
+    review = {
+        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "task": task[:200],
+        "provider": provider,
+        "exit_code": exit_code,
+        "flags": flags,
+        "verdict": verdict,
+        "stdout_len": len(stdout),
+        "stderr_len": len(stderr),
+        "diff": post_stat[:500] if post_stat else "",
+        "cost_info": result.get("cost_info", ""),
+        "completion_evidence": completion_evidence,
+    }
+    if result.get("output_path"):
+        review["output_path"] = result.get("output_path")
+    if verdict == "incomplete" and branch_name:
+        review["branch_name"] = branch_name
+
+    try:
+        REVIEW_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(REVIEW_LOG, "a") as f:
+            f.write(json.dumps(review) + "\n")
+    except OSError:
+        pass
+
     return {
         "approved": approved,
         "flags": flags,
         "verdict": verdict,
         "satisfaction": score,
         "requeue_prompt": requeue_prompt,
+        "completion_evidence": completion_evidence,
     }

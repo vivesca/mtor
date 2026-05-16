@@ -319,6 +319,85 @@ class TestScoutMode:
         assert review["approved"] is False
 
 
+class TestCompletionEvidence:
+    """Structured evidence bundle for review decisions."""
+
+    def test_success_includes_completion_evidence(self):
+        result = _make_result(
+            task="Update mtor/worker/chaperone_review.py and assays/test_chaperone.py",
+            stdout="uv run pytest assays/test_chaperone.py -q\n42 passed",
+            post_diff={
+                "stat": (
+                    " mtor/worker/chaperone_review.py | 30 ++++++++++\n"
+                    " assays/test_chaperone.py | 20 ++++++\n"
+                ),
+                "numstat": (
+                    "30\t0\tmtor/worker/chaperone_review.py\n"
+                    "20\t0\tassays/test_chaperone.py"
+                ),
+                "commits": ["abc1234 add completion evidence"],
+                "commit_count": 1,
+                "patch": "+completion_evidence = {}\n",
+            },
+            branch_name="ribosome/completion-evidence",
+        )
+        result["output_path"] = "/home/vivesca/code/mtor/logs/wf.jsonl"
+
+        review = _run(chaperone(result))
+
+        evidence = review["completion_evidence"]
+        assert evidence["execution"]["provider"] == "zhipu"
+        assert evidence["execution"]["output_path"] == "/home/vivesca/code/mtor/logs/wf.jsonl"
+        assert evidence["artifact"]["commit_count"] == 1
+        assert evidence["artifact"]["has_patch"] is True
+        assert evidence["artifact"]["patch_bytes"] > 0
+        assert evidence["artifact"]["changed_paths"] == [
+            "mtor/worker/chaperone_review.py",
+            "assays/test_chaperone.py",
+        ]
+        assert evidence["verification"]["status"] == "passed"
+        assert evidence["verification"]["detected_commands"] == [
+            "uv run pytest assays/test_chaperone.py -q"
+        ]
+        assert evidence["scope"]["missing_requested_paths"] == []
+        assert evidence["decision"]["approved"] is True
+        assert evidence["decision"]["verdict"] == review["verdict"]
+
+    def test_missing_requested_path_is_in_scope_evidence(self):
+        result = _make_result(
+            task="Update mtor/worker/chaperone_review.py",
+            post_diff={
+                "stat": " mtor/cli.py | 10 ++++\n",
+                "numstat": "10\t0\tmtor/cli.py",
+                "commits": ["abc1234 update cli"],
+                "commit_count": 1,
+            },
+        )
+
+        review = _run(chaperone(result))
+
+        assert "target_file_missing: mtor/worker/chaperone_review.py" in review["flags"]
+        assert review["completion_evidence"]["scope"]["missing_requested_paths"] == [
+            "mtor/worker/chaperone_review.py"
+        ]
+
+    def test_scout_without_artifact_still_has_evidence_and_approves(self):
+        result = _make_result(
+            stdout="Found no issues.",
+            post_diff={"stat": "", "numstat": "", "commits": [], "commit_count": 0},
+        )
+        result["mode"] = "scout"
+
+        review = _run(chaperone(result))
+
+        assert review["approved"] is True
+        evidence = review["completion_evidence"]
+        assert evidence["execution"]["mode"] == "scout"
+        assert evidence["artifact"]["commit_count"] == 0
+        assert evidence["artifact"]["has_stat"] is False
+        assert evidence["decision"]["approved"] is True
+
+
 class TestFailureReason:
     """Test that cli.py failure_reason surfaces chaperone flags."""
 

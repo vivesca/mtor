@@ -726,6 +726,9 @@ def status(workflow_id: str, short: bool = False) -> None:
                         result_payload["cached_log_path"] = cached_log_path
                 result_payload["merged"] = task_result.get("merged")
                 result_payload["verdict"] = task_result.get("review", {}).get("verdict")
+                completion_evidence = task_result.get("review", {}).get("completion_evidence")
+                if completion_evidence:
+                    result_payload["completion_evidence"] = completion_evidence
 
         # Apply local verdict override (false-positive corrections)
         vo = get_verdict_overrides()

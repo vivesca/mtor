@@ -510,6 +510,41 @@ class TestStatus:
         assert data["result"]["output_path"] == remote_path
         assert "cached_log_path" not in data["result"]
 
+    def test_status_includes_completion_evidence_when_review_has_it(self):
+        """Status surfaces the structured evidence bundle stored by review."""
+        evidence = {
+            "artifact": {
+                "commit_count": 1,
+                "changed_paths": ["mtor/worker/chaperone_review.py"],
+            },
+            "decision": {
+                "approved": True,
+                "verdict": "approved",
+                "blocking_flags": [],
+            },
+        }
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {
+                            "verdict": "approved",
+                            "completion_evidence": evidence,
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["status", "ribosome-test1234"])
+
+        assert exit_code == 0
+        assert data["result"]["completion_evidence"] == evidence
+
 
 # ---------------------------------------------------------------------------
 # Cancel tests
