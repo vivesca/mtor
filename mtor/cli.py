@@ -290,7 +290,7 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
 
 def _trace_next_action(workflow_id: str, operator_state: str) -> dict[str, str]:
     if operator_state == "running":
-        return _action(f"mtor logs --active", "Inspect active worker logs")
+        return _action("mtor logs --active", "Inspect active worker logs")
     if operator_state == "approved":
         return _action(f"mtor review {workflow_id}", "Mark approved workflow as reviewed")
     if operator_state in {"failed_review", "incomplete", "failed_process"}:

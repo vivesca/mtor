@@ -51,7 +51,6 @@ from mtor.worker.git_ops import (
     _git_push,
     _git_snapshot,
     _merge_branch,
-    _merge_worktree,
 )
 
 TASK_QUEUE = "translation-queue"

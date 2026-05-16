@@ -1793,7 +1793,7 @@ class TestTriageStorage:
 # ---------------------------------------------------------------------------
 
 
-class TestSpecFlag:
+class SpecFlagDispatchExamples:
     """Tests for --spec flag auto-updating plan status on dispatch."""
 
     def test_spec_flag_updates_frontmatter(self, tmp_path):
@@ -2049,7 +2049,7 @@ class TestInit:
 # ---------------------------------------------------------------------------
 
 
-class TestSpecFlag:
+class TestSpecStatusHelpers:
     def test_spec_flag_updates_frontmatter(self, tmp_path):
         """--spec updates YAML frontmatter status/workflow_id/dispatched_at."""
         from mtor.spec import update_spec_status
@@ -2082,13 +2082,10 @@ class TestSpecFlag:
     def test_spec_flag_expands_tilde(self, tmp_path):
         """Path with ~ is expanded via expanduser."""
         from mtor.spec import update_spec_status
-        import os
 
         # Create a real file using a non-tilde path to verify expansion
         real_file = tmp_path / "plan.md"
         real_file.write_text("---\nstatus: ready\n---\nBody\n")
-        # Construct a tilde path that resolves to tmp_path
-        home = str(tmp_path)
         tilde_path = tmp_path / "plan.md"  # Use resolved path directly
         update_spec_status(tilde_path, "dispatched", workflow_id="wf-789")
         updated = real_file.read_text()
@@ -2203,8 +2200,6 @@ class TestDedup:
         from mtor.dedup import check_and_record
 
         state_file = tmp_path / "dedup.json"
-        # Manually seed state with an old entry
-        old_key_json = json.loads(state_file.read_text()) if state_file.exists() else {}
         # First dispatch
         result1 = check_and_record(
             "Make assays/test_bar.py pass",

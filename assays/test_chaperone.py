@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from pathlib import Path
 
 
 def _run(coro):
@@ -41,12 +43,9 @@ def _make_result(
     }
 
 
-# Import chaperone from mtor.worker.translocase
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mtor.worker.translocase import chaperone
-import mtor.worker.chaperone_review as chaperone_review
+from mtor.worker.translocase import chaperone  # noqa: E402
+import mtor.worker.chaperone_review as chaperone_review  # noqa: E402
 
 
 class TestVerdictBasics:
