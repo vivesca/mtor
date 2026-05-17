@@ -110,7 +110,7 @@ PROVIDER_TO_MODEL: dict[str, str] = {
     "gemini": "gem31",
     "codex": "gpt54",
     "goose": "glm51g",
-    "droid": "glm51d",
+    "droid": "glm5",
 }
 
 _SLUG_WORD_RE = re.compile(r"[^a-z0-9]+")

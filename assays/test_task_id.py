@@ -65,7 +65,7 @@ class TestProviderToModel:
         "gemini": "gem31",
         "codex": "gpt54",
         "goose": "glm51g",
-        "droid": "glm51d",
+        "droid": "glm5",
     }
 
     @pytest.mark.parametrize("provider,model", list(CASES.items()))
