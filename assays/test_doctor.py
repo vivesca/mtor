@@ -190,7 +190,7 @@ class TestFormatReportAllPass(unittest.TestCase):
             {
                 "name": "provider_routing",
                 "ok": True,
-                "detail": "priority: zhipu(glm-5.1, limit=3) > gemini(gemini, limit=1)",
+                "detail": "priority: zhipu(glm-5.1, limit=3)",
             },
         ]
 

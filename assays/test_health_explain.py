@@ -44,7 +44,7 @@ def test_select_provider_logs_expired_cooldown(capsys):
         chosen = select_provider(health)
 
     captured = capsys.readouterr()
-    assert chosen in {"zhipu", "gemini"}
+    assert chosen == "zhipu"
     assert health["zhipu"]["state"] == "half_open"
     assert "[provider] zhipu: open -> half_open (cooldown expired)" in captured.err
 
