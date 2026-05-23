@@ -85,7 +85,8 @@ def _patch_client(mock_client):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(mock_client, None)))
-    stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
+    stack.enter_context(patch("mtor.cli._check_dedup_only", return_value=None))
+    stack.enter_context(patch("mtor.cli._record_dispatch"))
     return stack
 
 
@@ -237,6 +238,21 @@ class TestCheckWorkerSha:
             with pytest.raises(RuntimeError, match="merge failed"):
                 _check_worker_sha()
 
+    def test_repo_param_uses_git_minus_c(self):
+        """When repo is provided, local SHA lookup uses git -C <repo>."""
+        from mtor.dispatch import _check_worker_sha
+
+        with patch("mtor.dispatch.subprocess") as mock_sp:
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+            ]
+            result = _check_worker_sha(repo="/path/to/repo")
+        assert result is True
+        local_call = mock_sp.run.call_args_list[0]
+        cmd = local_call[0][0]
+        assert cmd == ["git", "-C", "/path/to/repo", "rev-parse", "HEAD"]
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for --skip-sha-check CLI flag
@@ -289,7 +305,7 @@ class TestSkipShaCheckFlag:
                 ["Make assays/test_feature.py pass"]
             )
         assert exit_code == 0
-        mock_sha.assert_called_once_with(skip=False)
+        mock_sha.assert_called_once_with(skip=False, repo=None)
 
     def test_dispatch_with_skip_passes_skip_true(self):
         """Default dispatch with --skip-sha-check passes skip=True to gate."""
@@ -303,7 +319,7 @@ class TestSkipShaCheckFlag:
                 ["--skip-sha-check", "Make assays/test_feature.py pass"]
             )
         assert exit_code == 0
-        mock_sha.assert_called_once_with(skip=True)
+        mock_sha.assert_called_once_with(skip=True, repo=None)
 
     def test_scout_skips_sha_gate(self):
         """Scout mode skips _check_worker_sha entirely (read-only task)."""
@@ -326,3 +342,36 @@ class TestSkipShaCheckFlag:
         ) as mock_sha:
             invoke(["research", "--no-wait", "Compare frameworks"])
         mock_sha.assert_not_called()
+
+    def test_default_spec_dispatch_passes_repo_to_sha_gate(self, tmp_path):
+        """Default dispatch with --spec passes the spec's repo path to SHA gate."""
+        from mtor import dispatch as dispatch_mod
+
+        spec_file = tmp_path / "test-spec.md"
+        spec_file.write_text(
+            "---\n"
+            "name: test-spec\n"
+            "repo: /custom/repo/path\n"
+            "scope:\n"
+            "  - mtor\n"
+            "tests:\n"
+            "  run: pytest assays/test_sha_gate.py -q\n"
+            "---\n"
+            "Do something useful for the test spec.\n"
+        )
+
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client), patch.object(
+            dispatch_mod, "_check_worker_sha", return_value=True
+        ) as mock_sha, patch(
+            "mtor.rptor.parse_spec", return_value={"repo": "/custom/repo/path"}
+        ), patch(
+            "mtor.cli.validate_spec", return_value=[]
+        ), patch(
+            "mtor.dispatch.validate_spec", return_value=[]
+        ):
+            exit_code, data = invoke(
+                ["--spec", str(spec_file)]
+            )
+        assert exit_code == 0
+        mock_sha.assert_called_once_with(skip=False, repo="/custom/repo/path")

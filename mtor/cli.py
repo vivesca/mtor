@@ -39,7 +39,8 @@ from mtor import (
     WORKER_LOG_DIR,
 )
 from mtor.client import _get_client, workflow_execution_state
-from mtor.dedup import check_and_record as _check_dedup
+from mtor.dedup import check_duplicate as _check_dedup
+from mtor.dedup import record_dispatch as _record_dispatch
 from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
@@ -74,6 +75,10 @@ from mtor.watch import (
     run_watch,
     thaw as _remove_freeze,
 )
+
+
+def _check_dedup_only(*args, **kwargs):
+    return _check_dedup(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +589,7 @@ def default_handler(
                 )
             )
         # Spec dispatch-readiness gate — tests field required, no bypass
+        _repo = Path(".")
         if spec is not None:
             from mtor.dispatch import validate_spec as _validate_spec
             from mtor.rptor import parse_spec as _parse_spec
@@ -597,9 +603,10 @@ def default_handler(
                     _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
                 )
 
-        # Dedup check — block identical dispatches within 5-minute window
-        # Skip for empty prompts (will be caught by MISSING_PROMPT in _dispatch_prompt)
-        dup_key = _check_dedup(prompt, spec_path=spec) if prompt.strip() else None
+        # Dedup check — block identical dispatches within 5-minute window.
+        # Check-only: do NOT record yet.  Recording happens only after
+        # _dispatch_prompt successfully creates a workflow.
+        dup_key = _check_dedup_only(prompt, spec_path=spec) if prompt.strip() else None
         if dup_key is not None:
             cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
             sys.exit(
@@ -612,6 +619,12 @@ def default_handler(
                     exit_code=1,
                 )
             )
+
+        # Resolve spec repo for SHA gate (uses spec frontmatter repo: path).
+        _spec_repo: str | None = None
+        if spec is not None:
+            _spec_repo = str(_repo)
+
         _dispatch_prompt(
             prompt,
             provider=provider,
@@ -620,7 +633,13 @@ def default_handler(
             chain=then,
             spec_path=spec,
             harness=harness,
+            repo=_spec_repo,
         )
+
+        # Record dedup only after dispatch succeeds — failed preflight must not
+        # poison the window.
+        if prompt.strip():
+            _record_dispatch(prompt, spec_path=spec)
 
 
 @app.command(name=["riboseq", "list"])

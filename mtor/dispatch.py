@@ -149,17 +149,26 @@ def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> 
     return wid
 
 
-def _check_worker_sha(*, skip: bool = False) -> bool:
+def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     """Compare local HEAD with worker HEAD. Returns True if in sync.
 
     Raises RuntimeError on failures.  If out of sync and skip=False,
     auto-deploys (push + merge + restart) before returning True.
+
+    When *repo* is provided, the local SHA lookup uses ``git -C <repo>``
+    instead of the caller's cwd.  This matters for ``--spec`` dispatch where
+    the spec frontmatter declares the target repo.
     """
     if skip:
         return True
 
+    local_cmd = ["git"]
+    if repo:
+        local_cmd += ["-C", repo]
+    local_cmd += ["rev-parse", "HEAD"]
+
     local = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        local_cmd,
         capture_output=True, text=True, timeout=5,
     )
     if local.returncode != 0:
@@ -445,6 +454,7 @@ def _dispatch_prompt(
     timeout: int = 300,
     spec_path: Path | None = None,
     harness: str = "",
+    repo: str | None = None,
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -501,7 +511,7 @@ def _dispatch_prompt(
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter
     if spec_mode not in ("scout", "research"):
-        _check_worker_sha(skip=skip_sha_check)
+        _check_worker_sha(skip=skip_sha_check, repo=repo)
 
     # Mode-specific prompt suffixes
     if spec_mode == "scout":

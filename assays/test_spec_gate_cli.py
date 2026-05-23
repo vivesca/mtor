@@ -73,6 +73,8 @@ def _patch_dispatch(mock_client):
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(mock_client, None)))
     stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
+    stack.enter_context(patch("mtor.cli._check_dedup_only", return_value=None))
+    stack.enter_context(patch("mtor.cli._record_dispatch"))
     stack.enter_context(patch("mtor.dispatch._check_worker_sha", return_value=True))
     stack.enter_context(patch("mtor.cli._is_frozen", return_value=False))
     stack.enter_context(patch("mtor.cli._is_paused", return_value=False))
@@ -191,6 +193,8 @@ class TestSpecValidationAlwaysEnforced:
             for target in _CLIENT_PATCH_TARGETS:
                 stack.enter_context(patch(target, return_value=(client, None)))
             stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
+            stack.enter_context(patch("mtor.cli._check_dedup_only", return_value=None))
+            stack.enter_context(patch("mtor.cli._record_dispatch"))
             stack.enter_context(patch("mtor.cli._is_frozen", return_value=False))
             stack.enter_context(patch("mtor.cli._is_paused", return_value=False))
 
