@@ -46,6 +46,7 @@ from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.harness import PROVIDER_HARNESS_MAP
 from mtor.rptor import (
     CycleDetected,
+    autotriage,
     audit_specs,
     display_dag,
     resolve_dag,
@@ -2544,6 +2545,7 @@ def rptor(
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
     audit: Annotated[bool, Parameter(name=["--audit"])] = False,
     strict: Annotated[bool, Parameter(name=["--strict"])] = False,
+    autotriage_flag: Annotated[bool, Parameter(name=["--autotriage"])] = False,
 ) -> None:
     """Display spec DAG — status, dependencies, and dispatchability."""
     cmd = "mtor rptor"
@@ -2588,6 +2590,11 @@ def rptor(
                 exit_code=1,
             )
         )
+
+    if autotriage_flag:
+        result = autotriage(resolved, str(directory))
+        _ok(cmd, result, version=VERSION)
+        return
 
     dag = display_dag(resolved)
 
