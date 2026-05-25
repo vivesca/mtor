@@ -28,7 +28,7 @@ def test_worker_registers_create_pr_activity():
     source = inspect.getsource(translocase.main)
 
     assert "create_pr" in source
-    assert "activities=[translate, chaperone, merge_approved, create_pr, watch_cycle]" in source
+    assert "activities=[translate, chaperone, create_pr, watch_cycle]" in source
 
 
 def test_create_pr_impl_pushes_branch_and_invokes_gh(tmp_path):

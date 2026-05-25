@@ -9,7 +9,7 @@ SOURCE_DIRS = [REPO / "mtor"]
 # Framework-called entrypoints (Temporal activities/workflows, cyclopts CLI handlers, rptor)
 ALLOWLIST = {
     # Temporal activities and workflows
-    "main", "translate", "merge_approved", "watch_cycle", "chaperone",
+    "main", "translate", "watch_cycle", "chaperone",
     "spec_completed", "run", "approve_task", "reject_task", "stop",
     # cyclopts CLI command handlers
     "default_handler", "list_cmd", "list_alias", "status", "logs",
@@ -70,4 +70,4 @@ def test_no_unwired_public_functions():
     for filepath, func_name in _find_public_functions():
         if _count_calls(func_name) == 0:
             dead.append(f"{filepath}:{func_name}")
-    assert not dead, f"Dead public functions (defined but never called):\n" + "\n".join(f"  - {d}" for d in dead)
+    assert not dead, "Dead public functions (defined but never called):\n" + "\n".join(f"  - {d}" for d in dead)

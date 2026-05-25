@@ -48,9 +48,7 @@ from mtor.worker.git_ops import (
     _detect_repo,
     _gc_worktrees,
     _git_pull_ff_only,
-    _git_push,
     _git_snapshot,
-    _merge_branch,
 )
 
 TASK_QUEUE = "translation-queue"
@@ -1143,18 +1141,6 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
 
 
-@activity.defn
-async def merge_approved(args: dict) -> dict:
-    """Merge an approved branch to main + push. Called by workflow after chaperone approves."""
-    repo_root = args["repo_root"]
-    branch_name = args["branch_name"]
-    merged = await asyncio.to_thread(_merge_branch, repo_root, branch_name)
-    if merged:
-        await asyncio.to_thread(_git_push, repo_root)
-    return {"merged": merged, "branch_name": branch_name}
-
-
-
 
 @activity.defn
 async def create_pr(args: dict) -> dict:
@@ -1238,7 +1224,7 @@ async def main() -> None:
         client=client,
         task_queue=TASK_QUEUE,
         workflows=[TranslationWorkflow, WatchWorkflow],
-        activities=[translate, chaperone, merge_approved, create_pr, watch_cycle],
+        activities=[translate, chaperone, create_pr, watch_cycle],
         max_concurrent_activities=max_concurrent,
     )
     _gc_worktrees(str(Path.home() / "germline"))
