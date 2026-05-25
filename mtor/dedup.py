@@ -87,25 +87,3 @@ def record_dispatch(
     state = _prune(_load_state(path), now, DEFAULT_WINDOW_S)
     state[key] = now
     _save_state(path, state)
-
-
-def check_and_record(
-    prompt: str,
-    spec_path: Path | None = None,
-    window: int = DEFAULT_WINDOW_S,
-    state_path: Path | None = None,
-) -> str | None:
-    """Check if *prompt* was recently dispatched; record if not a duplicate.
-
-    Returns ``None`` when the dispatch is allowed (and records the timestamp).
-    Returns the identity key when the dispatch should be blocked (duplicate
-    within the window).
-
-    Backward-compatible wrapper around :func:`check_duplicate` +
-    :func:`record_dispatch`.
-    """
-    blocked = check_duplicate(prompt, spec_path=spec_path, window=window, state_path=state_path)
-    if blocked is not None:
-        return blocked
-    record_dispatch(prompt, spec_path=spec_path, state_path=state_path)
-    return None

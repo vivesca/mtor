@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from mtor.dedup import check_and_record, check_duplicate, compute_identity, record_dispatch
+from mtor.dedup import check_duplicate, compute_identity, record_dispatch
 
 
 def test_same_prompt_within_window_blocked(tmp_path: Path) -> None:
@@ -14,11 +14,11 @@ def test_same_prompt_within_window_blocked(tmp_path: Path) -> None:
     state_path = tmp_path / "dedup.json"
     prompt = "fix the bug"
 
-    result1 = check_and_record(prompt, state_path=state_path, window=300)
-    assert result1 is None  # first call allowed
+    assert check_duplicate(prompt, state_path=state_path, window=300) is None
+    record_dispatch(prompt, state_path=state_path)
 
-    result2 = check_and_record(prompt, state_path=state_path, window=300)
-    assert result2 is not None  # second call blocked
+    result2 = check_duplicate(prompt, state_path=state_path, window=300)
+    assert result2 is not None
     assert result2 == compute_identity(prompt)
 
 
@@ -28,14 +28,12 @@ def test_same_prompt_after_window_allowed(tmp_path: Path) -> None:
     prompt = "fix the bug"
     window = 300
 
-    # Record once so state file exists
-    check_and_record(prompt, state_path=state_path, window=window)
+    record_dispatch(prompt, state_path=state_path)
 
-    # Advance time beyond the window
     with patch("mtor.dedup.time.time", return_value=time.time() + window + 1):
-        result = check_and_record(prompt, state_path=state_path, window=window)
+        result = check_duplicate(prompt, state_path=state_path, window=window)
 
-    assert result is None  # allowed again
+    assert result is None
 
 
 def test_different_prompt_allowed(tmp_path: Path) -> None:
@@ -43,8 +41,8 @@ def test_different_prompt_allowed(tmp_path: Path) -> None:
     state_path = tmp_path / "dedup.json"
     window = 300
 
-    check_and_record("fix the bug", state_path=state_path, window=window)
-    result = check_and_record("add a feature", state_path=state_path, window=window)
+    record_dispatch("fix the bug", state_path=state_path)
+    result = check_duplicate("add a feature", state_path=state_path, window=window)
 
     assert result is None
 
@@ -55,8 +53,8 @@ def test_different_spec_path_allowed(tmp_path: Path) -> None:
     window = 300
     prompt = "fix the bug"
 
-    check_and_record(prompt, spec_path=Path("spec_a.md"), state_path=state_path, window=window)
-    result = check_and_record(prompt, spec_path=Path("spec_b.md"), state_path=state_path, window=window)
+    record_dispatch(prompt, spec_path=Path("spec_a.md"), state_path=state_path)
+    result = check_duplicate(prompt, spec_path=Path("spec_b.md"), state_path=state_path, window=window)
 
     assert result is None
 
@@ -95,15 +93,3 @@ def test_record_dispatch_writes_state(tmp_path: Path) -> None:
     state = json.loads(state_path.read_text())
     key = compute_identity(prompt)
     assert key in state
-
-
-def test_check_and_record_still_backward_compat(tmp_path: Path) -> None:
-    """check_and_record behaves the same: blocks duplicates, allows fresh prompts."""
-    state_path = tmp_path / "dedup.json"
-    prompt = "fix the bug"
-
-    result1 = check_and_record(prompt, state_path=state_path, window=300)
-    assert result1 is None
-
-    result2 = check_and_record(prompt, state_path=state_path, window=300)
-    assert result2 is not None

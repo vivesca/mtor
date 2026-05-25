@@ -2180,37 +2180,23 @@ class TestDedup:
 
     def test_test_dedup_blocks_identical_prompt(self, tmp_path):
         """Identical prompt dispatched twice within window → second blocked."""
-        from mtor.dedup import check_and_record
+        from mtor.dedup import check_duplicate, record_dispatch
 
         state_file = tmp_path / "dedup.json"
-        result1 = check_and_record(
-            "Make assays/test_foo.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result1 is None  # first dispatch allowed
+        assert check_duplicate("Make assays/test_foo.py pass", window=300, state_path=state_file) is None
+        record_dispatch("Make assays/test_foo.py pass", state_path=state_file)
 
-        result2 = check_and_record(
-            "Make assays/test_foo.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result2 is not None  # second dispatch blocked
+        result2 = check_duplicate("Make assays/test_foo.py pass", window=300, state_path=state_file)
+        assert result2 is not None
 
     def test_test_dedup_allows_after_window(self, tmp_path):
         """Same prompt allowed after the dedup window expires."""
         import json
 
-        from mtor.dedup import check_and_record
+        from mtor.dedup import check_duplicate, record_dispatch
 
         state_file = tmp_path / "dedup.json"
-        # First dispatch
-        result1 = check_and_record(
-            "Make assays/test_bar.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result1 is None
+        record_dispatch("Make assays/test_bar.py pass", state_path=state_file)
 
         # Manually backdate the entry to simulate window expiry
         state = json.loads(state_file.read_text())
@@ -2218,60 +2204,32 @@ class TestDedup:
             state[k] = state[k] - 600  # 10 minutes ago
         state_file.write_text(json.dumps(state))
 
-        result2 = check_and_record(
-            "Make assays/test_bar.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result2 is None  # allowed — window expired
+        result = check_duplicate("Make assays/test_bar.py pass", window=300, state_path=state_file)
+        assert result is None
 
     def test_test_dedup_different_prompts_pass(self, tmp_path):
         """Different prompts are both allowed regardless of window."""
-        from mtor.dedup import check_and_record
+        from mtor.dedup import check_duplicate, record_dispatch
 
         state_file = tmp_path / "dedup.json"
-        result1 = check_and_record(
-            "Make assays/test_alpha.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result1 is None
+        record_dispatch("Make assays/test_alpha.py pass", state_path=state_file)
 
-        result2 = check_and_record(
-            "Make assays/test_beta.py pass",
-            window=300,
-            state_path=state_file,
-        )
-        assert result2 is None  # different prompt → allowed
+        result = check_duplicate("Make assays/test_beta.py pass", window=300, state_path=state_file)
+        assert result is None
 
     def test_dedup_spec_path_identity(self, tmp_path):
         """Same prompt with different spec_path → different identity (both allowed)."""
-        from mtor.dedup import check_and_record
-
-        state_file = tmp_path / "dedup.json"
         from pathlib import Path
 
-        result1 = check_and_record(
-            "Implement feature X",
-            spec_path=Path("/plans/spec-a.md"),
-            window=300,
-            state_path=state_file,
-        )
-        assert result1 is None
+        from mtor.dedup import check_duplicate, record_dispatch
 
-        result2 = check_and_record(
-            "Implement feature X",
-            spec_path=Path("/plans/spec-b.md"),
-            window=300,
-            state_path=state_file,
-        )
-        assert result2 is None  # different spec_path → different identity
+        state_file = tmp_path / "dedup.json"
+        record_dispatch("Implement feature X", spec_path=Path("/plans/spec-a.md"), state_path=state_file)
+
+        result2 = check_duplicate("Implement feature X", spec_path=Path("/plans/spec-b.md"), window=300, state_path=state_file)
+        assert result2 is None
 
         # But same prompt + same spec_path → blocked
-        result3 = check_and_record(
-            "Implement feature X",
-            spec_path=Path("/plans/spec-a.md"),
-            window=300,
-            state_path=state_file,
-        )
+        record_dispatch("Implement feature X", spec_path=Path("/plans/spec-b.md"), state_path=state_file)
+        result3 = check_duplicate("Implement feature X", spec_path=Path("/plans/spec-a.md"), window=300, state_path=state_file)
         assert result3 is not None
