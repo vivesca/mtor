@@ -61,3 +61,61 @@ class TestWorktreeFallback:
                 _run(translate("Inspect the repository", "zhipu", "scout", str(tmp_path)))
 
         create_worktree.assert_not_called()
+
+
+class TestBranchNameDerivation:
+    """Branch names must be unique per workflow, not per wall-clock second."""
+
+    def test_branch_name_uses_workflow_id_suffix_not_clock(self):
+        from mtor.worker.translocase import _derive_branch_name
+
+        a = _derive_branch_name("workflow-alpha-2026", "")
+        b = _derive_branch_name("workflow-beta-2026", "")
+        assert a != b
+        assert a.startswith("ribosome-")
+        assert b.startswith("ribosome-")
+        assert "alpha" in a
+        assert "beta" in b
+
+    def test_branch_name_prefixes_non_ribosome_workflow_id(self):
+        from mtor.worker.translocase import _derive_branch_name
+
+        branch = _derive_branch_name("some-custom-workflow-id", "")
+        assert branch.startswith("ribosome-")
+
+    def test_branch_name_caps_long_workflow_ids(self):
+        from mtor.worker.translocase import _derive_branch_name
+
+        long_id = "a" * 200
+        branch = _derive_branch_name(long_id, "")
+        assert len(branch) <= 80
+        assert branch.startswith("ribosome-")
+
+    def test_branch_name_falls_back_to_task_id_without_workflow_id(self):
+        from mtor.worker.translocase import _derive_branch_name
+
+        branch = _derive_branch_name("", "abc123")
+        assert branch == "ribosome-abc123"
+
+    def test_translate_build_path_uses_branch_name_helper(self, tmp_path):
+        from mtor.worker.translocase import translate
+
+        mock_info = MagicMock()
+        mock_info.workflow_id = "wf-unique-branch-test"
+
+        captured_branch: list[str] = []
+
+        def _capture_and_fail(_repo_root: str, branch: str):
+            captured_branch.append(branch)
+            raise RuntimeError("branch-captured")
+
+        with patch("mtor.worker.translocase._subprocess.run", side_effect=_mock_pre_worktree_run), \
+             patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
+             patch("mtor.worker.translocase.create_task_trace", return_value=None), \
+             patch("mtor.worker.translocase._create_worktree", side_effect=_capture_and_fail):
+            with pytest.raises(RuntimeError, match="Build tasks must not run on main"):
+                _run(translate("Test task", "zhipu", "build", str(tmp_path)))
+
+        assert captured_branch
+        assert captured_branch[0].startswith("ribosome-")
+        assert "wf-unique-branch-test" in captured_branch[0]

@@ -62,6 +62,29 @@ def _mode_allows_auto_commit(mode: str) -> bool:
     return mode not in {"scout", "research"}
 
 
+_MAX_BRANCH_LEN = 80
+_BRANCH_PREFIX = "ribosome-"
+
+
+def _derive_branch_name(workflow_id: str, tid_str: str) -> str:
+    """Derive a unique branch name from workflow identity or fallback sources.
+
+    When *workflow_id* is present, the branch is derived from its distinctive
+    suffix so two workflows created in the same second never collide.  Falls
+    back to *tid_str* (task ID from the prompt) and finally to a wall-clock
+    timestamp.
+    """
+    if workflow_id:
+        raw = f"{_BRANCH_PREFIX}{workflow_id}"
+        if len(raw) > _MAX_BRANCH_LEN:
+            keep = _MAX_BRANCH_LEN - len(_BRANCH_PREFIX)
+            raw = f"{_BRANCH_PREFIX}{workflow_id[-keep:]}"
+        return raw
+    if tid_str:
+        return f"{_BRANCH_PREFIX}{tid_str}"
+    return f"{_BRANCH_PREFIX}{_time.strftime('%H%M%S')}"
+
+
 # Rate-limit detection: patterns that signal 429/quota errors in provider output
 _RATE_LIMIT_PATTERNS = _re.compile(
     r"429\b"
@@ -613,7 +636,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     else:
         repo_root = _detect_repo(task, str(Path.home() / "germline"))
 
-    branch_name = f"ribosome-{tid_str or _time.strftime('%H%M%S')}"
+    branch_name = _derive_branch_name(workflow_id, tid_str)
     worktree_path = None
 
     # Scout mode: no worktree, run in main repo (read-only)
