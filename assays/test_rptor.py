@@ -720,6 +720,25 @@ def test_spec_injection_strips_cd_quoted_prefix(tmp_path):
     assert "Run: cd " not in result
 
 
+def test_spec_injection_strips_cd_tilde_prefix_from_abs_repo(tmp_path):
+    """cd ~/code/mtor && prefix is stripped when repo is absolute /home/vivesca/... form."""
+    spec_file = tmp_path / "cd-abs-repo-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: /home/vivesca/code/mtor\n"
+        "tests:\n  run: cd ~/code/mtor && uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: uv run pytest assays/test_rptor.py -q" in result
+    assert "cd ~/code/mtor" not in result
+
+
 def test_spec_injection_preserves_cd_when_repo_mismatched(tmp_path):
     """cd prefix is NOT stripped when repo doesn't match tests.run path."""
     spec_file = tmp_path / "cd-mismatch-spec.md"

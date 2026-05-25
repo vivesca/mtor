@@ -865,6 +865,14 @@ def _strip_cd_prefix(run_cmd: str, repo: str) -> str:
         candidates.add(f"'{r}'")
         candidates.add(f'"{r}"')
 
+    # Derive the tilde form from the absolute form directly, in case
+    # _normalize_spec_repo_for_worker couldn't (e.g. local HOME differs).
+    if abs_form.startswith("/home/vivesca/"):
+        direct_tilde = "~" + abs_form[len("/home/vivesca"):]
+        candidates.add(direct_tilde)
+        candidates.add(f"'{direct_tilde}'")
+        candidates.add(f'"{direct_tilde}"')
+
     for r in sorted(candidates, key=len, reverse=True):
         for sep in ("&&", ";"):
             for gap in (f" {sep} ", f"{sep} "):
@@ -914,7 +922,7 @@ def _inject_spec_constraints(
         parts.append(
             f"Canonical repository: {repo}. The worker runs in an "
             f"isolated git worktree. Use the current working directory "
-            f"— do not cd to {repo}."
+            f"-- do not cd to {repo}."
         )
 
     # Test run command and function list
