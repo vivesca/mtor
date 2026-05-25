@@ -637,3 +637,78 @@ def test_spec_injection_no_spec_path_unchanged():
         prompt_for_cmd="Original prompt.",
     )
     assert result == "Original prompt."
+
+
+# ---------------------------------------------------------------------------
+# CLI: dispatch-all
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_all_dry_run_reports_skipped_statuses(tmp_path):
+    """dispatch-all --dry-run reports skipped entries for done, stale, dispatched, and audit-not-outstanding specs."""
+    (tmp_path / "done-spec.md").write_text(
+        "---\nstatus: done\ncompleted_at: 2026-05-15T00:00:00+00:00\n---\nDone.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "stale-spec.md").write_text(
+        "---\nstatus: stale\naudit_reason: abandoned\n---\nStale.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "dispatched-spec.md").write_text(
+        "---\nstatus: dispatched\n---\nDispatched.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "audit-done.md").write_text(
+        "---\nstatus: ready\naudit_status: audited_present\ntests:\n  run: echo ok\n---\nAudited.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "valid-ready.md").write_text(
+        "---\nstatus: ready\ntests:\n  run: echo ok\n---\nDo something.\n",
+        encoding="utf-8",
+    )
+
+    exit_code, data = invoke(["dispatch-all", "--dry-run", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    skipped = data["result"]["skipped"]
+    skipped_map = {s["name"]: s["reason"] for s in skipped}
+
+    assert skipped_map["done-spec"] == "status:done"
+    assert skipped_map["stale-spec"] == "status:stale"
+    assert skipped_map["dispatched-spec"] == "status:dispatched"
+    assert skipped_map["audit-done"] == "audit:audited_present"
+
+    dispatched_names = [d["name"] for d in data["result"]["dispatched"]]
+    assert "valid-ready" in dispatched_names
+
+
+def test_dispatch_all_dry_run_limit_caps_candidates(tmp_path):
+    """dispatch-all --dry-run --limit 1 returns exactly one would_dispatch when multiple valid candidates exist."""
+    for i in range(3):
+        (tmp_path / f"spec-{i}.md").write_text(
+            f"---\nstatus: ready\ntests:\n  run: echo ok\n---\nTask {i}.\n",
+            encoding="utf-8",
+        )
+
+    exit_code, data = invoke(["dispatch-all", "--dry-run", "--limit", "1", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    assert len(data["result"]["dispatched"]) == 1
+    assert data["result"]["dispatched"][0]["status"] == "would_dispatch"
+
+
+def test_dispatch_all_skips_invalid_ready_specs(tmp_path):
+    """dispatch-all skips ready specs missing tests field with an invalid: reason."""
+    (tmp_path / "no-tests.md").write_text(
+        "---\nstatus: ready\n---\nNo tests field.\n",
+        encoding="utf-8",
+    )
+
+    exit_code, data = invoke(["dispatch-all", "--dry-run", "--dir", str(tmp_path)])
+
+    assert exit_code == 0
+    skipped = data["result"]["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["name"] == "no-tests"
+    assert skipped[0]["reason"].startswith("invalid:")
+    assert data["result"]["dispatched"] == []

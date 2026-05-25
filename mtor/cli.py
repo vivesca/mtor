@@ -2936,17 +2936,80 @@ def autophagy(
     )
 
 
+_NON_DISPATCHABLE_AUDIT_STATUSES = frozenset({
+    "already_satisfied",
+    "not_outstanding_ready",
+    "status_normalized_done",
+    "audited_present",
+})
+
+
+def _select_dispatch_candidates(
+    resolved: list[dict[str, Any]],
+    repo: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Filter resolved specs into dispatch candidates and skipped entries.
+
+    Skipped reasons:
+      status:<status>  — spec is not ready or has unmet dependencies
+      audit:<value>    — audit_status indicates spec is not outstanding
+      invalid:<msg>    — dispatch validation failed (e.g. missing tests)
+
+    Returns (candidates, skipped) where each skipped item has
+    {name, path, reason}.
+    """
+    from mtor.dispatch import validate_spec as _validate_spec
+
+    skipped: list[dict[str, str]] = []
+    candidates: list[dict[str, Any]] = []
+
+    for spec in resolved:
+        if not spec.get("dispatchable"):
+            status = spec.get("status", "ready")
+            reason = "blocked" if status == "ready" else f"status:{status}"
+            skipped.append({
+                "name": spec["name"],
+                "path": spec["path"],
+                "reason": reason,
+            })
+            continue
+
+        audit_status = spec.get("audit_status", "")
+        if audit_status in _NON_DISPATCHABLE_AUDIT_STATUSES:
+            skipped.append({
+                "name": spec["name"],
+                "path": spec["path"],
+                "reason": f"audit:{audit_status}",
+            })
+            continue
+
+        spec_path = Path(spec["path"])
+        spec_errors = _validate_spec(spec_path, repo)
+        if spec_errors:
+            skipped.append({
+                "name": spec["name"],
+                "path": spec["path"],
+                "reason": "invalid:" + "; ".join(spec_errors),
+            })
+            continue
+
+        candidates.append(spec)
+
+    return candidates, skipped
+
+
 @app.command(name="dispatch-all")
 def dispatch_all(
     *,
     dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
     dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
+    limit: Annotated[int, Parameter(name=["--limit"])] = 0,
 ) -> None:
     """Dispatch all ready (dispatchable) specs from a plan directory."""
     import io as _io
 
-    from mtor.dispatch import _inject_spec_constraints, validate_spec as _validate_spec
+    from mtor.dispatch import _inject_spec_constraints
 
     cmd = "mtor dispatch-all"
     directory = dir.expanduser()
@@ -2954,7 +3017,7 @@ def dispatch_all(
     specs = scan_specs(directory)
 
     if not specs:
-        _ok(cmd, {"dispatched": [], "count": 0, "directory": str(directory)}, version=VERSION)
+        _ok(cmd, {"dispatched": [], "count": 0, "skipped": [], "directory": str(directory)}, version=VERSION)
         return
 
     try:
@@ -2971,12 +3034,17 @@ def dispatch_all(
             )
         )
 
-    dispatchable = topological_sort([s for s in resolved if s.get("dispatchable")])
+    _repo = Path.home() / "code" / "mtor"
+    candidates, skipped = _select_dispatch_candidates(resolved, _repo)
+    candidates = topological_sort(candidates)
 
-    if not dispatchable:
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    if not candidates:
         _ok(
             cmd,
-            {"dispatched": [], "count": 0, "message": "No dispatchable specs", "directory": str(directory)},
+            {"dispatched": [], "count": 0, "skipped": skipped, "message": "No dispatchable specs", "directory": str(directory)},
             version=VERSION,
         )
         return
@@ -2984,19 +3052,9 @@ def dispatch_all(
     dispatched: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
-    for spec in dispatchable:
+    for spec in candidates:
         base_prompt = spec.get("body", "") or spec.get("name", "")
         spec_path = Path(spec["path"])
-
-        # Pre-dispatch validation — tests field must be populated
-        _repo = Path.home() / "code" / "mtor"
-        spec_errors = _validate_spec(spec_path, _repo)
-        if spec_errors:
-            errors.append({
-                "name": spec["name"],
-                "error": "Spec validation failed: " + "; ".join(spec_errors),
-            })
-            continue
 
         prompt = _inject_spec_constraints(
             base_prompt,
@@ -3042,6 +3100,7 @@ def dispatch_all(
         "dispatched": dispatched,
         "count": len(dispatched),
         "errors": errors,
+        "skipped": skipped,
         "directory": str(directory),
     }
     if dry_run:
