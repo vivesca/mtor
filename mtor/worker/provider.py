@@ -26,13 +26,11 @@ RETIRED_PROVIDERS: dict[str, str] = {
 }
 
 # Priority order for provider selection (highest first).
-PROVIDER_PRIORITY = ["zhipu", "gemini"]
+PROVIDER_PRIORITY = ["zhipu"]
 
 # Per-provider concurrency limits (max simultaneous tasks).
 PROVIDER_LIMITS: dict[str, int] = {
     "zhipu": 3,    # Max tier
-    "gemini": 1,   # Intermittent key rejection — rely on ribosome retry
-    "codex": 2,
 }
 
 # Active task count per provider — incremented in translate(), decremented on completion.

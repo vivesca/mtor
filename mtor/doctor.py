@@ -23,7 +23,6 @@ HEARTBEAT_STALE_THRESHOLD = 120
 
 PROVIDER_MODELS = {
     "zhipu": "glm-5.1",
-    "gemini": "gemini",
 }
 
 

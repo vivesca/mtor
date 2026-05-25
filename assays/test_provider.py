@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -15,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mtor.worker.provider import (
     EXIT_RATE_LIMITED,
-    HEALTH_FILE,
     PROVIDER_PRIORITY,
     load_health,
     parse_rate_limit_window,
@@ -41,56 +39,49 @@ def _health_file(tmp_path: Path, content: dict) -> Path:
 # ---------------------------------------------------------------------------
 
 def test_select_closed_first():
-    """Closed provider is selected before open ones."""
+    """Closed provider is selected."""
     health = {
-        "zhipu": {"state": "open", "cooldown_until": time.time() + 3600},
-        "gemini": {"state": "closed"},
+        "zhipu": {"state": "closed"},
     }
     result = select_provider(health)
-    assert result == "gemini"
+    assert result == "zhipu"
 
 
 def test_select_skips_open():
-    """Open provider with active cooldown is skipped."""
+    """Open provider with active cooldown is returned as fallback."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() + 3600},
-        "gemini": {"state": "closed"},
     }
     result = select_provider(health)
-    assert result == "gemini"
+    assert result == "zhipu"
 
 
 def test_select_half_open_on_cooldown_expiry():
     """Open provider with expired cooldown is tried in half_open state."""
     health = {
         "zhipu": {"state": "open", "cooldown_until": time.time() - 1},
-        "gemini": {"state": "open", "cooldown_until": time.time() + 3600},
     }
     result = select_provider(health)
-    # zhipu's cooldown has expired — should be selected (half_open)
     assert result == "zhipu"
 
 
 def test_select_all_open_picks_earliest_cooldown():
-    """When all providers are open and in cooldown, pick the one with earliest cooldown."""
+    """When the only provider is open and in cooldown, it is returned as fallback."""
     now = time.time()
     health = {
         "zhipu": {"state": "open", "cooldown_until": now + 300},
-        "gemini": {"state": "open", "cooldown_until": now + 60},
     }
     result = select_provider(health)
-    assert result == "gemini"
+    assert result == "zhipu"
 
 
 def test_select_all_open_half_open_wins():
-    """half_open provider is selected over open providers."""
-    now = time.time()
+    """half_open provider is selected."""
     health = {
-        "zhipu": {"state": "open", "cooldown_until": now + 3600},
-        "gemini": {"state": "half_open", "cooldown_until": None},
+        "zhipu": {"state": "half_open", "cooldown_until": None},
     }
     result = select_provider(health)
-    assert result == "gemini"
+    assert result == "zhipu"
 
 
 def test_override_bypasses_routing():
@@ -247,7 +238,7 @@ def test_load_health_corrupt_file_returns_empty(tmp_path, monkeypatch):
 
 def test_provider_priority_exports():
     """PROVIDER_PRIORITY is a list of expected provider names."""
-    assert PROVIDER_PRIORITY == ["zhipu", "gemini"]
+    assert PROVIDER_PRIORITY == ["zhipu"]
 
 
 def test_exit_rate_limited_value():

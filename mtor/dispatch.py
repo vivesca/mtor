@@ -14,9 +14,24 @@ from pathlib import Path
 
 from porin import action as _action
 
-from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST, WORKFLOW_TYPE
+from mtor import (
+    EXPECTED_GERMLINE_REMOTE,
+    EXPECTED_WORKER_BRANCH,
+    TASK_QUEUE,
+    TEMPORAL_HOST,
+    VERSION,
+    WORKER_GERMLINE_DIR,
+    WORKER_HOST,
+    WORKFLOW_TYPE,
+)
 from mtor.client import _get_client
-from mtor.dedup import DEFAULT_STATE_PATH, DEFAULT_WINDOW_S, _load_state, _prune, compute_identity
+from mtor.dedup import (
+    DEFAULT_STATE_PATH,
+    DEFAULT_WINDOW_S,
+    _load_state,
+    _prune,
+    compute_identity,
+)
 from mtor.envelope import _err, _ok
 
 
@@ -25,7 +40,16 @@ from mtor.envelope import _err, _ok
 # ---------------------------------------------------------------------------
 
 RISK_PATTERNS: dict[str, list[str]] = {
-    "high": ["delete", "remove", "drop", "config", "infra", "deploy", "migrate", "rename"],
+    "high": [
+        "delete",
+        "remove",
+        "drop",
+        "config",
+        "infra",
+        "deploy",
+        "migrate",
+        "rename",
+    ],
     "low": ["test", "doc", "readme", "comment", "add test", "write test", "new file"],
 }
 # Default: "medium"
@@ -141,7 +165,9 @@ def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> 
     wid = f"{harness}-{model}-{slug}-{prompt_hash}-{ts}"
     if len(wid) > 80:
         # Truncate slug to fit: harness-model--hash-ts + safety margin
-        overhead = len(harness) + 1 + len(model) + 1 + 1 + len(prompt_hash) + 1 + len(ts)
+        overhead = (
+            len(harness) + 1 + len(model) + 1 + 1 + len(prompt_hash) + 1 + len(ts)
+        )
         max_slug = 80 - overhead
         slug = slug[: max(0, max_slug)].rstrip("-")
         wid = f"{harness}-{model}-{slug}-{prompt_hash}-{ts}"
@@ -149,28 +175,127 @@ def _make_workflow_id(prompt: str, provider: str, harness: str = "ribosome") -> 
     return wid
 
 
-def _check_worker_sha(*, skip: bool = False) -> bool:
+_CHECKOUT_OK: dict = {
+    "ok": True,
+    "branch": "",
+    "origin": "",
+    "dirty": False,
+    "status": "",
+    "detail": "",
+}
+
+
+def _worker_checkout_state() -> dict:
+    """Inspect worker ~/germline checkout hygiene via a single SSH call.
+
+    Returns a dict with keys: ok, branch, origin, dirty, status, detail.
+    """
+    germline_dir = shlex.quote(WORKER_GERMLINE_DIR)
+    remote_cmd = (
+        f"cd {germline_dir} && "
+        "printf 'BRANCH:%s\\n' \"$(git rev-parse --abbrev-ref HEAD)\" && "
+        "printf 'ORIGIN:%s\\n' \"$(git remote get-url origin)\" && "
+        "printf '%s\\n' 'MTOR_STATUS_START' && "
+        "git status --porcelain=v1 -uall"
+    )
+    result = subprocess.run(
+        ["ssh", WORKER_HOST, remote_cmd],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "branch": "",
+            "origin": "",
+            "dirty": False,
+            "status": "",
+            "detail": f"worker checkout unhealthy: SSH check failed: {result.stderr.strip()}",
+        }
+
+    branch = ""
+    origin = ""
+    status_lines: list[str] = []
+    in_status = False
+    for line in result.stdout.split("\n"):
+        if line.startswith("BRANCH:"):
+            branch = line[7:]
+        elif line.startswith("ORIGIN:"):
+            origin = line[7:]
+        elif line == "MTOR_STATUS_START":
+            in_status = True
+        elif in_status and line:
+            status_lines.append(line)
+
+    dirty = bool(status_lines)
+    status = "\n".join(status_lines)
+
+    errors: list[str] = []
+    if branch != EXPECTED_WORKER_BRANCH:
+        errors.append(f"branch is {branch!r}, expected {EXPECTED_WORKER_BRANCH!r}")
+    if origin != EXPECTED_GERMLINE_REMOTE:
+        errors.append(f"origin is {origin!r}, expected {EXPECTED_GERMLINE_REMOTE!r}")
+    if dirty:
+        errors.append(f"dirty/untracked files: {status}")
+
+    ok = not errors
+    detail = "worker checkout unhealthy: " + "; ".join(errors) if errors else ""
+
+    return {
+        "ok": ok,
+        "branch": branch,
+        "origin": origin,
+        "dirty": dirty,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def _check_worker_checkout() -> None:
+    """Raise RuntimeError if worker ~/germline checkout is unhealthy."""
+    state = _worker_checkout_state()
+    if not state["ok"]:
+        raise RuntimeError(state["detail"])
+
+
+def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     """Compare local HEAD with worker HEAD. Returns True if in sync.
 
     Raises RuntimeError on failures.  If out of sync and skip=False,
     auto-deploys (push + merge + restart) before returning True.
+
+    When *repo* is provided, the local SHA lookup uses ``git -C <repo>``
+    instead of the caller's cwd.  This matters for ``--spec`` dispatch where
+    the spec frontmatter declares the target repo.
     """
     if skip:
         return True
 
+    local_cmd = ["git"]
+    if repo:
+        local_cmd += ["-C", str(Path(repo).expanduser())]
+    local_cmd += ["rev-parse", "HEAD"]
+
     local = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=5,
+        local_cmd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     if local.returncode != 0:
         raise RuntimeError(f"local git HEAD lookup failed: {local.stderr.strip()}")
 
     remote = subprocess.run(
         ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if remote.returncode != 0:
         raise RuntimeError(f"worker git HEAD lookup failed: {remote.stderr.strip()}")
+
+    _check_worker_checkout()
 
     if local.stdout.strip() == remote.stdout.strip():
         return True
@@ -182,29 +307,45 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     germline_dir = str(Path.home() / "germline")
     deploy_branch = f"deploy-sync-{os.getpid()}-{int(time.time() * 1000)}"
     push = subprocess.run(
-        ["git", "-C", germline_dir, "push",
-         WORKER_HOST + ":~/germline", f"main:{deploy_branch}", "--force"],
-        capture_output=True, text=True, timeout=120,
+        [
+            "git",
+            "-C",
+            germline_dir,
+            "push",
+            WORKER_HOST + ":~/germline",
+            f"main:{deploy_branch}",
+            "--force",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
     quoted_branch = shlex.quote(deploy_branch)
     merge = subprocess.run(
-        ["ssh", WORKER_HOST,
-         (
-             "cd ~/germline && "
-             f"git merge {quoted_branch} --no-edit && "
-             f"git branch -d {quoted_branch}"
-         )],
-        capture_output=True, text=True, timeout=30,
+        [
+            "ssh",
+            WORKER_HOST,
+            (
+                "cd ~/germline && "
+                f"git merge {quoted_branch} --no-edit && "
+                f"git branch -d {quoted_branch}"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if merge.returncode != 0:
         raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
 
     restart = subprocess.run(
         ["ssh", WORKER_HOST, "sudo systemctl restart temporal-worker"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if restart.returncode != 0:
         raise RuntimeError(f"restart failed: {restart.stderr.strip()}")
@@ -213,7 +354,7 @@ def _check_worker_sha(*, skip: bool = False) -> bool:
     return True
 
 
-def _worker_sha_plan(*, skip: bool = False) -> dict:
+def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
     """Return worker SHA state without deploying or restarting anything."""
     if skip:
         return {
@@ -223,27 +364,37 @@ def _worker_sha_plan(*, skip: bool = False) -> dict:
             "local_sha": "",
             "worker_sha": "",
             "error": "",
+            "worker_checkout": {**_CHECKOUT_OK},
         }
 
-    state = {
+    state: dict = {
         "skipped": False,
         "in_sync": False,
         "auto_deploy_would_occur": False,
         "local_sha": "",
         "worker_sha": "",
         "error": "",
+        "worker_checkout": {**_CHECKOUT_OK},
     }
     try:
+        local_cmd = ["git"]
+        if repo:
+            local_cmd += ["-C", str(Path(repo).expanduser())]
+        local_cmd += ["rev-parse", "HEAD"]
         local = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            local_cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if local.returncode != 0:
             state["error"] = f"local git HEAD lookup failed: {local.stderr.strip()}"
             return state
         remote = subprocess.run(
             ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if remote.returncode != 0:
             state["error"] = f"worker git HEAD lookup failed: {remote.stderr.strip()}"
@@ -252,6 +403,11 @@ def _worker_sha_plan(*, skip: bool = False) -> dict:
         state["worker_sha"] = remote.stdout.strip()
         state["in_sync"] = state["local_sha"] == state["worker_sha"]
         state["auto_deploy_would_occur"] = not state["in_sync"]
+
+        checkout = _worker_checkout_state()
+        state["worker_checkout"] = checkout
+        if not checkout["ok"]:
+            state["error"] = checkout["detail"]
     except (OSError, subprocess.TimeoutExpired) as exc:
         state["error"] = str(exc)
     return state
@@ -268,7 +424,9 @@ def _dedup_plan(prompt: str, spec_path: Path | None = None) -> dict:
         "key": key,
         "blocked": blocked,
         "window_seconds": DEFAULT_WINDOW_S,
-        "seconds_since_last": round(now - last_seen, 3) if last_seen is not None else None,
+        "seconds_since_last": round(now - last_seen, 3)
+        if last_seen is not None
+        else None,
     }
 
 
@@ -340,7 +498,9 @@ def _dispatch_explanation(
 
     resolved_provider = provider or _resolve_default_provider(spec_mode)
     risk = classify_risk(full_prompt)
-    workflow_id = _make_workflow_id(full_prompt, resolved_provider, harness=harness or "ribosome")
+    workflow_id = _make_workflow_id(
+        full_prompt, resolved_provider, harness=harness or "ribosome"
+    )
     prompt_hash = hashlib.sha256(full_prompt.encode()).hexdigest()[:16]
 
     spec_data = {}
@@ -353,10 +513,19 @@ def _dispatch_explanation(
         validation_errors = validate_spec(spec_path, repo)
 
     dedup = _dedup_plan(prompt, spec_path=spec_path) if prompt.strip() else {}
+    spec_repo = spec_data.get("repo") if spec_data else None
     worker_sha = (
-        {"skipped": True, "in_sync": True, "auto_deploy_would_occur": False, "local_sha": "", "worker_sha": "", "error": ""}
+        {
+            "skipped": True,
+            "in_sync": True,
+            "auto_deploy_would_occur": False,
+            "local_sha": "",
+            "worker_sha": "",
+            "error": "",
+            "worker_checkout": {**_CHECKOUT_OK},
+        }
         if spec_mode in ("scout", "research")
-        else _worker_sha_plan(skip=skip_sha_check)
+        else _worker_sha_plan(skip=skip_sha_check, repo=spec_repo)
     )
     blocked_reasons = []
     if frozen:
@@ -412,8 +581,12 @@ def _dispatch_explanation(
         ),
         "chain": chain or [],
         "next_actions": [
-            _action(f"mtor status {workflow_id}", "Poll workflow status after real dispatch"),
-            _action(f"mtor --spec {spec_path}", "Dispatch this spec") if spec_path else _action("mtor <prompt>", "Dispatch this prompt"),
+            _action(
+                f"mtor status {workflow_id}", "Poll workflow status after real dispatch"
+            ),
+            _action(f"mtor --spec {spec_path}", "Dispatch this spec")
+            if spec_path
+            else _action("mtor <prompt>", "Dispatch this prompt"),
         ],
     }
 
@@ -445,6 +618,7 @@ def _dispatch_prompt(
     timeout: int = 300,
     spec_path: Path | None = None,
     harness: str = "",
+    repo: str | None = None,
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -454,7 +628,9 @@ def _dispatch_prompt(
     if prompt_path is not None and prompt_path.is_file():
         prompt = prompt_path.read_text(encoding="utf-8").strip()
         # Strip YAML frontmatter (--- ... ---) — confuses GLM into treating spec as document
-        prompt = re.sub(r"\A---\n.*?\n---\n*", "", prompt, count=1, flags=re.DOTALL).strip()
+        prompt = re.sub(
+            r"\A---\n.*?\n---\n*", "", prompt, count=1, flags=re.DOTALL
+        ).strip()
 
     # Inject scope/tests/exclude constraints from spec frontmatter
     if spec_path is not None:
@@ -501,7 +677,7 @@ def _dispatch_prompt(
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter
     if spec_mode not in ("scout", "research"):
-        _check_worker_sha(skip=skip_sha_check)
+        _check_worker_sha(skip=skip_sha_check, repo=repo)
 
     # Mode-specific prompt suffixes
     if spec_mode == "scout":
@@ -580,12 +756,20 @@ def _dispatch_prompt(
         )
 
         search_attrs = [
-            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_provider"), resolved_provider),
+            SearchAttributePair(
+                SearchAttributeKey.for_keyword("mtor_provider"), resolved_provider
+            ),
             SearchAttributePair(SearchAttributeKey.for_keyword("mtor_mode"), spec_mode),
-            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_risk"), classify_risk(full_prompt)),
+            SearchAttributePair(
+                SearchAttributeKey.for_keyword("mtor_risk"), classify_risk(full_prompt)
+            ),
         ]
         if spec_path:
-            search_attrs.append(SearchAttributePair(SearchAttributeKey.for_keyword("mtor_spec"), str(spec_path)))
+            search_attrs.append(
+                SearchAttributePair(
+                    SearchAttributeKey.for_keyword("mtor_spec"), str(spec_path)
+                )
+            )
 
         async def _start():
             handle = await client.start_workflow(
@@ -605,6 +789,7 @@ def _dispatch_prompt(
         if spec_path is not None:
             try:
                 from mtor.spec import update_spec_status
+
                 update_spec_status(spec_path, "dispatched", workflow_id=started_id)
             except Exception as exc:
                 print(f"[spec] warning: {exc}", file=sys.stderr)
@@ -633,10 +818,13 @@ def _dispatch_prompt(
         ]
         if spec_mode == "experiment":
             next_actions[0] = _action(
-                f"mtor status {started_id}", "Experiment mode — will NOT auto-merge to main"
+                f"mtor status {started_id}",
+                "Experiment mode — will NOT auto-merge to main",
             )
         if spec_mode == "scout":
-            next_actions[1] = _action(f"mtor logs {started_id}", "Scout mode — read-only analysis, no merge")
+            next_actions[1] = _action(
+                f"mtor logs {started_id}", "Scout mode — read-only analysis, no merge"
+            )
 
         if wait:
             return started_id
@@ -734,7 +922,9 @@ def validate_spec(spec_path: Path, repo: Path) -> list[str]:
         errors.append("Spec is missing 'tests' field")
         return errors
     if isinstance(tests, dict) and not tests.get("run") and not tests.get("functions"):
-        errors.append("Spec 'tests' field is not populated — provide 'run' command or 'functions' list")
+        errors.append(
+            "Spec 'tests' field is not populated — provide 'run' command or 'functions' list"
+        )
         return errors
 
     # Verify test files referenced in tests.run exist
@@ -759,9 +949,7 @@ def validate_receptor_spec(spec_path: Path) -> list[str]:
         return ["Receptor route requires scope under membrane/receptors/"]
 
     receptor_scopes = [
-        str(item)
-        for item in scope
-        if str(item).startswith("membrane/receptors/")
+        str(item) for item in scope if str(item).startswith("membrane/receptors/")
     ]
     if not receptor_scopes:
         return ["Receptor route scope must include membrane/receptors/<name>/..."]

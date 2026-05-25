@@ -46,6 +46,49 @@ def _prune(state: dict[str, float], now: float, window: int) -> dict[str, float]
     return {k: v for k, v in state.items() if v > cutoff}
 
 
+def check_duplicate(
+    prompt: str,
+    spec_path: Path | None = None,
+    window: int = DEFAULT_WINDOW_S,
+    state_path: Path | None = None,
+) -> str | None:
+    """Check if *prompt* was recently dispatched **without** recording.
+
+    Returns the identity key when the dispatch should be blocked (duplicate
+    within the window).  Returns ``None`` when the dispatch is allowed.
+    Does **not** write any state.
+    """
+    path = state_path or DEFAULT_STATE_PATH
+    key = compute_identity(prompt, spec_path)
+    now = time.time()
+
+    state = _prune(_load_state(path), now, window)
+
+    if key in state and (now - state[key]) < window:
+        return key  # blocked — duplicate
+
+    return None  # allowed
+
+
+def record_dispatch(
+    prompt: str,
+    spec_path: Path | None = None,
+    state_path: Path | None = None,
+) -> None:
+    """Record that a dispatch has been initiated (write-only).
+
+    Call this only after workflow creation succeeds so that failed preflight
+    attempts do not poison the dedup window.
+    """
+    path = state_path or DEFAULT_STATE_PATH
+    key = compute_identity(prompt, spec_path)
+    now = time.time()
+
+    state = _prune(_load_state(path), now, DEFAULT_WINDOW_S)
+    state[key] = now
+    _save_state(path, state)
+
+
 def check_and_record(
     prompt: str,
     spec_path: Path | None = None,
@@ -58,18 +101,11 @@ def check_and_record(
     Returns the identity key when the dispatch should be blocked (duplicate
     within the window).
 
-    The *state_path* parameter defaults to ``DEFAULT_STATE_PATH`` but can be
-    overridden for testing.
+    Backward-compatible wrapper around :func:`check_duplicate` +
+    :func:`record_dispatch`.
     """
-    path = state_path or DEFAULT_STATE_PATH
-    key = compute_identity(prompt, spec_path)
-    now = time.time()
-
-    state = _prune(_load_state(path), now, window)
-
-    if key in state and (now - state[key]) < window:
-        return key  # blocked — duplicate
-
-    state[key] = now
-    _save_state(path, state)
-    return None  # allowed
+    blocked = check_duplicate(prompt, spec_path=spec_path, window=window, state_path=state_path)
+    if blocked is not None:
+        return blocked
+    record_dispatch(prompt, spec_path=spec_path, state_path=state_path)
+    return None
