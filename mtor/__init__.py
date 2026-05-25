@@ -20,6 +20,18 @@ OUTPUTS_DIR = os.environ.get(
 WORKER_LOG_DIR = os.environ.get("MTOR_WORKER_LOG_DIR", "/home/vivesca/code/mtor/logs")
 LOG_TAIL_LINES = 30
 
+# Worker checkout hygiene — used by SHA gate to ensure ~/germline is on
+# the right branch, pointing at the right remote, and has a clean tree.
+EXPECTED_WORKER_BRANCH = os.environ.get("MTOR_EXPECTED_WORKER_BRANCH", "main")
+EXPECTED_GERMLINE_REMOTE = os.environ.get(
+    "MTOR_EXPECTED_GERMLINE_REMOTE",
+    "https://github.com/vivesca/germline.git",
+)
+WORKER_GERMLINE_DIR = os.environ.get(
+    "MTOR_WORKER_GERMLINE_DIR", "/home/vivesca/germline"
+)
+
+
 # Optional coaching file path (string, not pathlib — Temporal sandbox restriction).
 # Resolution order:
 #   1. MTOR_COACHING_PATH env var (explicit override, e.g. for tests)
@@ -37,6 +49,8 @@ def _resolve_coaching_path() -> str | None:
 
 
 COACHING_PATH: str | None = _resolve_coaching_path()
-COACHING_MAX_KB = 10  # Hard cap — coaching + spec must fit under 15KB or GLM exits immediately
+COACHING_MAX_KB = (
+    10  # Hard cap — coaching + spec must fit under 15KB or GLM exits immediately
+)
 
 __version__ = VERSION

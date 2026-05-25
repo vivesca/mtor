@@ -102,7 +102,10 @@ class TestCheckWorkerSha:
         """When local and remote SHA match, returns True without deploying."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp:
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="abc123def456\n"),
                 MagicMock(returncode=0, stdout="abc123def456\n"),
@@ -115,9 +118,11 @@ class TestCheckWorkerSha:
         """SHA mismatch triggers push + merge + restart, then returns True."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
-            "mtor.dispatch.time"
-        ) as mock_time:
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time") as mock_time,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
@@ -166,8 +171,10 @@ class TestCheckWorkerSha:
         """If git push fails during auto-deploy, raises RuntimeError."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
-            "mtor.dispatch.time"
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -181,8 +188,10 @@ class TestCheckWorkerSha:
         """If worker restart fails during auto-deploy, raises RuntimeError."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
-            "mtor.dispatch.time"
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -198,9 +207,12 @@ class TestCheckWorkerSha:
         """Auto-deploy pushes to a unique deploy-sync branch to avoid ref races."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
-            "mtor.dispatch.time"
-        ) as mock_time, patch("mtor.dispatch.os.getpid", return_value=12345):
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time") as mock_time,
+            patch("mtor.dispatch.os.getpid", return_value=12345),
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
             mock_time.time.return_value = 42
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -226,8 +238,10 @@ class TestCheckWorkerSha:
         """If worker merge fails during auto-deploy, raises RuntimeError."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp, patch(
-            "mtor.dispatch.time"
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -242,7 +256,10 @@ class TestCheckWorkerSha:
         """When repo is provided, local SHA lookup uses git -C <repo>."""
         from mtor.dispatch import _check_worker_sha
 
-        with patch("mtor.dispatch.subprocess") as mock_sp:
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="deadbeef\n"),
                 MagicMock(returncode=0, stdout="deadbeef\n"),
@@ -252,6 +269,26 @@ class TestCheckWorkerSha:
         local_call = mock_sp.run.call_args_list[0]
         cmd = local_call[0][0]
         assert cmd == ["git", "-C", "/path/to/repo", "rev-parse", "HEAD"]
+
+    def test_repo_param_expands_tilde(self):
+        """Tilde in repo path is expanded before passing to git -C."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+            ]
+            result = _check_worker_sha(repo="~/germline")
+        assert result is True
+        local_call = mock_sp.run.call_args_list[0]
+        cmd = local_call[0][0]
+        expanded = cmd[2]
+        assert not expanded.startswith("~"), f"tilde not expanded: {expanded!r}"
+        assert "germline" in expanded
 
 
 # ---------------------------------------------------------------------------
@@ -298,12 +335,13 @@ class TestSkipShaCheckFlag:
         from mtor import dispatch as dispatch_mod
 
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), patch.object(
-            dispatch_mod, "_check_worker_sha", return_value=True
-        ) as mock_sha:
-            exit_code, data = invoke(
-                ["Make assays/test_feature.py pass"]
-            )
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                dispatch_mod, "_check_worker_sha", return_value=True
+            ) as mock_sha,
+        ):
+            exit_code, data = invoke(["Make assays/test_feature.py pass"])
         assert exit_code == 0
         mock_sha.assert_called_once_with(skip=False, repo=None)
 
@@ -312,9 +350,12 @@ class TestSkipShaCheckFlag:
         from mtor import dispatch as dispatch_mod
 
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), patch.object(
-            dispatch_mod, "_check_worker_sha", return_value=True
-        ) as mock_sha:
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                dispatch_mod, "_check_worker_sha", return_value=True
+            ) as mock_sha,
+        ):
             exit_code, data = invoke(
                 ["--skip-sha-check", "Make assays/test_feature.py pass"]
             )
@@ -326,9 +367,12 @@ class TestSkipShaCheckFlag:
         from mtor import dispatch as dispatch_mod
 
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), patch.object(
-            dispatch_mod, "_check_worker_sha", return_value=True
-        ) as mock_sha:
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                dispatch_mod, "_check_worker_sha", return_value=True
+            ) as mock_sha,
+        ):
             invoke(["scout", "--no-wait", "Find all issues"])
         mock_sha.assert_not_called()
 
@@ -337,9 +381,12 @@ class TestSkipShaCheckFlag:
         from mtor import dispatch as dispatch_mod
 
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), patch.object(
-            dispatch_mod, "_check_worker_sha", return_value=True
-        ) as mock_sha:
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                dispatch_mod, "_check_worker_sha", return_value=True
+            ) as mock_sha,
+        ):
             invoke(["research", "--no-wait", "Compare frameworks"])
         mock_sha.assert_not_called()
 
@@ -361,17 +408,239 @@ class TestSkipShaCheckFlag:
         )
 
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), patch.object(
-            dispatch_mod, "_check_worker_sha", return_value=True
-        ) as mock_sha, patch(
-            "mtor.rptor.parse_spec", return_value={"repo": "/custom/repo/path"}
-        ), patch(
-            "mtor.cli.validate_spec", return_value=[]
-        ), patch(
-            "mtor.dispatch.validate_spec", return_value=[]
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                dispatch_mod, "_check_worker_sha", return_value=True
+            ) as mock_sha,
+            patch("mtor.rptor.parse_spec", return_value={"repo": "/custom/repo/path"}),
+            patch("mtor.cli.validate_spec", return_value=[]),
+            patch("mtor.dispatch.validate_spec", return_value=[]),
         ):
-            exit_code, data = invoke(
-                ["--spec", str(spec_file)]
-            )
+            exit_code, data = invoke(["--spec", str(spec_file)])
         assert exit_code == 0
         mock_sha.assert_called_once_with(skip=False, repo="/custom/repo/path")
+
+
+# ---------------------------------------------------------------------------
+# Worker checkout hygiene tests
+# ---------------------------------------------------------------------------
+
+
+def _healthy_checkout():
+    """Return a dict representing a healthy worker checkout."""
+    return {
+        "ok": True,
+        "branch": "main",
+        "origin": "https://github.com/vivesca/germline.git",
+        "dirty": False,
+        "status": "",
+        "detail": "",
+    }
+
+
+class TestWorkerCheckout:
+    """Tests for worker checkout hygiene gate."""
+
+    def test_healthy_checkout_allows_in_sync_worker(self):
+        """When checkout is healthy and SHAs match, _check_worker_sha returns True."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch(
+                "mtor.dispatch._worker_checkout_state", return_value=_healthy_checkout()
+            ),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="abc123\n"),
+                MagicMock(returncode=0, stdout="abc123\n"),
+            ]
+            result = _check_worker_sha()
+        assert result is True
+
+    def test_wrong_branch_raises(self):
+        """Wrong branch on worker raises RuntimeError with 'worker checkout unhealthy'."""
+        from mtor.dispatch import _check_worker_sha
+
+        unhealthy = {
+            "ok": False,
+            "branch": "sortase-cleanup",
+            "origin": "https://github.com/vivesca/germline.git",
+            "dirty": False,
+            "status": "",
+            "detail": (
+                "worker checkout unhealthy: "
+                "branch is 'sortase-cleanup', expected 'main'"
+            ),
+        }
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="abc123\n"),
+                MagicMock(returncode=0, stdout="abc123\n"),
+            ]
+            with pytest.raises(RuntimeError, match="worker checkout unhealthy"):
+                _check_worker_sha()
+
+    def test_wrong_origin_raises(self):
+        """Wrong origin remote raises RuntimeError with 'worker checkout unhealthy'."""
+        from mtor.dispatch import _check_worker_sha
+
+        unhealthy = {
+            "ok": False,
+            "branch": "main",
+            "origin": "https://github.com/vivesca/vivesca.git",
+            "dirty": False,
+            "status": "",
+            "detail": (
+                "worker checkout unhealthy: "
+                "origin is 'https://github.com/vivesca/vivesca.git', "
+                "expected 'https://github.com/vivesca/germline.git'"
+            ),
+        }
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="abc123\n"),
+                MagicMock(returncode=0, stdout="abc123\n"),
+            ]
+            with pytest.raises(RuntimeError, match="worker checkout unhealthy"):
+                _check_worker_sha()
+
+    def test_dirty_untracked_status_raises(self):
+        """Untracked/dirty files on worker raise RuntimeError."""
+        from mtor.dispatch import _check_worker_sha
+
+        unhealthy = {
+            "ok": False,
+            "branch": "main",
+            "origin": "https://github.com/vivesca/germline.git",
+            "dirty": True,
+            "status": "?? stray_file.py\nM  modified.py",
+            "detail": (
+                "worker checkout unhealthy: "
+                "dirty/untracked files: ?? stray_file.py\nM  modified.py"
+            ),
+        }
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="abc123\n"),
+                MagicMock(returncode=0, stdout="abc123\n"),
+            ]
+            with pytest.raises(RuntimeError, match="worker checkout unhealthy"):
+                _check_worker_sha()
+
+    def test_worker_sha_plan_reports_unhealthy_checkout(self):
+        """_worker_sha_plan includes worker_checkout.ok: false and error when unhealthy."""
+        from mtor.dispatch import _worker_sha_plan
+
+        unhealthy = {
+            "ok": False,
+            "branch": "sortase-cleanup",
+            "origin": "https://github.com/vivesca/germline.git",
+            "dirty": False,
+            "status": "",
+            "detail": (
+                "worker checkout unhealthy: "
+                "branch is 'sortase-cleanup', expected 'main'"
+            ),
+        }
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="abc123\n"),
+                MagicMock(returncode=0, stdout="abc123\n"),
+            ]
+            plan = _worker_sha_plan()
+        assert plan["worker_checkout"]["ok"] is False
+        assert plan["error"] == unhealthy["detail"]
+        assert "sortase-cleanup" in plan["worker_checkout"]["branch"]
+
+    def test_worker_sha_plan_repo_param_uses_git_minus_c(self):
+        """_worker_sha_plan(repo=...) uses git -C <repo> for local SHA lookup."""
+        from mtor.dispatch import _worker_sha_plan
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch(
+                "mtor.dispatch._worker_checkout_state",
+                return_value=_healthy_checkout(),
+            ),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+            ]
+            plan = _worker_sha_plan(repo="/custom/repo")
+        local_call = mock_sp.run.call_args_list[0]
+        cmd = local_call[0][0]
+        assert cmd == ["git", "-C", "/custom/repo", "rev-parse", "HEAD"]
+        assert plan["local_sha"] == "deadbeef"
+        assert plan["in_sync"] is True
+
+    def test_worker_sha_plan_expands_tilde_in_repo(self):
+        """_worker_sha_plan(repo='~/germline') passes expanded path to git -C."""
+        from mtor.dispatch import _worker_sha_plan
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch(
+                "mtor.dispatch._worker_checkout_state",
+                return_value=_healthy_checkout(),
+            ),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+                MagicMock(returncode=0, stdout="deadbeef\n"),
+            ]
+            plan = _worker_sha_plan(repo="~/germline")
+        local_call = mock_sp.run.call_args_list[0]
+        cmd = local_call[0][0]
+        expanded = cmd[2]
+        assert not expanded.startswith("~"), f"tilde not expanded: {expanded!r}"
+        assert "germline" in expanded
+        assert plan["local_sha"] == "deadbeef"
+        assert plan["in_sync"] is True
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _worker_checkout_state
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerCheckoutState:
+    """Tests for _worker_checkout_state remote command parsing."""
+
+    def test_healthy_worker_returns_ok_true(self):
+        """Parses healthy subprocess output and returns ok: True."""
+        from mtor.dispatch import _worker_checkout_state
+
+        healthy_output = (
+            "BRANCH:main\n"
+            "ORIGIN:https://github.com/vivesca/germline.git\n"
+            "MTOR_STATUS_START\n"
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = healthy_output
+        mock_result.stderr = ""
+
+        with patch("mtor.dispatch.subprocess") as mock_sp:
+            mock_sp.run.return_value = mock_result
+            state = _worker_checkout_state()
+
+        assert state["ok"] is True
+        assert state["branch"] == "main"
+        assert state["origin"] == "https://github.com/vivesca/germline.git"
+        assert state["dirty"] is False
+        assert state["detail"] == ""
