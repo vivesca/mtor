@@ -847,6 +847,34 @@ def _dispatch_prompt(
         )
 
 
+def _strip_cd_prefix(run_cmd: str, repo: str) -> str:
+    """Strip leading ``cd <repo> && `` or ``cd <repo>; `` from a test run command.
+
+    Handles ~/, /home/vivesca/, and single/double-quoted path variants.
+    Returns the command unchanged when *repo* is the default ``~``.
+    """
+    if repo == "~":
+        return run_cmd
+
+    tilde_form = _normalize_spec_repo_for_worker(str(repo))
+    abs_form = tilde_form.replace("~", "/home/vivesca", 1)
+
+    candidates: set[str] = set()
+    for r in (tilde_form, abs_form):
+        candidates.add(r)
+        candidates.add(f"'{r}'")
+        candidates.add(f'"{r}"')
+
+    for r in sorted(candidates, key=len, reverse=True):
+        for sep in ("&&", ";"):
+            for gap in (f" {sep} ", f"{sep} "):
+                prefix = f"cd {r}{gap}"
+                if run_cmd.startswith(prefix):
+                    return run_cmd[len(prefix):]
+
+    return run_cmd
+
+
 def _inject_spec_constraints(
     prompt: str,
     *,
@@ -878,17 +906,22 @@ def _inject_spec_constraints(
 
     # Repo context (only when non-default). Keep home-relative paths in worker
     # form so prompts do not leak the local machine's absolute HOME.
-    repo = spec.get("repo", "~")
+    repo_raw = str(spec.get("repo", "~"))
+    repo = repo_raw
     if repo != "~":
-        repo = str(repo)
         if not repo.startswith("/home/vivesca/"):
             repo = _normalize_spec_repo_for_worker(repo)
-        parts.append(f"Working directory: {repo}")
+        parts.append(
+            f"Canonical repository: {repo}. The worker runs in an "
+            f"isolated git worktree. Use the current working directory "
+            f"— do not cd to {repo}."
+        )
 
     # Test run command and function list
     tests = spec.get("tests", {})
     if tests.get("run"):
-        parts.append(f"Run: {tests['run']}")
+        run_cmd = _strip_cd_prefix(tests["run"], repo_raw)
+        parts.append(f"Run: {run_cmd}")
     if tests.get("functions"):
         func_names = [f"test_{f}" for f in tests["functions"]]
         parts.append(f"Verify test functions: {', '.join(func_names)}")

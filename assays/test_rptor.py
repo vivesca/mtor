@@ -595,7 +595,7 @@ def test_tests_injected_into_prompt(tmp_path):
 
 
 def test_spec_injection_repo_context(tmp_path):
-    """_inject_spec_constraints adds repo context when non-default."""
+    """_inject_spec_constraints adds worktree-safe repo context when non-default."""
     spec_file = tmp_path / "repo-spec.md"
     spec_file.write_text(
         "---\nstatus: ready\nrepo: /home/vivesca/code/mtor\n---\n",
@@ -608,7 +608,10 @@ def test_spec_injection_repo_context(tmp_path):
         prompt_for_cmd="Implement feature.",
     )
 
-    assert "Working directory: /home/vivesca/code/mtor" in result
+    assert "Working directory:" not in result
+    assert "Canonical repository: /home/vivesca/code/mtor" in result
+    assert "isolated git worktree" in result
+    assert "do not cd to /home/vivesca/code/mtor" in result
 
 
 def test_spec_injection_preserves_home_relative_worker_repo(tmp_path):
@@ -625,7 +628,9 @@ def test_spec_injection_preserves_home_relative_worker_repo(tmp_path):
         prompt_for_cmd="Implement feature.",
     )
 
-    assert "Working directory: ~/code/mtor" in result
+    assert "Working directory:" not in result
+    assert "Canonical repository: ~/code/mtor" in result
+    assert "isolated git worktree" in result
     assert str(Path.home() / "code/mtor") not in result
 
 
@@ -637,6 +642,100 @@ def test_spec_injection_no_spec_path_unchanged():
         prompt_for_cmd="Original prompt.",
     )
     assert result == "Original prompt."
+
+
+def test_spec_injection_strips_cd_tilde_prefix(tmp_path):
+    """cd <repo> && prefix is stripped when repo matches tests.run."""
+    spec_file = tmp_path / "cd-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/mtor\n"
+        "tests:\n  run: cd ~/code/mtor && uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: uv run pytest assays/test_rptor.py -q" in result
+    assert "cd ~/code/mtor" not in result
+
+
+def test_spec_injection_strips_cd_absolute_prefix(tmp_path):
+    """cd /home/vivesca/... && prefix is stripped for tilde-form repo."""
+    spec_file = tmp_path / "cd-abs-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/mtor\n"
+        "tests:\n  run: cd /home/vivesca/code/mtor && uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: uv run pytest assays/test_rptor.py -q" in result
+    assert "cd /home/vivesca" not in result
+
+
+def test_spec_injection_strips_cd_semicolon_prefix(tmp_path):
+    """cd <repo>; prefix is also stripped."""
+    spec_file = tmp_path / "cd-semi-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/mtor\n"
+        "tests:\n  run: cd ~/code/mtor; uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: uv run pytest assays/test_rptor.py -q" in result
+    assert "cd ~/code/mtor" not in result
+
+
+def test_spec_injection_strips_cd_quoted_prefix(tmp_path):
+    """cd with single/double-quoted repo path is stripped."""
+    spec_file = tmp_path / "cd-quoted-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/mtor\n"
+        "tests:\n  run: cd '~/code/mtor' && uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: uv run pytest assays/test_rptor.py -q" in result
+    assert "Run: cd " not in result
+
+
+def test_spec_injection_preserves_cd_when_repo_mismatched(tmp_path):
+    """cd prefix is NOT stripped when repo doesn't match tests.run path."""
+    spec_file = tmp_path / "cd-mismatch-spec.md"
+    spec_file.write_text(
+        "---\nstatus: ready\nrepo: ~/code/other\n"
+        "tests:\n  run: cd ~/code/mtor && uv run pytest assays/test_rptor.py -q\n---\n",
+        encoding="utf-8",
+    )
+
+    result = _inject_spec_constraints(
+        "Build the feature.",
+        spec_path=spec_file,
+        prompt_for_cmd="Build the feature.",
+    )
+
+    assert "Run: cd ~/code/mtor && uv run pytest assays/test_rptor.py -q" in result
 
 
 # ---------------------------------------------------------------------------
