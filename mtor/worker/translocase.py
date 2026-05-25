@@ -982,6 +982,26 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 _tests_pass = _test_r.returncode == 0
 
             if _tests_pass:
+                # Capture diff evidence BEFORE removing the worktree so
+                # chaperone receives real commit_count instead of rejecting
+                # with no_commit_on_success.
+                _post_diff = await asyncio.to_thread(_git_snapshot, work_dir, base_sha=pre_sha)
+                _ee_commit_count = _post_diff.get("commit_count", 0)
+                if _ee_commit_count == 0 and _post_head != pre_sha:
+                    try:
+                        _cnt_r = _subprocess.run(
+                            ["git", "rev-list", "--count", f"{pre_sha}..HEAD"],
+                            capture_output=True, text=True, timeout=5, cwd=work_dir,
+                        )
+                        if _cnt_r.returncode == 0:
+                            _real = int(_cnt_r.stdout.strip())
+                            if _real > 0:
+                                _post_diff["commit_count"] = _real
+                                _post_diff["head_moved_fallback"] = True
+                                _ee_commit_count = _real
+                    except Exception:
+                        pass
+
                 if worktree_path:
                     _subprocess.run(
                         ["git", "push", "origin", f"{branch_name}:{branch_name}"],
@@ -1005,7 +1025,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "stdout": stdout[:1000],
                     "stderr": stderr[:500],
                     "pre_diff": pre_diff,
-                    "post_diff": {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""},
+                    "post_diff": _post_diff,
                     "cost_info": "",
                     "output_path": "",
                     "branch_name": branch_name if worktree_path else "",
