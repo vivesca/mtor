@@ -96,11 +96,17 @@ def review_ids(ids: list[str]) -> dict[str, Any]:
 
 
 def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
-    """Move IDs to archived set. Removes from reviewed. Returns envelope result dict."""
+    """Move IDs to archived set. Removes from reviewed. Returns envelope result dict.
+
+    Only IDs newly archived by *this* call appear in ``archived`` and
+    ``archived_records``.  The total size of the persisted archive is
+    reported separately via ``archived_total``.
+    """
     data = load_triage()
     records = {record["workflow_id"]: record for record in normalize_archived(data["archived"])}
     incoming = set(ids)
     archived_at = datetime.now(UTC).isoformat()
+    newly_archived_ids: list[str] = []
     for workflow_id in sorted(incoming):
         if workflow_id not in records:
             records[workflow_id] = {
@@ -108,12 +114,18 @@ def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
                 "reason": reason,
                 "archived_at": archived_at,
             }
+            newly_archived_ids.append(workflow_id)
     # Remove newly archived from reviewed
     data["reviewed"] = sorted(set(data["reviewed"]) - incoming)
     data["archived"] = [records[workflow_id] for workflow_id in sorted(records)]
     save_triage(data)
-    archived = [record["workflow_id"] for record in data["archived"]]
-    return {"archived": archived, "archived_records": data["archived"], "count": len(archived)}
+    newly_archived_records = [records[wid] for wid in newly_archived_ids]
+    return {
+        "archived": newly_archived_ids,
+        "archived_records": newly_archived_records,
+        "count": len(newly_archived_ids),
+        "archived_total": len(data["archived"]),
+    }
 
 
 def parse_duration(duration_str: str) -> timedelta:

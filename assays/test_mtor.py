@@ -1626,6 +1626,23 @@ class TestArchive:
         assert data["ok"] is True
         assert "wf-never-reviewed" in data["result"]["archived"]
 
+    def test_archive_result_reports_only_target_when_existing_archive_present(self, tmp_path, monkeypatch):
+        """Archiving a single target returns only that target, not the full historical archive."""
+        import mtor.triage as triage_mod
+
+        monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
+        # Pre-seed archived records
+        invoke(["archive", "wf-old-1", "--force"])
+        invoke(["archive", "wf-old-2", "--force"])
+
+        # Archive a new target
+        exit_code, data = invoke(["archive", "wf-new", "--force"])
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["archived"] == ["wf-new"]
+        assert data["result"]["count"] == 1
+        assert data["result"]["archived_total"] == 3
+
 
 class TestListTriage:
     def test_list_hides_archived(self, tmp_path, monkeypatch):

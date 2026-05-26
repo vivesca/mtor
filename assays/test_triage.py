@@ -97,6 +97,35 @@ def test_override_verdict_roundtrip(tmp_path: Path) -> None:
         assert overrides["wf-b"] == "approved"
 
 
+def test_archive_ids_reports_only_newly_archived_ids(tmp_path: Path) -> None:
+    """archive_ids returns only IDs archived by this call, not the full historical set."""
+    with _patch_triage_path(tmp_path):
+        # Pre-seed two archived IDs
+        save_triage({"reviewed": [], "archived": ["wf-old-1", "wf-old-2"], "verdict_overrides": {}})
+
+        # Archive a brand-new ID
+        result = archive_ids(["wf-new"], reason="cleanup")
+        assert result["archived"] == ["wf-new"]
+        assert result["count"] == 1
+        assert result["archived_total"] == 3  # 2 pre-existing + 1 new
+        assert len(result["archived_records"]) == 1
+        assert result["archived_records"][0]["workflow_id"] == "wf-new"
+        assert result["archived_records"][0]["reason"] == "cleanup"
+
+        # Verify the pre-existing records are persisted but NOT in archived list
+        data = load_triage()
+        persisted_ids = [r["workflow_id"] for r in data["archived"]]
+        assert "wf-old-1" in persisted_ids
+        assert "wf-old-2" in persisted_ids
+        assert "wf-new" in persisted_ids
+
+        # Idempotent re-archive returns empty
+        result2 = archive_ids(["wf-new"], reason="duplicate")
+        assert result2["archived"] == []
+        assert result2["count"] == 0
+        assert result2["archived_total"] == 3
+
+
 def test_parse_duration_valid_and_invalid() -> None:
     """parse_duration handles h/d/m units and rejects bad input."""
     assert parse_duration("7d") == timedelta(days=7)
