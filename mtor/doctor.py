@@ -21,6 +21,11 @@ from mtor.envelope import _ok
 HEARTBEAT_DIR = "~/germline/loci/ribosome-heartbeats"
 HEARTBEAT_STALE_THRESHOLD = 120
 
+_CODING_PLAN_CONFIG_PATH = os.path.expanduser(
+    "~/germline/loci/ribosome-config.lock.json"
+)
+_CODING_PLAN_EXPECTED_URL = "https://open.bigmodel.cn/api/anthropic"
+
 PROVIDER_MODELS = {
     "zhipu": "glm-5.1",
 }
@@ -64,10 +69,30 @@ def _classify_response_error(http_status: int | None, body: str) -> str:
     if any(token in body for token in ("套餐", "已到期", "请续费", "已用完")):
         return "billing"
     # English billing patterns
-    if any(token in body_lc for token in ("subscription expired", "plan expired", "renew your plan", "billing required", "credit expired", "payment required")):
+    if any(
+        token in body_lc
+        for token in (
+            "subscription expired",
+            "plan expired",
+            "renew your plan",
+            "billing required",
+            "credit expired",
+            "payment required",
+        )
+    ):
         return "billing"
     # Auth patterns (key-related, not billing)
-    if any(token in body_lc for token in ("invalid api key", "invalid key", "unauthorized", "api key invalid", "authentication parameter not received", "key is invalid")):
+    if any(
+        token in body_lc
+        for token in (
+            "invalid api key",
+            "invalid key",
+            "unauthorized",
+            "api key invalid",
+            "authentication parameter not received",
+            "key is invalid",
+        )
+    ):
         return "auth"
     # Status-code dispatch
     if http_status == 401:
@@ -188,6 +213,61 @@ def _probe_provider(provider: str) -> ProbeResult:
         )
 
 
+def _check_coding_plan_lane(config_path: str | None = None) -> dict:
+    """Verify ribosome's zhipu provider uses the coding-plan lane."""
+    path = config_path or _CODING_PLAN_CONFIG_PATH
+    expected = _CODING_PLAN_EXPECTED_URL
+
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        return {
+            "name": "coding_plan_lane",
+            "ok": False,
+            "detail": f"Config file not found: {path}",
+            "base_url": None,
+            "budget_lane": None,
+        }
+
+    zhipu = cfg.get("providers", {}).get("zhipu", {})
+    base_url = zhipu.get("base_url", "")
+    key_env = zhipu.get("key_env", "ZHIPU_API_KEY")
+    models = zhipu.get("models", {})
+
+    if "api.z.ai" in base_url:
+        return {
+            "name": "coding_plan_lane",
+            "ok": False,
+            "detail": f"REJECTED: api.z.ai mirror detected: {base_url}",
+            "base_url": base_url,
+            "budget_lane": "unknown",
+            "key_env": key_env,
+            "models": models,
+        }
+
+    if base_url != expected:
+        return {
+            "name": "coding_plan_lane",
+            "ok": False,
+            "detail": f"Unexpected base_url: {base_url} (expected {expected})",
+            "base_url": base_url,
+            "budget_lane": "unknown",
+            "key_env": key_env,
+            "models": models,
+        }
+
+    return {
+        "name": "coding_plan_lane",
+        "ok": True,
+        "detail": f"zhipu-coding-plan via {base_url} (models: {json.dumps(models)})",
+        "base_url": base_url,
+        "budget_lane": "zhipu-coding-plan",
+        "key_env": key_env,
+        "models": models,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Human-readable health display
 # ---------------------------------------------------------------------------
@@ -205,7 +285,9 @@ def _format_duration(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def _provider_health_explanation(provider: str, info: dict, now: float | None = None) -> str:
+def _provider_health_explanation(
+    provider: str, info: dict, now: float | None = None
+) -> str:
     """Return a human-readable circuit-breaker explanation for one provider."""
     now = time.time() if now is None else now
     state = info.get("state", "closed")
@@ -227,7 +309,9 @@ def _provider_health_explanation(provider: str, info: dict, now: float | None = 
     return f"{state} ({provider})"
 
 
-def format_health_display(checks: list[dict], provider_states: dict | None = None) -> str:
+def format_health_display(
+    checks: list[dict], provider_states: dict | None = None
+) -> str:
     """Render health checks as a human-readable table.
 
     Args:
@@ -255,8 +339,14 @@ def format_health_display(checks: list[dict], provider_states: dict | None = Non
         now = time.time()
         for prov, info in provider_states.items():
             state = info.get("state", "closed")
-            mark = _OK_MARK if state == "closed" else (_WARN_MARK if state == "half_open" else _FAIL_MARK)
-            lines.append(f"  {mark} {prov:<10} {_provider_health_explanation(prov, info, now)}")
+            mark = (
+                _OK_MARK
+                if state == "closed"
+                else (_WARN_MARK if state == "half_open" else _FAIL_MARK)
+            )
+            lines.append(
+                f"  {mark} {prov:<10} {_provider_health_explanation(prov, info, now)}"
+            )
 
     lines.append("─" * 40)
     all_ok = all(c.get("ok", False) for c in checks)
@@ -264,6 +354,7 @@ def format_health_display(checks: list[dict], provider_states: dict | None = Non
     lines.append(f"  {status_word}")
     lines.append("")
     return "\n".join(lines)
+
 
 # Lazy import to avoid circular dependency
 _providers_module: object | None = None
@@ -308,7 +399,11 @@ def reconcile_running_workflows(client) -> list[dict]:
         heartbeat_path = f"{HEARTBEAT_DIR}/{wf_id}"
         try:
             stat_result = subprocess.run(
-                ["ssh", WORKER_HOST, f"stat -c %Y {heartbeat_path} 2>/dev/null || echo MISSING"],
+                [
+                    "ssh",
+                    WORKER_HOST,
+                    f"stat -c %Y {heartbeat_path} 2>/dev/null || echo MISSING",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -360,7 +455,9 @@ def doctor(*, reconcile: bool = False) -> None:
         {
             "name": "temporal_reachable",
             "ok": temporal_ok,
-            "detail": f"Connected to {TEMPORAL_HOST}" if temporal_ok else f"Cannot connect: {err}",
+            "detail": f"Connected to {TEMPORAL_HOST}"
+            if temporal_ok
+            else f"Cannot connect: {err}",
         }
     )
 
@@ -376,8 +473,8 @@ def doctor(*, reconcile: bool = False) -> None:
                 f"MTOR_WORKER_HOST={WORKER_HOST}"
                 if worker_host_ok
                 else "MTOR_WORKER_HOST not set (defaults to localhost) "
-                     "— SSH operations (logs, SHA gate) will fail. "
-                     "Set MTOR_WORKER_HOST to your worker hostname."
+                "— SSH operations (logs, SHA gate) will fail. "
+                "Set MTOR_WORKER_HOST to your worker hostname."
             ),
         }
     )
@@ -429,7 +526,9 @@ def doctor(*, reconcile: bool = False) -> None:
                     f"GLM exits immediately when coaching + spec > 15KB. Trim now."
                 )
             else:
-                coaching_detail = f"{coaching_detail} ({size_kb:.1f}KB / {COACHING_MAX_KB}KB)"
+                coaching_detail = (
+                    f"{coaching_detail} ({size_kb:.1f}KB / {COACHING_MAX_KB}KB)"
+                )
         checks.append(
             {"name": "coaching_file", "ok": coaching_ok, "detail": coaching_detail}
         )
@@ -499,7 +598,8 @@ def doctor(*, reconcile: bool = False) -> None:
         if not all_probes_ok:
             all_ok = False
         probe_detail = ", ".join(
-            f"{pr.provider}: [{pr.classification}] {pr.detail}" for pr in probe_threads_results
+            f"{pr.provider}: [{pr.classification}] {pr.detail}"
+            for pr in probe_threads_results
         )
         checks.append(
             {
@@ -509,6 +609,12 @@ def doctor(*, reconcile: bool = False) -> None:
                 "provider_probe_states": provider_probe_states,
             }
         )
+
+    # Check 5b: Coding-plan lane validation
+    lane_check = _check_coding_plan_lane()
+    if not lane_check["ok"]:
+        all_ok = False
+    checks.append(lane_check)
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()
@@ -537,8 +643,14 @@ def doctor(*, reconcile: bool = False) -> None:
         )
         result["provider_routing"] = {
             "priority": list(pm.PROVIDER_PRIORITY),
-            "models": {provider: PROVIDER_MODELS.get(provider, provider) for provider in pm.PROVIDER_PRIORITY},
-            "limits": {provider: pm.PROVIDER_LIMITS.get(provider, 2) for provider in pm.PROVIDER_PRIORITY},
+            "models": {
+                provider: PROVIDER_MODELS.get(provider, provider)
+                for provider in pm.PROVIDER_PRIORITY
+            },
+            "limits": {
+                provider: pm.PROVIDER_LIMITS.get(provider, 2)
+                for provider in pm.PROVIDER_PRIORITY
+            },
         }
 
     if pm is not None and WORKER_HOST != "localhost":
@@ -547,12 +659,10 @@ def doctor(*, reconcile: bool = False) -> None:
                 [
                     "ssh",
                     WORKER_HOST,
-                    "python3 -c \""
+                    'python3 -c "'
                     "import json; "
-                    "h=json.load(open('"
-                    + str(pm.HEALTH_FILE)
-                    + "')); "
-                    "print(json.dumps(h))\"",
+                    "h=json.load(open('" + str(pm.HEALTH_FILE) + "')); "
+                    'print(json.dumps(h))"',
                 ],
                 capture_output=True,
                 text=True,
@@ -689,7 +799,9 @@ def doctor(*, reconcile: bool = False) -> None:
                 )
             else:
                 all_ok = False
-                snippet = (gh_result.stderr or gh_result.stdout or "").strip().split("\n")[0]
+                snippet = (
+                    (gh_result.stderr or gh_result.stdout or "").strip().split("\n")[0]
+                )
                 checks.append(
                     {
                         "name": "ganglion_gh_auth",
@@ -750,7 +862,8 @@ def doctor(*, reconcile: bool = False) -> None:
                     "Check worker service status",
                 ),
                 _action(
-                    f"ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'", "Start the worker"
+                    f"ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                    "Start the worker",
                 ),
             ],
         }

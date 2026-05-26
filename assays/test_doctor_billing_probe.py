@@ -4,15 +4,20 @@ Closes the diagnostic blind spot from 2026-05-06 zhipu detour: HTTPError handler
 discarded response body, so 402 Coding-plan-expired was indistinguishable from
 401/403/connection. Tests pin the classification rules and the body-reading path.
 """
+
 from __future__ import annotations
 
+import json
 import urllib.error
 from io import BytesIO
 from unittest.mock import patch
 
-import pytest
-
-from mtor.doctor import ProbeResult, _classify_response_error, _probe_provider
+from mtor.doctor import (
+    ProbeResult,
+    _check_coding_plan_lane,
+    _classify_response_error,
+    _probe_provider,
+)
 
 
 # --- Classifier unit tests --------------------------------------------------
@@ -40,7 +45,10 @@ def test_classify_chinese_billing_text_overrides_status():
 
 
 def test_classify_english_billing_text():
-    assert _classify_response_error(403, "Subscription expired, renew your plan") == "billing"
+    assert (
+        _classify_response_error(403, "Subscription expired, renew your plan")
+        == "billing"
+    )
 
 
 def test_classify_english_auth_text():
@@ -94,7 +102,9 @@ def test_probe_missing_key_classifies_auth():
 
 def test_probe_url_error_classifies_connection():
     with patch.dict("os.environ", {"ZHIPU_API_KEY": "fake"}):
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("DNS failure")):
+        with patch(
+            "urllib.request.urlopen", side_effect=urllib.error.URLError("DNS failure")
+        ):
             result = _probe_provider("zhipu")
     assert result.ok is False
     assert result.classification == "connection"
@@ -104,3 +114,37 @@ def test_probe_dataclass_has_classification_default():
     """ProbeResult.classification defaults to 'unknown' when not supplied — back-compat for callers that built ProbeResult without the new field."""
     pr = ProbeResult(provider="zhipu", ok=True, latency_ms=10.0, detail="OK")
     assert pr.classification == "unknown"
+
+
+# --- Coding-plan lane check ------------------------------------------------
+
+
+def test_coding_plan_lane_pass_with_real_lockfile():
+    """coding_plan_lane check should pass with the real lockfile."""
+    result = _check_coding_plan_lane()
+    assert result["ok"] is True
+    assert result["budget_lane"] == "zhipu-coding-plan"
+    assert result["base_url"] == "https://open.bigmodel.cn/api/anthropic"
+
+
+def test_coding_plan_lane_rejects_api_z_ai(tmp_path):
+    """coding_plan_lane check should reject api.z.ai mirror."""
+    bad_config = {
+        "_schema": 2,
+        "providers": {
+            "zhipu": {
+                "key_env": "ZHIPU_API_KEY",
+                "base_url": "https://api.z.ai/api/anthropic",
+                "models": {
+                    "opus": "glm-5.1",
+                    "sonnet": "glm-5.1",
+                    "haiku": "glm-4.5-air",
+                },
+            }
+        },
+    }
+    config_file = tmp_path / "bad-lock.json"
+    config_file.write_text(json.dumps(bad_config))
+    result = _check_coding_plan_lane(str(config_file))
+    assert result["ok"] is False
+    assert "api.z.ai" in result["detail"]
