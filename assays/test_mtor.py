@@ -756,6 +756,145 @@ class TestTrace:
         assert "activity translate failed" in result["temporal_result_error"]
         assert result["diagnosis"] == "workflow failed during execution"
 
+    def test_trace_includes_cached_lifecycle_events(self, tmp_path, monkeypatch):
+        """trace includes lifecycle_log_path and lifecycle_events when cached JSONL exists."""
+        import json as _json
+
+        workflow_id = "ribosome-glm51-lifecycle-abcd1234"
+        cache_dir = tmp_path / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / f"{workflow_id}.jsonl"
+        events = [
+            {"type": "dispatch", "workflow_id": workflow_id, "timestamp": "2026-05-27T10:00:00Z"},
+            {"type": "provider_selected", "workflow_id": workflow_id, "provider": "zhipu", "timestamp": "2026-05-27T10:00:01Z"},
+            {"type": "subprocess_started", "workflow_id": workflow_id, "pid": 12345, "attempt": 1, "timestamp": "2026-05-27T10:00:02Z"},
+            {"type": "subprocess_exited", "workflow_id": workflow_id, "exit_code": 0, "duration_seconds": 42.5, "timestamp": "2026-05-27T10:00:44Z"},
+        ]
+        cache_file.write_text("\n".join(_json.dumps(e) for e in events))
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        desc.search_attributes = {}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", workflow_id])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert "lifecycle_log_path" in result
+        assert result["lifecycle_log_path"] == str(cache_file)
+        assert "lifecycle_events" in result
+        assert len(result["lifecycle_events"]) == 4
+        assert result["lifecycle_events"][0]["type"] == "dispatch"
+        assert result["lifecycle_events"][2]["pid"] == 12345
+        assert result["lifecycle_events"][3]["duration_seconds"] == 42.5
+
+    def test_trace_lifecycle_events_filter_sensitive_fields(self, tmp_path, monkeypatch):
+        """lifecycle_events strips task, prompt, stdout, stderr, output, tail, diff."""
+        import json as _json
+
+        workflow_id = "ribosome-glm51-lifecycle-filter5678"
+        cache_dir = tmp_path / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / f"{workflow_id}.jsonl"
+        event = {
+            "type": "subprocess_exited",
+            "workflow_id": workflow_id,
+            "exit_code": 1,
+            "task": "Make assays/test_foo.py pass",
+            "prompt": "Write a function that does X",
+            "stdout": "lots of output text",
+            "stderr": "error messages here",
+            "output": "combined output",
+            "tail": "last 10 lines",
+            "diff": "--- a/file.py\n+++ b/file.py\n",
+            "duration_seconds": 30.0,
+        }
+        cache_file.write_text(_json.dumps(event))
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        desc.search_attributes = {}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "rejected"},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", workflow_id])
+
+        assert exit_code == 0
+        le = data["result"]["lifecycle_events"][0]
+        for field in ("task", "prompt", "stdout", "stderr", "output", "tail", "diff"):
+            assert field not in le, f"Sensitive field '{field}' should be filtered out"
+        assert le["exit_code"] == 1
+        assert le["duration_seconds"] == 30.0
+
+    def test_trace_lifecycle_events_ignore_invalid_json_lines(self, tmp_path, monkeypatch):
+        """Invalid JSON lines are silently skipped; trace does not fail."""
+        import json as _json
+
+        workflow_id = "ribosome-glm51-lifecycle-invalid9012"
+        cache_dir = tmp_path / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / f"{workflow_id}.jsonl"
+        lines = [
+            _json.dumps({"type": "dispatch", "workflow_id": workflow_id}),
+            "not valid json{",
+            "",
+            _json.dumps({"type": "subprocess_started", "workflow_id": workflow_id, "pid": 99}),
+            "{broken",
+        ]
+        cache_file.write_text("\n".join(lines))
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        desc.search_attributes = {}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", workflow_id])
+
+        assert exit_code == 0
+        le = data["result"]["lifecycle_events"]
+        assert len(le) == 2
+        assert le[0]["type"] == "dispatch"
+        assert le[1]["pid"] == 99
+
 
 # ---------------------------------------------------------------------------
 # Cancel tests

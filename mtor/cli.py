@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -327,6 +328,32 @@ def _cached_log_path(workflow_id: str) -> str:
         return ""
 
     return str(max(files, key=lambda path: path.stat().st_mtime))
+
+
+_SENSITIVE_FIELDS = frozenset({"task", "prompt", "stdout", "stderr", "output", "tail", "diff"})
+_LIFECYCLE_MAX_EVENTS = 8
+
+
+def _read_lifecycle_events(log_path: str) -> list[dict[str, Any]]:
+    """Read up to 8 recent lifecycle events from a cached JSONL, dropping sensitive fields."""
+    path = Path(log_path)
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        filtered = {k: v for k, v in event.items() if k not in _SENSITIVE_FIELDS}
+        events.append(filtered)
+    return events[-_LIFECYCLE_MAX_EVENTS:]
 
 
 def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
@@ -1020,6 +1047,10 @@ def trace(workflow_id: str) -> None:
         if task_result:
             output_path = review.get("output_path", "") or task_result.get("output_path", "")
 
+        lifecycle_events: list[dict[str, Any]] = []
+        if cached_log_path:
+            lifecycle_events = _read_lifecycle_events(cached_log_path)
+
         result_payload: dict[str, Any] = {
             "workflow_id": workflow_id,
             "status": status_val,
@@ -1031,6 +1062,10 @@ def trace(workflow_id: str) -> None:
             "output_path": output_path,
             "cached_log_path": cached_log_path,
         }
+
+        if cached_log_path and lifecycle_events:
+            result_payload["lifecycle_log_path"] = cached_log_path
+            result_payload["lifecycle_events"] = lifecycle_events
 
         if result_error:
             result_payload["temporal_result_error"] = result_error
