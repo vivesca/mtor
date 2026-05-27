@@ -895,6 +895,94 @@ class TestTrace:
         assert le[0]["type"] == "dispatch"
         assert le[1]["pid"] == 99
 
+    def test_trace_prefers_jsonl_over_newer_log(self, tmp_path, monkeypatch):
+        """trace surfaces lifecycle events from .jsonl even when a newer .log exists."""
+        import json as _json
+        import os
+
+        workflow_id = "ribosome-glm51-jsonl-pref-abcd"
+        cache_dir = tmp_path / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True)
+
+        # Create an older .jsonl with lifecycle events
+        jsonl_file = cache_dir / f"{workflow_id}.jsonl"
+        events = [
+            {"type": "dispatch", "workflow_id": workflow_id, "timestamp": "2026-05-27T10:00:00Z"},
+            {"type": "provider_selected", "provider": "zhipu"},
+        ]
+        jsonl_file.write_text("\n".join(_json.dumps(e) for e in events))
+
+        # Create a newer .log (operator log) — no JSONL events here
+        log_file = cache_dir / f"{workflow_id}.log"
+        log_file.write_text("operator log line 1\noperator log line 2\n")
+        # Make the .log newer than the .jsonl
+        os.utime(log_file, (log_file.stat().st_mtime + 100, log_file.stat().st_mtime + 100))
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        desc.search_attributes = {}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", workflow_id])
+
+        assert exit_code == 0
+        result = data["result"]
+        # cached_log_path should point at the newer .log
+        assert result["cached_log_path"] == str(log_file)
+        # lifecycle_log_path should point at the .jsonl
+        assert result["lifecycle_log_path"] == str(jsonl_file)
+        assert len(result["lifecycle_events"]) == 2
+        assert result["lifecycle_events"][0]["type"] == "dispatch"
+        assert result["lifecycle_events"][1]["provider"] == "zhipu"
+
+    def test_trace_omits_lifecycle_fields_when_no_jsonl(self, tmp_path, monkeypatch):
+        """trace omits lifecycle_log_path and lifecycle_events when no .jsonl exists."""
+        workflow_id = "ribosome-glm51-no-jsonl-efgh"
+        cache_dir = tmp_path / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True)
+
+        # Only a .log file, no .jsonl
+        log_file = cache_dir / f"{workflow_id}.log"
+        log_file.write_text("just operator log output\n")
+
+        mock_client, mock_handle = make_mock_client()
+        desc = mock_handle.describe.return_value
+        desc.status.name = "COMPLETED"
+        desc.search_attributes = {}
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["trace", workflow_id])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert "lifecycle_log_path" not in result
+        assert "lifecycle_events" not in result
+
 
 # ---------------------------------------------------------------------------
 # Cancel tests

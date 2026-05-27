@@ -330,6 +330,32 @@ def _cached_log_path(workflow_id: str) -> str:
     return str(max(files, key=lambda path: path.stat().st_mtime))
 
 
+def _cached_lifecycle_jsonl_path(workflow_id: str) -> str:
+    """Return the cached lifecycle JSONL path for a workflow, preferring <id>.jsonl.
+
+    Derives a .jsonl sibling from a cached .log/.txt path when the direct
+    <workflow_id>.jsonl file is absent.  Returns empty string when no JSONL
+    events file exists locally.
+    """
+    cache_dir = Path.home() / ".cache" / "mtor" / "logs"
+    if not cache_dir.exists():
+        return ""
+
+    direct = cache_dir / f"{workflow_id}.jsonl"
+    if direct.is_file():
+        return str(direct)
+
+    cached = _cached_log_path(workflow_id)
+    if not cached:
+        return ""
+
+    jsonl_sibling = Path(cached).with_suffix(".jsonl")
+    if jsonl_sibling.is_file():
+        return str(jsonl_sibling)
+
+    return ""
+
+
 _SENSITIVE_FIELDS = frozenset({"task", "prompt", "stdout", "stderr", "output", "tail", "diff"})
 _LIFECYCLE_MAX_EVENTS = 8
 
@@ -1047,9 +1073,10 @@ def trace(workflow_id: str) -> None:
         if task_result:
             output_path = review.get("output_path", "") or task_result.get("output_path", "")
 
+        lifecycle_jsonl_path = _cached_lifecycle_jsonl_path(workflow_id)
         lifecycle_events: list[dict[str, Any]] = []
-        if cached_log_path:
-            lifecycle_events = _read_lifecycle_events(cached_log_path)
+        if lifecycle_jsonl_path:
+            lifecycle_events = _read_lifecycle_events(lifecycle_jsonl_path)
 
         result_payload: dict[str, Any] = {
             "workflow_id": workflow_id,
@@ -1063,8 +1090,8 @@ def trace(workflow_id: str) -> None:
             "cached_log_path": cached_log_path,
         }
 
-        if cached_log_path and lifecycle_events:
-            result_payload["lifecycle_log_path"] = cached_log_path
+        if lifecycle_jsonl_path and lifecycle_events:
+            result_payload["lifecycle_log_path"] = lifecycle_jsonl_path
             result_payload["lifecycle_events"] = lifecycle_events
 
         if result_error:
