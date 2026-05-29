@@ -377,6 +377,7 @@ async def _tee_stream(
 async def _heartbeat_stall_check(
     proc, work_dir: str, provider: str, task: str, *,
     skip_stall: bool = False, stdout_counter: list[int] | None = None,
+    stderr_counter: list[int] | None = None,
     workflow_id: str = "",
 ) -> None:
     """Dual-signal stall detection: git diff hash + stdout byte growth.
@@ -399,6 +400,8 @@ async def _heartbeat_stall_check(
     warnings_sent = 0
     empty_ticks = 0
     empty_diff_hash = hashlib.sha256(b"").hexdigest()[:12]
+    no_output_ticks = 0
+    last_output_total = -1
 
     tick = 0
     while True:
@@ -433,6 +436,7 @@ async def _heartbeat_stall_check(
 
         # Read cumulative stdout byte count (monotonically non-decreasing)
         current_stdout_bytes = stdout_counter[0] if stdout_counter else -1
+        current_stderr_bytes = stderr_counter[0] if stderr_counter else -1
 
         recent_hashes.append(diff_hash)
         recent_stdout_bytes.append(current_stdout_bytes)
@@ -446,8 +450,39 @@ async def _heartbeat_stall_check(
                 f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash} out:{current_stdout_bytes}"
             )
 
-        # Skip stall checks for scout/research modes
+        # Scout/research modes are read-only, so use output growth as liveness.
         if skip_stall:
+            has_signal = stdout_counter is not None or stderr_counter is not None
+            if not has_signal:
+                continue
+            if tick < 4:
+                continue
+            output_total = max(current_stdout_bytes, 0) + max(current_stderr_bytes, 0)
+            if last_output_total >= 0 and output_total > last_output_total:
+                no_output_ticks = 0
+            else:
+                no_output_ticks += 1
+            last_output_total = output_total
+            scout_no_output_warn = 20
+            scout_no_output_kill = 30
+            if no_output_ticks >= scout_no_output_kill:
+                if workflow_id:
+                    with contextlib.suppress(Exception):
+                        _log_event(workflow_id, "stall_detected", tick=tick, reason="no_output_timeout")
+                print(
+                    f"[stall-detect] scout/research no-output timeout at tick {tick} "
+                    f"({no_output_ticks} no-output ticks, ~{no_output_ticks * 30 // 60}min), "
+                    f"killing process (pid={proc.pid})",
+                    file=sys.stderr,
+                )
+                _kill_process_group(proc)
+                return
+            if no_output_ticks >= scout_no_output_warn:
+                print(
+                    f"[stall-detect] scout/research no-output warning at tick {tick} "
+                    f"({no_output_ticks} no-output ticks, ~{no_output_ticks * 30 // 60}min)",
+                    file=sys.stderr,
+                )
             continue
 
         # Skip stall checks for first 2 minutes (4 ticks) — let agent ramp up
@@ -732,6 +767,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         _log_event(workflow_id, "subprocess_started", pid=proc.pid)
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
+        stderr_counter: list[int] = [0]
 
         # Open workflow-scoped log file for real-time observability
         log_fh = None
@@ -756,7 +792,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _tee_stream(proc.stdout, log_fh, "stdout", counter=stdout_counter)
         )
         stderr_task = asyncio.create_task(
-            _tee_stream(proc.stderr, log_fh, "stderr")
+            _tee_stream(proc.stderr, log_fh, "stderr", counter=stderr_counter)
         )
 
         _skip_stall = mode in ("scout", "research")
@@ -765,6 +801,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 proc, work_dir, provider, task,
                 skip_stall=_skip_stall,
                 stdout_counter=stdout_counter,
+                stderr_counter=stderr_counter,
                 workflow_id=workflow_id,
             )
         )
