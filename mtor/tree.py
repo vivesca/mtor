@@ -761,3 +761,71 @@ tree.add_command(
     },
     annotations={"readonly": False, "destructive": True},
 )
+tree.add_command(
+    "workflow assess <prompt>",
+    "Assess whether a task prompt warrants a workflow or single-lane route",
+    params=[
+        {
+            "name": "prompt",
+            "type": "string",
+            "required": True,
+            "description": "Task instruction to classify",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "prompt": "string",
+            "route": "string (workflow|single)",
+            "triggers": "array of strings",
+            "required_controls": "array of strings",
+        },
+    },
+    annotations={"readonly": True},
+)
+tree.add_command(
+    "workflow init <prompt>",
+    "Initialize a workflow ledger for a task prompt",
+    params=[
+        {
+            "name": "prompt",
+            "type": "string",
+            "required": True,
+            "description": "Task instruction to create a ledger for",
+        },
+        {
+            "name": "--dir",
+            "type": "string",
+            "required": False,
+            "default": "~/.local/share/mtor/workflows/",
+            "description": "Directory to write the ledger into",
+        },
+        {
+            "name": "--dry-run",
+            "type": "boolean",
+            "required": False,
+            "default": False,
+            "description": "Report would-be path without writing files",
+        },
+    ],
+    returns={
+        "ok": "boolean",
+        "command": "string",
+        "result": {
+            "path": "string",
+            "route": "string",
+            "triggers": "array of strings",
+            "required_controls": "array of strings",
+            "dry_run": "boolean",
+        },
+    },
+    errors=[
+        {
+            "code": "LEDGER_EXISTS",
+            "exit_code": 1,
+            "message": "A ledger file already exists at the target path",
+        },
+    ],
+    annotations={"readonly": False, "destructive": False},
+)

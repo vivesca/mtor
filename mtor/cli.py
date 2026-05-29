@@ -76,6 +76,11 @@ from mtor.watch import (
     run_watch,
     thaw as _remove_freeze,
 )
+from mtor.workflow_gate import (
+    assess_workflow_trigger as _assess_trigger,
+    write_workflow_ledger as _write_ledger,
+    DEFAULT_LEDGER_DIR,
+)
 
 
 def _check_dedup_only(*args, **kwargs):
@@ -3261,4 +3266,46 @@ def reconcile(
         )
 
     result = reconcile_all(directory, dry_run=dry_run)
+    _ok(cmd, result, version=VERSION)
+
+
+# ---------------------------------------------------------------------------
+# Workflow sub-app — trigger assessment and ledger management
+# ---------------------------------------------------------------------------
+
+workflow_app = App(name="workflow", help_flags=[], version_flags=[])
+app.command(workflow_app)
+
+
+@workflow_app.command
+def assess(prompt: str) -> None:
+    """Assess whether a task prompt warrants a workflow or single-lane route."""
+    cmd = "mtor workflow assess"
+    result = _assess_trigger(prompt)
+    _ok(cmd, result, version=VERSION)
+
+
+@workflow_app.command(name="init")
+def workflow_init(
+    prompt: str,
+    *,
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_LEDGER_DIR,
+    dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
+) -> None:
+    cmd = "mtor workflow init"
+    ledger_dir = dir.expanduser()
+
+    try:
+        result = _write_ledger(prompt, ledger_dir, dry_run=dry_run)
+    except FileExistsError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "LEDGER_EXISTS",
+                "Remove the existing ledger or use a different --dir",
+                exit_code=1,
+            )
+        )
+
     _ok(cmd, result, version=VERSION)
