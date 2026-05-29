@@ -170,6 +170,31 @@ def _build_failure_reason(task_result: dict) -> str:
     return "; ".join(parts) if parts else "No diagnostic information available"
 
 
+def _terminated_diagnostics(workflow_id: str) -> dict[str, Any]:
+    """Stderr tail + detected kill reason for a TERMINATED wf (local log, no SSH)."""
+    outputs = Path(OUTPUTS_DIR)
+    log_path = ""
+    if outputs.is_dir():
+        suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+        matches = sorted(
+            (p for p in outputs.glob("*.txt") if workflow_id in p.name or suffix in p.name),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            log_path = str(matches[0])
+    if not log_path:
+        return {"kill_reason": None, "stderr_tail": "", "log_path": ""}
+    try:
+        content = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"kill_reason": None, "stderr_tail": "", "log_path": ""}
+    low = content.lower()
+    kill_reason = next((m for m in ("wall-limit", "oom", "out of memory", "sigkill", "killed") if m in low), None)
+    tail = "\n".join(content.splitlines()[-LOG_TAIL_LINES:])
+    return {"kill_reason": kill_reason, "stderr_tail": tail, "log_path": log_path}
+
+
 _APPROVED_VERDICTS = {"accepted", "approved", "approved_with_flags", "false_positive", "early_exit_clean"}
 
 
@@ -290,6 +315,9 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
     if operator_state in {"failed_process", "failed_workflow"}:
         return "workflow failed during execution"
     if operator_state in {"terminated", "canceled"}:
+        kill_reason = payload.get("kill_reason")
+        if kill_reason:
+            return f"workflow was {operator_state} ({kill_reason})"
         return f"workflow was {operator_state}"
     return "workflow state requires review"
 
