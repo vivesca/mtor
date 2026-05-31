@@ -747,6 +747,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             *(["--supervised"] if is_supervised else []),
             "--provider",
             resolved_provider,
+            "--",
             effective_task,
         ]
 

@@ -60,7 +60,23 @@ class TestHarnessRouting:
 
         assert env["RIBOSOME_PROVIDER"] == "zhipu"
 
+    def test_ribosome_command_delimits_task_from_flags(self, tmp_path):
+        """translate() passes -- before task text so YAML frontmatter is not parsed as flags."""
+        call_args = self._translate_and_capture_call_args(tmp_path, harness="")
+        args = list(call_args.args)
+
+        delimiter_index = args.index("--")
+        assert args[delimiter_index - 2 : delimiter_index + 2] == [
+            "--provider",
+            "zhipu",
+            "--",
+            "[t-abc123] Route harness correctly",
+        ]
+
     def _translate_and_capture_env(self, tmp_path, *, harness: str) -> dict[str, str]:
+        return self._translate_and_capture_call_args(tmp_path, harness=harness).kwargs["env"]
+
+    def _translate_and_capture_call_args(self, tmp_path, *, harness: str):
         from mtor.worker.translocase import translate
 
         rev_parse_count = 0
@@ -121,4 +137,4 @@ class TestHarnessRouting:
                 )
             )
 
-        return create_subprocess.call_args.kwargs["env"]
+        return create_subprocess.call_args
