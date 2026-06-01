@@ -52,8 +52,22 @@ def test_cleanup_noop_on_missing_dir(tmp_path: Path):
     run.assert_not_called()
 
 
+def test_auto_commit_precedes_cleanup():
+    source = Path(translocase.__file__).read_text()
+
+    # _auto_commit must appear before _cleanup_worktree in translate()
+    auto_commit_pos = source.index("auto_committed = _auto_commit(")
+    cleanup_pos = source.index("_cleanup_worktree(str(worktree_path))")
+    assert auto_commit_pos < cleanup_pos, (
+        "_auto_commit must execute before _cleanup_worktree"
+    )
+
+    # Cleanup must be guarded by `not auto_committed`
+    assert "not auto_committed" in source
+
+
 def test_cleanup_skipped_on_success():
     source = Path(translocase.__file__).read_text()
 
-    assert "if rc != 0 and worktree_path:" in source
+    assert "if rc != 0 and worktree_path and not auto_committed:" in source
     assert "_cleanup_worktree" in source

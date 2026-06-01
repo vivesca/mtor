@@ -878,12 +878,13 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
 
         rc = proc.returncode or 0
-        if rc != 0 and worktree_path:
-            _cleanup_worktree(str(worktree_path))
-        # Build tasks get an auto-commit safety net; read-only modes must never
-        # commit runtime bookkeeping from the main repo.
+        auto_committed = False
+        # Preserve recoverable edits BEFORE failed-run cleanup resets the worktree.
+        # Read-only modes (scout/research) are protected by _mode_allows_auto_commit.
         if work_dir and _mode_allows_auto_commit(mode):
-            _auto_commit(str(work_dir), wf_id)
+            auto_committed = _auto_commit(str(work_dir), wf_id)
+        if rc != 0 and worktree_path and not auto_committed:
+            _cleanup_worktree(str(worktree_path))
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
 
