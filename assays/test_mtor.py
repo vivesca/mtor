@@ -1381,6 +1381,10 @@ class TestStats:
 
 
 class TestCheckpoints:
+    def _cp_dir(self, tmp_path):
+        """Return the ribosome-checkpoints directory under the fake home."""
+        return tmp_path / ".local" / "share" / "vivesca" / "ribosome-checkpoints"
+
     def test_checkpoints_no_dir(self, tmp_path, monkeypatch):
         """When checkpoints dir doesn't exist, return empty list."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1391,12 +1395,10 @@ class TestCheckpoints:
         assert data["result"]["count"] == 0
 
     def test_checkpoints_reads_json(self, tmp_path, monkeypatch):
-        """Reads checkpoint JSON files from the checkpoints dir."""
+        """Reads checkpoint JSON files from the ribosome-checkpoints dir."""
         import json as _json
 
-        import mtor.cli as _cli
-
-        cp_dir = tmp_path / "checkpoints"
+        cp_dir = self._cp_dir(tmp_path)
         cp_dir.mkdir(parents=True)
         cp_file = cp_dir / "t-abc123.json"
         cp_data = {
@@ -1409,7 +1411,7 @@ class TestCheckpoints:
             "diff_stat": "3 files changed",
         }
         cp_file.write_text(_json.dumps(cp_data))
-        monkeypatch.setattr(_cli, "OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         exit_code, data = invoke(["checkpoints"])
         assert exit_code == 0
         assert data["ok"] is True
@@ -1421,45 +1423,119 @@ class TestCheckpoints:
         """Checkpoints are returned in reverse sorted filename order."""
         import json as _json
 
-        import mtor.cli as _cli
-
-        cp_dir = tmp_path / "checkpoints"
+        cp_dir = self._cp_dir(tmp_path)
         cp_dir.mkdir(parents=True)
         for name in ["t-aaa.json", "t-zzz.json", "t-mmm.json"]:
             (cp_dir / name).write_text(_json.dumps({"workflow_id": name[:-5]}))
-        monkeypatch.setattr(_cli, "OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         exit_code, data = invoke(["checkpoints"])
         assert exit_code == 0
         ids = [cp["workflow_id"] for cp in data["result"]["checkpoints"]]
         assert ids == ["t-zzz", "t-mmm", "t-aaa"]
 
-    def test_checkpoints_skips_malformed_json(self, tmp_path, monkeypatch):
-        """Malformed JSON files are silently skipped."""
+    def test_checkpoints_malformed_json_reported(self, tmp_path, monkeypatch):
+        """Malformed JSON files are reported via malformed_count and malformed_files."""
         import json as _json
 
-        import mtor.cli as _cli
-
-        cp_dir = tmp_path / "checkpoints"
+        cp_dir = self._cp_dir(tmp_path)
         cp_dir.mkdir(parents=True)
         (cp_dir / "good.json").write_text(_json.dumps({"workflow_id": "good-1"}))
         (cp_dir / "bad.json").write_text("not valid json{")
-        monkeypatch.setattr(_cli, "OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         exit_code, data = invoke(["checkpoints"])
         assert exit_code == 0
         assert data["result"]["count"] == 1
         assert data["result"]["checkpoints"][0]["workflow_id"] == "good-1"
+        assert data["result"]["malformed_count"] == 1
+        assert "bad.json" in data["result"]["malformed_files"]
 
     def test_checkpoints_empty_dir(self, tmp_path, monkeypatch):
         """Empty checkpoints dir returns empty list."""
-        import mtor.cli as _cli
-
-        cp_dir = tmp_path / "checkpoints"
+        cp_dir = self._cp_dir(tmp_path)
         cp_dir.mkdir(parents=True)
-        monkeypatch.setattr(_cli, "OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         exit_code, data = invoke(["checkpoints"])
         assert exit_code == 0
         assert data["result"]["checkpoints"] == []
         assert data["result"]["count"] == 0
+
+    def test_checkpoints_ssh_fallback(self, tmp_path, monkeypatch):
+        """When local dir is absent, checkpoints are read from worker via ssh."""
+        import json as _json
+
+        import mtor.cli as _cli
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        remote_cp = {"workflow_id": "remote-1", "stash_ref": "xyz"}
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if cmd[0] == "ssh" and "ls -1" in cmd[-1]:
+                result.stdout = (
+                    "/home/vivesca/.local/share/vivesca/ribosome-checkpoints/remote-1.json\n"
+                )
+            elif cmd[0] == "ssh" and "cat " in cmd[-1]:
+                result.stdout = _json.dumps(remote_cp)
+            else:
+                result.stdout = ""
+            return result
+
+        with patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["checkpoints"])
+
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["count"] == 1
+        assert data["result"]["checkpoints"][0]["workflow_id"] == "remote-1"
+
+    def test_checkpoints_ssh_malformed_reported(self, tmp_path, monkeypatch):
+        """Malformed files from ssh fallback are reported in malformed_count."""
+        import json as _json
+
+        import mtor.cli as _cli
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if cmd[0] == "ssh" and "ls -1" in cmd[-1]:
+                result.stdout = (
+                    "/home/vivesca/.local/share/vivesca/ribosome-checkpoints/good.json\n"
+                    "/home/vivesca/.local/share/vivesca/ribosome-checkpoints/bad.json\n"
+                )
+            elif cmd[0] == "ssh" and "good.json" in cmd[-1]:
+                result.stdout = _json.dumps({"workflow_id": "good-1"})
+            elif cmd[0] == "ssh" and "bad.json" in cmd[-1]:
+                result.stdout = "broken{"
+            else:
+                result.stdout = ""
+            return result
+
+        with patch.object(_cli.subprocess, "run", side_effect=fake_run):
+            exit_code, data = invoke(["checkpoints"])
+
+        assert exit_code == 0
+        assert data["result"]["count"] == 1
+        assert data["result"]["malformed_count"] == 1
+        assert "bad.json" in data["result"]["malformed_files"]
+
+    def test_checkpoints_no_malformed_fields_when_all_valid(self, tmp_path, monkeypatch):
+        """When all checkpoint files are valid, malformed fields are absent."""
+        import json as _json
+
+        cp_dir = self._cp_dir(tmp_path)
+        cp_dir.mkdir(parents=True)
+        (cp_dir / "valid.json").write_text(_json.dumps({"workflow_id": "valid-1"}))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        exit_code, data = invoke(["checkpoints"])
+        assert exit_code == 0
+        assert "malformed_count" not in data["result"]
+        assert "malformed_files" not in data["result"]
 
 
 class TestLogs:

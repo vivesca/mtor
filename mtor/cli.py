@@ -2298,15 +2298,48 @@ def checkpoints() -> None:
     """List saved checkpoints from failed ribosome runs."""
     import json as _json
 
-    cp_dir = Path(OUTPUTS_DIR) / "checkpoints"
-    if not cp_dir.exists():
-        _ok("mtor checkpoints", {"checkpoints": [], "count": 0}, version=VERSION)
-        return
-    cps = []
-    for f in sorted(cp_dir.glob("*.json"), reverse=True):
-        with contextlib.suppress(Exception):
-            cps.append(_json.loads(f.read_text()))
-    _ok("mtor checkpoints", {"checkpoints": cps, "count": len(cps)}, version=VERSION)
+    cp_dir = Path.home() / ".local" / "share" / "vivesca" / "ribosome-checkpoints"
+    files: list[tuple[str, str]] = []  # (filename, file_content)
+
+    if cp_dir.is_dir():
+        for f in sorted(cp_dir.glob("*.json"), reverse=True):
+            files.append((f.name, f.read_text()))
+    else:
+        # Fallback: read from worker via ssh
+        remote_base = "$HOME/.local/share/vivesca/ribosome-checkpoints"
+        ls_result = subprocess.run(
+            ["ssh", WORKER_HOST, f"ls -1 {remote_base}/*.json 2>/dev/null"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if ls_result.returncode == 0 and ls_result.stdout.strip():
+            for remote_path in ls_result.stdout.strip().splitlines():
+                fname = remote_path.rsplit("/", 1)[-1]
+                cat_result = subprocess.run(
+                    ["ssh", WORKER_HOST, f"cat {remote_path}"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if cat_result.returncode == 0:
+                    files.append((fname, cat_result.stdout))
+
+    cps: list[dict] = []
+    malformed_count = 0
+    malformed_files: list[str] = []
+    for fname, content in files:
+        try:
+            cps.append(_json.loads(content))
+        except (json.JSONDecodeError, ValueError):
+            malformed_count += 1
+            malformed_files.append(fname)
+
+    result: dict[str, Any] = {
+        "checkpoints": cps,
+        "count": len(cps),
+    }
+    if malformed_count:
+        result["malformed_count"] = malformed_count
+        result["malformed_files"] = malformed_files
+
+    _ok("mtor checkpoints", result, version=VERSION)
 
 
 @app.command
