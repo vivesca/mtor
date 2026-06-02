@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -1726,8 +1727,9 @@ print(json.dumps({
 }))
 """
     try:
+        remote_cmd = f"python3 -c {shlex.quote(script)} {shlex.quote(workflow_id)}"
         result = subprocess.run(
-            ["ssh", WORKER_HOST, "python3", "-c", script, workflow_id],
+            ["ssh", WORKER_HOST, remote_cmd],
             capture_output=True,
             text=True,
             timeout=15,

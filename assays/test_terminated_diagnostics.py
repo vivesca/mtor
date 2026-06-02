@@ -9,6 +9,7 @@ detected kill-reason marker from the log file on disk.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -59,8 +60,9 @@ def test_reap_worker_processes_success_uses_targeted_ssh():
         "remaining_pids": [],
     }
     completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    workflow_id = "workflow abc"
     with patch("mtor.cli.subprocess.run", return_value=completed) as run:
-        out = cli._reap_worker_processes("workflow-abc")
+        out = cli._reap_worker_processes(workflow_id)
 
     assert out == {
         "attempted": True,
@@ -70,8 +72,11 @@ def test_reap_worker_processes_success_uses_targeted_ssh():
         "remaining_pids": [],
     }
     cmd = run.call_args.args[0]
-    assert cmd[:4] == ["ssh", cli.WORKER_HOST, "python3", "-c"]
-    assert cmd[-1] == "workflow-abc"
+    assert cmd[:2] == ["ssh", cli.WORKER_HOST]
+    assert len(cmd) == 3
+    remote_cmd = cmd[2]
+    assert "python3 -c" in remote_cmd
+    assert shlex.quote(workflow_id) in remote_cmd
     assert "pkill" not in " ".join(cmd)
 
 
@@ -98,4 +103,3 @@ def test_running_trace_with_no_pending_activity_is_stale():
 
     assert "stale" in out.lower()
     assert "no activity" in out.lower()
-
