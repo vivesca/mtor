@@ -301,6 +301,12 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
     operator_state = payload.get("operator_state")
     if operator_state == "running":
         execution_state = payload.get("execution_state", {})
+        pending_activities = payload.get("pending_activities") or []
+        no_activity_evidence = not pending_activities and (
+            payload.get("active_logs") or execution_state.get("execution_state") == "queued"
+        )
+        if no_activity_evidence:
+            return "workflow is stale: running in Temporal with no activity currently executing"
         if execution_state.get("heartbeat_stale"):
             return "running workflow has a stale activity heartbeat"
         if execution_state.get("execution_state") == "queued":
@@ -1645,6 +1651,108 @@ def batch_cancel(
     )
 
 
+def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
+    """Terminate worker-side ribosome/Claude processes for one workflow ID."""
+    empty = {
+        "terminated_pids": [],
+        "killed_pids": [],
+        "remaining_pids": [],
+    }
+    if not workflow_id.strip():
+        return {"attempted": False, "ok": False, **empty, "error": "workflow_id is empty"}
+
+    script = r"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+workflow_id = sys.argv[1]
+own_pids = {os.getpid(), os.getppid()}
+proc = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True, check=False)
+pids = []
+for line in proc.stdout.splitlines()[1:]:
+    parts = line.split(None, 1)
+    if len(parts) < 2:
+        continue
+    pid_s, args = parts
+    try:
+        pid = int(pid_s)
+    except ValueError:
+        continue
+    if pid in own_pids or workflow_id not in args:
+        continue
+    low = args.lower()
+    if "effectors/ribosome" not in low and "claude" not in low:
+        continue
+    pids.append(pid)
+
+terminated = []
+killed = []
+for pid in pids:
+    try:
+        os.kill(pid, signal.SIGTERM)
+        terminated.append(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+time.sleep(0.3)
+for pid in terminated:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        continue
+    try:
+        os.kill(pid, signal.SIGKILL)
+        killed.append(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+time.sleep(0.1)
+remaining = []
+for pid in terminated:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        continue
+    remaining.append(pid)
+
+print(json.dumps({
+    "terminated_pids": terminated,
+    "killed_pids": killed,
+    "remaining_pids": remaining,
+}))
+"""
+    try:
+        result = subprocess.run(
+            ["ssh", WORKER_HOST, "python3", "-c", script, workflow_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parsed = json.loads(result.stdout.strip())
+            remaining = parsed.get("remaining_pids", [])
+            return {
+                "attempted": True,
+                "ok": len(remaining) == 0,
+                "terminated_pids": parsed.get("terminated_pids", []),
+                "killed_pids": parsed.get("killed_pids", []),
+                "remaining_pids": remaining,
+            }
+        return {
+            "attempted": True,
+            "ok": False,
+            **empty,
+            "error": result.stderr.strip() or f"SSH exit {result.returncode}",
+        }
+    except subprocess.TimeoutExpired:
+        return {"attempted": True, "ok": False, **empty, "error": "SSH timed out"}
+    except Exception as exc:
+        return {"attempted": True, "ok": False, **empty, "error": str(exc)}
+
 def _terminate_workflow(workflow_id: str, cmd: str) -> None:
     """Shared terminate logic for both cancel and terminate commands."""
     client, err = _get_client()
@@ -1667,9 +1775,10 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
             await handle.terminate(reason="Terminated via mtor CLI")
 
         asyncio.run(_do_terminate())
+        process_cleanup = _reap_worker_processes(workflow_id)
         _ok(
             cmd,
-            {"workflow_id": workflow_id, "terminated": True},
+            {"workflow_id": workflow_id, "terminated": True, "process_cleanup": process_cleanup},
             [
                 _action(f"mtor status {workflow_id}", "Verify termination status"),
             ],
@@ -1693,12 +1802,14 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
             phrase in exc_str.lower()
             for phrase in ["already", "terminated", "cancelled", "canceled", "completed"]
         ):
+            process_cleanup = _reap_worker_processes(workflow_id)
             _ok(
                 cmd,
                 {
                     "workflow_id": workflow_id,
                     "terminated": True,
                     "note": "Workflow was already in terminal state",
+                    "process_cleanup": process_cleanup,
                 },
                 [
                     _action(f"mtor status {workflow_id}", "Verify final status"),
