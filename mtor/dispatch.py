@@ -184,6 +184,17 @@ _CHECKOUT_OK: dict = {
     "detail": "",
 }
 
+_TARGET_REPO_OK: dict = {
+    "ok": True,
+    "skipped": False,
+    "local_sha": "",
+    "worker_sha": "",
+    "origin_sha": "",
+    "branch": "",
+    "dirty": False,
+    "detail": "",
+}
+
 
 def _worker_checkout_state() -> dict:
     """Inspect worker ~/germline checkout hygiene via a single SSH call.
@@ -413,6 +424,131 @@ def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
     return state
 
 
+def _worker_addressable_repo_path(repo: str | None) -> str:
+    """Return a worker-usable absolute path, or empty string when not addressable."""
+    if not repo:
+        return ""
+
+    raw = str(repo).strip()
+    if raw in (".", "~"):
+        return ""
+
+    if raw == "~/germline" or raw.startswith("~/germline/"):
+        return "/home/vivesca" + raw[1:]
+    if raw == "~/code" or raw.startswith("~/code/"):
+        return "/home/vivesca" + raw[1:]
+    if raw == "/home/vivesca/germline" or raw.startswith("/home/vivesca/germline/"):
+        return raw
+    if raw == "/home/vivesca/code" or raw.startswith("/home/vivesca/code/"):
+        return raw
+
+    users_code = re.match(r"^/Users/[^/]+/code(/.*)?$", raw)
+    if users_code:
+        return "/home/vivesca/code" + (users_code.group(1) or "")
+
+    users_germline = re.match(r"^/Users/[^/]+/germline(/.*)?$", raw)
+    if users_germline:
+        return "/home/vivesca/germline" + (users_germline.group(1) or "")
+
+    return ""
+
+
+def _target_repo_allowed_noise(status_line: str) -> bool:
+    """Allow untracked target-repo worktree directories as benign status noise."""
+    if not status_line.startswith("?? "):
+        return False
+    path = status_line[3:].strip()
+    return path == ".worktrees/" or path.startswith(".worktrees/")
+
+
+def _worker_target_repo_state(repo: str | None, *, skip: bool = False) -> dict:
+    """Inspect local/worker target repo state without mutating either checkout."""
+    state = {**_TARGET_REPO_OK}
+    if skip:
+        state["skipped"] = True
+        state["detail"] = "skipped by --skip-sha-check"
+        return state
+
+    worker_repo = _worker_addressable_repo_path(repo)
+    if not worker_repo:
+        state["skipped"] = True
+        state["detail"] = "no worker-addressable target repo"
+        return state
+
+    try:
+        local = subprocess.run(
+            ["git", "-C", str(Path(str(repo)).expanduser()), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if local.returncode != 0:
+            state["ok"] = False
+            state["detail"] = f"local target HEAD lookup failed: {local.stderr.strip()}"
+            return state
+
+        remote_cmd = (
+            f"cd {shlex.quote(worker_repo)} && "
+            "printf 'BRANCH:%s\\n' \"$(git rev-parse --abbrev-ref HEAD)\" && "
+            "printf 'HEAD:%s\\n' \"$(git rev-parse HEAD)\" && "
+            "printf 'ORIGIN_MAIN:%s\\n' "
+            "\"$(git ls-remote origin refs/heads/main | awk '{print $1}')\" && "
+            "printf '%s\\n' 'MTOR_STATUS_START' && "
+            "git status --porcelain=v1 -uall"
+        )
+        remote = subprocess.run(
+            ["ssh", WORKER_HOST, remote_cmd],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if remote.returncode != 0:
+            state["ok"] = False
+            state["local_sha"] = local.stdout.strip()
+            state["detail"] = f"worker target repo check failed: {remote.stderr.strip()}"
+            return state
+
+        status_lines: list[str] = []
+        in_status = False
+        for line in remote.stdout.splitlines():
+            if line.startswith("BRANCH:"):
+                state["branch"] = line[7:]
+            elif line.startswith("HEAD:"):
+                state["worker_sha"] = line[5:]
+            elif line.startswith("ORIGIN_MAIN:"):
+                state["origin_sha"] = line[12:]
+            elif line == "MTOR_STATUS_START":
+                in_status = True
+            elif in_status and line:
+                status_lines.append(line)
+
+        state["local_sha"] = local.stdout.strip()
+        dirty_lines = [
+            line for line in status_lines if not _target_repo_allowed_noise(line)
+        ]
+        state["dirty"] = bool(dirty_lines)
+
+        errors: list[str] = []
+        if state["local_sha"] != state["worker_sha"]:
+            errors.append("worker target HEAD differs from local target HEAD")
+        if state["origin_sha"] and state["origin_sha"] != state["worker_sha"]:
+            errors.append("worker target HEAD differs from origin/main")
+        if not state["origin_sha"]:
+            errors.append("worker target origin/main lookup returned no SHA")
+        if state["dirty"]:
+            errors.append(
+                "worker target repo dirty/untracked files: " + "\n".join(dirty_lines)
+            )
+
+        state["ok"] = not errors
+        state["detail"] = "; ".join(errors)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        state["ok"] = False
+        state["detail"] = str(exc)
+
+    return state
+
+
 def _dedup_plan(prompt: str, spec_path: Path | None = None) -> dict:
     """Return dedup identity and block status without recording a dispatch."""
     key = compute_identity(prompt, spec_path)
@@ -527,6 +663,15 @@ def _dispatch_explanation(
         if spec_mode in ("scout", "research")
         else _worker_sha_plan(skip=skip_sha_check, repo=spec_repo)
     )
+    target_repo = (
+        {
+            **_TARGET_REPO_OK,
+            "skipped": True,
+            "detail": f"skipped for {spec_mode} mode",
+        }
+        if spec_mode in ("scout", "research")
+        else _worker_target_repo_state(spec_repo, skip=skip_sha_check)
+    )
     blocked_reasons = []
     if frozen:
         blocked_reasons.append("frozen")
@@ -540,6 +685,8 @@ def _dispatch_explanation(
         blocked_reasons.append("provider_retired")
     if worker_sha.get("error"):
         blocked_reasons.append("worker_sha_unknown")
+    if not target_repo.get("ok"):
+        blocked_reasons.append("target_repo_preflight_failed")
 
     search_attrs = _search_attr_preview(
         provider=resolved_provider,
@@ -568,6 +715,7 @@ def _dispatch_explanation(
         "pause": {"paused": paused},
         "freeze": {"frozen": frozen},
         "worker_sha": worker_sha,
+        "target_repo": target_repo,
         "risk": risk,
         "provider": {
             "selected": resolved_provider,
@@ -674,10 +822,31 @@ def _dispatch_prompt(
             )
         )
 
+    preflight_repo = repo
+    if preflight_repo is None and spec_path is not None:
+        from mtor.rptor import parse_spec
+
+        parsed_for_preflight = parse_spec(spec_path)
+        parsed_repo = parsed_for_preflight.get("repo")
+        if parsed_repo is not None:
+            preflight_repo = str(parsed_repo)
+
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter
     if spec_mode not in ("scout", "research"):
-        _check_worker_sha(skip=skip_sha_check, repo=repo)
+        _check_worker_sha(skip=skip_sha_check, repo=preflight_repo)
+        target_repo = _worker_target_repo_state(preflight_repo, skip=skip_sha_check)
+        if not target_repo["ok"]:
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Target repo preflight failed: {target_repo['detail']}",
+                    "TARGET_REPO_PREFLIGHT_FAILED",
+                    "Repair or update the worker target checkout explicitly, then retry dispatch.",
+                    [_action("mtor --explain <prompt>", "Inspect dispatch preflight state")],
+                    exit_code=1,
+                )
+            )
 
     # Mode-specific prompt suffixes
     if spec_mode == "scout":

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from mtor.cli import app
+from mtor.dispatch import _dispatch_prompt, _worker_target_repo_state
 
 
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
@@ -195,3 +199,159 @@ def test_explain_reports_pause_and_freeze_as_blocked_plan(mock_worker_sha):
     assert "frozen" in result["blocked_reasons"]
     assert result["pause"]["paused"] is True
     assert result["freeze"]["frozen"] is True
+
+
+def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+
+
+def test_worker_target_repo_state_blocks_worker_head_drift():
+    with patch("mtor.dispatch.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _completed(stdout="local-sha\n"),
+            _completed(
+                stdout=(
+                    "BRANCH:main\n"
+                    "HEAD:worker-sha\n"
+                    "ORIGIN_MAIN:worker-sha\n"
+                    "MTOR_STATUS_START\n"
+                )
+            ),
+        ]
+
+        state = _worker_target_repo_state("~/code/mtor")
+
+    assert state["ok"] is False
+    assert state["local_sha"] == "local-sha"
+    assert state["worker_sha"] == "worker-sha"
+    assert "local target HEAD" in state["detail"]
+
+
+def test_worker_target_repo_state_blocks_origin_head_drift():
+    with patch("mtor.dispatch.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _completed(stdout="same-sha\n"),
+            _completed(
+                stdout=(
+                    "BRANCH:main\n"
+                    "HEAD:same-sha\n"
+                    "ORIGIN_MAIN:origin-sha\n"
+                    "MTOR_STATUS_START\n"
+                )
+            ),
+        ]
+
+        state = _worker_target_repo_state("~/code/mtor")
+
+    assert state["ok"] is False
+    assert state["origin_sha"] == "origin-sha"
+    assert "origin/main" in state["detail"]
+
+
+def test_worker_target_repo_state_allows_worktrees_noise():
+    with patch("mtor.dispatch.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _completed(stdout="same-sha\n"),
+            _completed(
+                stdout=(
+                    "BRANCH:main\n"
+                    "HEAD:same-sha\n"
+                    "ORIGIN_MAIN:same-sha\n"
+                    "MTOR_STATUS_START\n"
+                    "?? .worktrees/\n"
+                    "?? .worktrees/task-a/file.txt\n"
+                )
+            ),
+        ]
+
+        state = _worker_target_repo_state("~/code/mtor")
+
+    assert state["ok"] is True
+    assert state["dirty"] is False
+
+
+def test_worker_target_repo_state_uses_worker_usable_path_for_users_repo():
+    with patch("mtor.dispatch.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _completed(stdout="same-sha\n"),
+            _completed(
+                stdout=(
+                    "BRANCH:main\n"
+                    "HEAD:same-sha\n"
+                    "ORIGIN_MAIN:same-sha\n"
+                    "MTOR_STATUS_START\n"
+                )
+            ),
+        ]
+
+        state = _worker_target_repo_state("/Users/terry/code/chiasma")
+
+    assert state["ok"] is True
+    ssh_cmd = mock_run.call_args_list[1].args[0][2]
+    assert "cd /home/vivesca/code/chiasma &&" in ssh_cmd
+    assert "'~/code/chiasma'" not in ssh_cmd
+    assert '"~/code/chiasma"' not in ssh_cmd
+
+
+@patch("mtor.dispatch._get_client")
+@patch("mtor.dispatch._worker_target_repo_state")
+@patch("mtor.dispatch._check_worker_sha")
+def test_dispatch_prompt_blocks_before_starting_workflow_on_target_repo_drift(
+    mock_sha, mock_target_repo, mock_get_client
+):
+    client = MagicMock()
+    client.start_workflow = AsyncMock()
+    mock_get_client.return_value = (client, None)
+    mock_sha.return_value = True
+    mock_target_repo.return_value = {
+        "ok": False,
+        "skipped": False,
+        "local_sha": "local",
+        "worker_sha": "worker",
+        "origin_sha": "worker",
+        "branch": "main",
+        "dirty": False,
+        "detail": "worker target HEAD differs from local target HEAD",
+    }
+
+    with pytest.raises(SystemExit) as exc:
+        _dispatch_prompt("Make assays/test_search_attributes.py pass", repo="~/code/mtor")
+
+    assert exc.value.code == 1
+    assert not mock_get_client.called
+    client.start_workflow.assert_not_called()
+
+
+@patch("mtor.dispatch._worker_target_repo_state")
+@patch("mtor.dispatch._worker_sha_plan")
+@patch("mtor.dispatch._get_client")
+def test_dispatch_explanation_includes_target_repo_preflight(
+    mock_get_client, mock_worker_sha, mock_target_repo
+):
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": True,
+        "auto_deploy_would_occur": False,
+        "local_sha": "same",
+        "worker_sha": "same",
+        "error": "",
+    }
+    mock_target_repo.return_value = {
+        "ok": False,
+        "skipped": False,
+        "local_sha": "local",
+        "worker_sha": "worker",
+        "origin_sha": "worker",
+        "branch": "main",
+        "dirty": False,
+        "detail": "worker target HEAD differs from local target HEAD",
+    }
+
+    exit_code, data = invoke(["Improve mtor robustness safely", "--explain"])
+
+    assert exit_code == 0
+    result = data["result"]
+    assert result["would_dispatch"] is False
+    assert "target_repo_preflight_failed" in result["blocked_reasons"]
+    assert result["target_repo"] == mock_target_repo.return_value
+    assert not mock_get_client.called
