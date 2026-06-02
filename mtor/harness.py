@@ -64,7 +64,7 @@ def _build_goose_command(task: str) -> list[str]:
 
 def _build_droid_command(task: str) -> list[str]:
     """Build a ``droid`` CLI command for the task."""
-    return ["droid", "run", task]
+    return ["droid", "exec", task]
 
 
 _COMMAND_BUILDERS: dict[str, Any] = {

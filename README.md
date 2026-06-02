@@ -42,14 +42,14 @@ Other settings (task queue, output paths) are configured in `mtor/__init__.py`.
 
 Tasks are automatically routed to the best provider based on keywords:
 
-- Exploration queries → `droid`
-- Bug fixes → `goose`
-- Build tasks → `zhipu` (default)
+- Exploration queries → `zhipu`
+- Bug fixes → `zhipu`
+- Build tasks → `zhipu`
 
 Override with `--provider`:
 
 ```bash
-mtor "Fix the login bug" --provider goose
+mtor "Fix the login bug" --provider zhipu
 ```
 
 ### Risk classification

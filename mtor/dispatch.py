@@ -94,8 +94,8 @@ ROUTE_PATTERNS: dict[str, list[str]] = {
 }
 
 ROUTE_TO_PROVIDER: dict[str, str] = {
-    "explore": "droid",
-    "bugfix": "goose",
+    "explore": "zhipu",
+    "bugfix": "zhipu",
     "build": "zhipu",
     "test": "zhipu",
     "research": "zhipu",

@@ -27,6 +27,11 @@ class TestRunHarness:
         assert "--print" in cmd
         assert "write a test" in cmd
 
+    def test_run_harness_droid_builds_exec_command(self):
+        """Provider 'droid' builds a droid exec command."""
+        cmd = build_command("droid", "inspect the repo")
+        assert cmd == ["droid", "exec", "inspect the repo"]
+
     @patch("mtor.harness.subprocess.run")
     def test_run_harness_result_captures_output(self, mock_run):
         """run_harness returns a HarnessResult with captured stdout/stderr."""
