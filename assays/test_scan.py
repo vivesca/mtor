@@ -225,3 +225,122 @@ class TestScanCLI:
         monkeypatch.setattr(_scan, "REPO_DIR", str(tmp_path))
         _, data = invoke(["scan"])
         assert data["command"] == "mtor scan"
+
+
+# ---------------------------------------------------------------------------
+# divergent-fork (incomplete abscission) tests
+# ---------------------------------------------------------------------------
+
+
+def _make_pkg(root, parent, name, version=None, declared_name=None):
+    """Create <root>/<parent>/<name>/pyproject.toml declaring a package."""
+    d = root / parent / name if parent else root / name
+    d.mkdir(parents=True)
+    decl = declared_name if declared_name is not None else name
+    if version is None:
+        body = f'[project]\nname = "{decl}"\ndynamic = ["version"]\n'
+    else:
+        body = f'[project]\nname = "{decl}"\nversion = "{version}"\n'
+    (d / "pyproject.toml").write_text(body)
+    return d
+
+
+class TestDivergentForks:
+    def test_flags_divergent_fork_with_versions(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "packages", "foo", version="0.1.0")
+        _make_pkg(code, "", "foo", version="0.7.4")
+
+        findings = _check_divergent_forks(repo, code)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["category"] == "maintenance"
+        assert f["priority"] == "high"
+        assert f["target"] == "packages/foo"
+        assert "incomplete abscission" in f["description"]
+        assert "0.1.0" in f["description"] and "0.7.4" in f["description"]
+
+    def test_no_standalone_not_flagged(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        code.mkdir()
+        _make_pkg(repo, "packages", "lonely", version="0.1.0")
+
+        findings = _check_divergent_forks(repo, code)
+        assert findings == []
+
+    def test_same_version_still_flagged_as_vendored_copy(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "packages", "dup", version="1.2.3")
+        _make_pkg(code, "", "dup", version="1.2.3")
+
+        findings = _check_divergent_forks(repo, code)
+        assert len(findings) == 1
+        assert "vendored second copy" in findings[0]["description"]
+
+    def test_dynamic_version_standalone_still_flagged(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "packages", "mtor", version="0.1.0")
+        _make_pkg(code, "", "mtor", version=None)  # dynamic, like real vivesca/mtor
+
+        findings = _check_divergent_forks(repo, code)
+        assert len(findings) == 1
+        assert findings[0]["target"] == "packages/mtor"
+
+    def test_name_collision_only_not_flagged(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "packages", "thing", version="0.1.0")
+        # same dir name, but the standalone declares a DIFFERENT package name
+        _make_pkg(code, "", "thing", version="0.2.0", declared_name="something-else")
+
+        findings = _check_divergent_forks(repo, code)
+        assert findings == []
+
+    def test_effectors_parent_also_checked(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "effectors", "bar", version="0.1.0")
+        _make_pkg(code, "", "bar", version="0.2.0")
+
+        findings = _check_divergent_forks(repo, code)
+        assert len(findings) == 1
+        assert findings[0]["target"] == "effectors/bar"
+
+    def test_missing_code_dir_returns_empty(self, tmp_path):
+        from mtor.scan import _check_divergent_forks
+
+        repo = tmp_path / "germline"
+        _make_pkg(repo, "packages", "foo", version="0.1.0")
+        findings = _check_divergent_forks(repo, tmp_path / "nonexistent-code")
+        assert findings == []
+
+    def test_run_checks_wires_divergent_fork(self, tmp_path):
+        from mtor.scan import VALID_CATEGORIES, _run_checks
+
+        repo = tmp_path / "germline"
+        code = tmp_path / "code"
+        _make_pkg(repo, "packages", "foo", version="0.1.0")
+        _make_pkg(code, "", "foo", version="0.2.0")
+
+        results = _run_checks(
+            effectors_dir=tmp_path, marks_dir=tmp_path, repo_dir=repo, code_dir=code
+        )
+        assert any(r["target"] == "packages/foo" for r in results)
+        for r in results:
+            assert r["category"] in VALID_CATEGORIES
