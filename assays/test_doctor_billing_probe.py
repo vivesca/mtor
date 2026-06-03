@@ -8,15 +8,23 @@ discarded response body, so 402 Coding-plan-expired was indistinguishable from
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 from io import BytesIO
 from unittest.mock import patch
+
+import pytest
 
 from mtor.doctor import (
     ProbeResult,
     _check_coding_plan_lane,
     _classify_response_error,
     _probe_provider,
+)
+
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: asserts against the real ~/code/mtor lockfile state. Set MTOR_INTEGRATION=1 to run.",
 )
 
 
@@ -119,6 +127,7 @@ def test_probe_dataclass_has_classification_default():
 # --- Coding-plan lane check ------------------------------------------------
 
 
+@integration
 def test_coding_plan_lane_pass_with_real_lockfile():
     """coding_plan_lane check should pass with the real lockfile."""
     result = _check_coding_plan_lane()

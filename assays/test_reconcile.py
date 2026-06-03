@@ -5,19 +5,28 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_reconcile.py -x
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mtor.spec import update_spec_status
 from mtor.reconcile import check_code_exists, reconcile_all, reconcile_spec
 
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: check_code_exists resolves against ~/code/mtor, absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
+)
+
 
 class TestReconcileCheckCodeExists:
     """check_code_exists correctly detects existing files and functions."""
 
+    @integration
     def test_file_exists_returns_true(self):
         """Existing file → returns True."""
         assert check_code_exists("mtor/reconcile.py") is True
@@ -26,6 +35,7 @@ class TestReconcileCheckCodeExists:
         """Missing file → returns False."""
         assert check_code_exists("mtor/nonexistent_file.py") is False
 
+    @integration
     def test_function_exists_in_file_returns_true(self):
         """Existing function in file → returns True."""
         assert check_code_exists("mtor/reconcile.py:check_code_exists") is True
@@ -234,6 +244,7 @@ workflow_id: wf-12345
         assert "status: done" in matched.read_text()
         assert "status: dispatched" in unmatched.read_text()
 
+    @integration
     def test_done_with_existing_code_no_warning(self, tmp_path: Path):
         """done + files exist → correct, no warning."""
         spec_path = tmp_path / "test-done-code-exists.md"

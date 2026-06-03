@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from mtor.worker.translocase import _is_coaching_bloat_error
 
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: reads ~/germline/effectors/ribosome (not in this repo). Set MTOR_INTEGRATION=1 to run.",
+)
 
 RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 
 
+@integration
 def test_ribosome_script_has_clear_coaching_budget_gate():
     """The shell effector fails before dispatching when coaching is too large."""
     source = RIBOSOME_SCRIPT.read_text()
@@ -22,6 +30,7 @@ def test_ribosome_script_has_clear_coaching_budget_gate():
     assert "bytes > 8 * 1024" in source
 
 
+@integration
 def test_ribosome_script_syntax_stays_valid():
     """The live effector remains parseable after the guard is inserted."""
     result = subprocess.run(

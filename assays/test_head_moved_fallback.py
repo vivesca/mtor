@@ -10,8 +10,16 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_head_moved_fallback.py -v
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from unittest.mock import patch
+
+import pytest
+
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: drives real git init/worktree, needs git identity config absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
+)
 
 
 def _run(coro):
@@ -77,6 +85,7 @@ class TestChaperoneHeadMovedFallback:
 class TestWorktreeRetry:
     """_create_worktree retries on git lock contention."""
 
+    @integration
     def test_succeeds_on_second_attempt(self, tmp_path):
         """Worktree creation should retry and succeed after transient failure."""
         from mtor.worker.translocase import _create_worktree
