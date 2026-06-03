@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from mtor.cli import app
 from mtor.rptor import topological_sort
+
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: dispatch-all reads specs whose repo: paths resolve to ~/code/mtor, absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +132,7 @@ class TestTopologicalSort:
 
 
 class TestDispatchAllTopologicalOrder:
+    @integration
     def test_test_dispatch_all_topological_order(self, tmp_path):
         """dispatch-all --dry-run returns specs in topological (dependency) order."""
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
@@ -142,6 +151,7 @@ class TestDispatchAllTopologicalOrder:
         # Both dispatchable, no inter-dispatchable deps → alphabetical: c, e
         assert names == ["c", "e"]
 
+    @integration
     def test_test_dispatch_all_dry_run(self, tmp_path):
         """dispatch-all --dry-run lists specs without connecting to Temporal."""
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
@@ -158,6 +168,7 @@ class TestDispatchAllTopologicalOrder:
 
 
 class TestSearchAttributeSetOnDispatch:
+    @integration
     def test_test_search_attribute_set_on_dispatch(self, tmp_path):
         """dispatch-all passes provider to each dispatched workflow spec."""
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")

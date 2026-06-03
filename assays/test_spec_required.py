@@ -191,7 +191,7 @@ class TestInlinePromptStillRequired:
                 )
                 # If no SystemExit, empty prompt was accepted (no validation exists)
             except SystemExit as exc:
-                output = str(exc.code) if exc.code else ""
+                _ = str(exc.code) if exc.code else ""
                 # May or may not reject — empty prompt handling is not yet implemented
 
 

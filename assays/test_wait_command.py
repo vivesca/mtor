@@ -4,7 +4,6 @@ Replaces the recurring inline `until [ "$(mtor status ... | python3 -c ...)" != 
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from io import StringIO

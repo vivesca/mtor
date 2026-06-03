@@ -11,7 +11,6 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def _make_status_obj(name: str):
@@ -55,7 +54,7 @@ def test_short_emits_one_line_completed():
     client = _make_client("COMPLETED", {"results": [{"success": True, "exit_code": 0, "review": {"verdict": "approved"}}]})
     with patch.object(cli, "_get_client", return_value=(client, None)):
         out, _ = _capture(cli.status, "wf-x", short=True)
-    lines = [l for l in out.split("\n") if l.strip()]
+    lines = [ln for ln in out.split("\n") if ln.strip()]
     assert len(lines) == 1
 
 

@@ -31,8 +31,8 @@ except ImportError:
     most_common_stall_pattern = None  # type: ignore[assignment, misc]
 
 
-import pytest
-from unittest.mock import MagicMock, patch
+import pytest  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
 
 if not _stall_trace_available:
     pytestmark = pytest.mark.skip(reason="mtor.worker.stall_trace not yet available")

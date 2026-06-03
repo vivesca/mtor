@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mtor.worker.plan_workflow import PlanWorkflow, find_ready_specs
+from mtor.worker.plan_workflow import PlanWorkflow
 
 
 # ---------------------------------------------------------------------------

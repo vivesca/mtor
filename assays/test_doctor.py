@@ -6,16 +6,24 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mtor.doctor import (
     ProbeResult,
     _probe_provider,
     format_health_display,
 )
 
+integration = pytest.mark.skipif(
+    not os.environ.get("MTOR_INTEGRATION"),
+    reason="integration: doctor() runs real env checks (lockfile/billing over ~/code/mtor) that leak past mocks on a clean runner. Set MTOR_INTEGRATION=1 to run.",
+)
+
 
 class TestCheckTemporalReachableSuccess(unittest.TestCase):
     """Test successful Temporal connection check."""
 
+    @integration
     @patch("mtor.doctor._get_client")
     def test_check_temporal_reachable_success(self, mock_get_client):
         """Test when Temporal is reachable."""
@@ -88,6 +96,7 @@ class TestCheckTemporalUnreachable(unittest.TestCase):
 class TestCheckWorkerAlive(unittest.TestCase):
     """Test worker alive check."""
 
+    @integration
     @patch("mtor.doctor._get_client")
     def test_check_worker_alive(self, mock_get_client):
         """Test worker liveness probe."""

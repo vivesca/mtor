@@ -9,7 +9,6 @@ import io
 import json
 import sys
 from contextlib import ExitStack
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mtor

@@ -8,11 +8,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker, UnsandboxedWorkflowRunner
 
