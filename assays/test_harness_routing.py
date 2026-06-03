@@ -23,7 +23,6 @@ class TestHarnessRouting:
 
     def test_harness_in_workflow_spec(self):
         """dispatch.py includes harness in the workflow input spec dict."""
-        from mtor.dispatch import _dispatch_prompt
 
         # The spec dict passed to Temporal should contain 'harness' key
         # We can't easily test the full dispatch without Temporal,

@@ -16,7 +16,6 @@ Run: cd ~/code/mtor && uv run pytest assays/test_stall_dual_signal.py -v
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.worker.translocase import _heartbeat_stall_check

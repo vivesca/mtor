@@ -10,7 +10,6 @@ import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from mtor.cli import app
 
 

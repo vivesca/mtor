@@ -26,11 +26,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-import sys
-from pathlib import Path
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mtor.worker.translocase import chaperone
+from mtor.worker.translocase import chaperone  # noqa: E402
 
 
 class TestChaperoneHeadMovedFallback:

@@ -177,7 +177,7 @@ class TestRunWatchCallback:
         def on_cycle(cycle):
             callbacks.append(cycle)
 
-        stats = run_watch(str(soma), interval=0, max_cycles=2, on_cycle=on_cycle)
+        run_watch(str(soma), interval=0, max_cycles=2, on_cycle=on_cycle)
         assert len(callbacks) == 2
         assert callbacks[0].cycle == 1
         assert callbacks[1].cycle == 2
