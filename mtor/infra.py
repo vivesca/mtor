@@ -59,7 +59,9 @@ def _split_marked_sections(output: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for line in output.splitlines():
-        if line.startswith("__MTOR_") and line.endswith("__"):
+        if (
+            line.startswith("__MTOR_") or line == "__TEMPORAL_WORKER__"
+        ) and line.endswith("__"):
             current = line.strip("_").lower()
             sections[current] = []
             continue

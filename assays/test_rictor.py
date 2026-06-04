@@ -158,6 +158,17 @@ class TestCheckHealth:
         ssh_check = next(c for c in report.checks if c["name"] == "worker_ssh")
         assert "Skipped" in str(ssh_check["detail"])
 
+    def test_split_marked_sections_handles_temporal_worker_marker(self):
+        """Marked output splits mtor-worker and temporal-worker sections."""
+        from mtor.infra import _split_marked_sections
+
+        sections = _split_marked_sections(SERVICE_OK)
+
+        assert sections == {
+            "mtor_worker": "ActiveState=active\nSubState=running\nMainPID=123",
+            "temporal_worker": "ActiveState=inactive\nSubState=dead\nMainPID=0",
+        }
+
     def test_check_health_detects_single_worker_service(self, tmp_path):
         """Remote health passes with mtor-worker active and temporal-worker inactive."""
         from mtor.infra import check_health
