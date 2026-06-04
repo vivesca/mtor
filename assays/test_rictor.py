@@ -596,6 +596,94 @@ class TestDeploy:
             remote_repo_dir="/home/vivesca/code/mtor",
         )
 
+    def test_deploy_records_orphan_cleanup_after_restart(self):
+        """deploy terminates orphan worker roots and records the cleanup step."""
+        from mtor.infra import HealthReport, deploy
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+                result.stdout = "found=1\nterminated=1\nremaining=0\npids=321\n"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is True
+        step_names = [step["step"] for step in result.steps]
+        assert step_names == ["push", "merge", "restart", "orphan_cleanup", "health_check"]
+        cleanup_step = result.steps[3]
+        assert cleanup_step["ok"] is True
+        assert cleanup_step["found"] == 1
+        assert cleanup_step["terminated"] == 1
+        assert cleanup_step["remaining"] == 0
+        assert cleanup_step["pids"] == ["321"]
+        assert any("kill -TERM $pids" in cmd[-1] for cmd in calls if "list_orphans" in cmd[-1])
+
+    def test_deploy_orphan_cleanup_targets_only_ppid_one_roots(self):
+        """cleanup command filters to orphaned op-run worker roots under PID 1."""
+        from mtor.infra import HealthReport, deploy
+
+        cleanup_commands = []
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+                cleanup_commands.append(cmd[-1])
+                result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is True
+        assert len(cleanup_commands) == 1
+        cleanup_command = cleanup_commands[0]
+        assert "$2 == 1" in cleanup_command
+        assert 'index($0, "op run")' in cleanup_command
+        assert 'index($0, "python3 -m mtor.worker")' in cleanup_command
+
+    def test_deploy_fails_if_orphan_cleanup_leaves_remaining_roots(self):
+        """deploy does not report healthy when cleanup cannot remove all orphans."""
+        from mtor.infra import HealthReport, deploy
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+                result.stdout = "found=2\nterminated=1\nremaining=1\npids=321,322\n"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        cleanup_step = next(step for step in result.steps if step["step"] == "orphan_cleanup")
+        health_step = next(step for step in result.steps if step["step"] == "health_check")
+        assert result.healthy is False
+        assert cleanup_step["ok"] is False
+        assert cleanup_step["remaining"] == 1
+        assert health_step["ok"] is True
+
 
 # ---------------------------------------------------------------------------
 # clean tests

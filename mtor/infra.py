@@ -95,6 +95,76 @@ def _parse_worker_roots(output: str) -> tuple[bool, str]:
     return False, f"expected one mtor.worker root, found {len(roots)}"
 
 
+def _parse_orphan_cleanup_output(output: str) -> dict[str, object]:
+    """Parse key=value output from the orphan worker cleanup command."""
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+
+    def as_int(key: str) -> int:
+        try:
+            return int(values.get(key, "0"))
+        except ValueError:
+            return 0
+
+    pids = [pid for pid in values.get("pids", "").split(",") if pid]
+    return {
+        "found": as_int("found"),
+        "terminated": as_int("terminated"),
+        "remaining": as_int("remaining"),
+        "pids": pids,
+    }
+
+
+def _cleanup_orphaned_worker_roots(host: str) -> dict[str, object]:
+    """Terminate orphaned ``op run ... python3 -m mtor.worker`` roots on *host*."""
+    cleanup_script = r"""
+set -u
+list_orphans() {
+  ps -eo pid=,ppid=,args= | awk '$2 == 1 && index($0, "op run") && index($0, "python3 -m mtor.worker") {print $1}'
+}
+
+pids="$(list_orphans || true)"
+if [ -z "$pids" ]; then
+  printf 'found=0\nterminated=0\nremaining=0\npids=\n'
+  exit 0
+fi
+
+found="$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l | tr -d ' ')"
+pid_csv="$(printf '%s\n' "$pids" | paste -sd, -)"
+kill -TERM $pids 2>/dev/null || true
+sleep 2
+
+remaining_pids="$(list_orphans || true)"
+if [ -n "$remaining_pids" ]; then
+  kill -KILL $remaining_pids 2>/dev/null || true
+  sleep 1
+fi
+
+final_pids="$(list_orphans || true)"
+remaining=0
+if [ -n "$final_pids" ]; then
+  remaining="$(printf '%s\n' "$final_pids" | sed '/^$/d' | wc -l | tr -d ' ')"
+fi
+terminated=$((found - remaining))
+printf 'found=%s\nterminated=%s\nremaining=%s\npids=%s\n' "$found" "$terminated" "$remaining" "$pid_csv"
+"""
+    result = subprocess.run(
+        ["ssh", host, "bash", "-lc", cleanup_script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    parsed = _parse_orphan_cleanup_output(result.stdout)
+    parsed["ok"] = result.returncode == 0 and parsed["remaining"] == 0
+    if result.returncode != 0:
+        parsed["error"] = result.stderr.strip()[:200]
+    return parsed
+
+
 @dataclass
 class HealthReport:
     """Result of an infrastructure health check."""
@@ -432,15 +502,28 @@ def deploy(
             error=f"Worker restart failed: {restart.stderr.strip()[:200]}",
         )
 
-    # Step 4: verify health
+    # Step 4: remove restart orphans without touching the systemd-managed root.
+    cleanup = _cleanup_orphaned_worker_roots(host)
+    steps.append({"step": "orphan_cleanup", **cleanup})
+
+    # Step 5: verify health
     time.sleep(3)
     report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
     steps.append({"step": "health_check", "ok": report.ok})
+    healthy = bool(cleanup["ok"]) and report.ok
 
     return DeployResult(
         steps=steps,
-        healthy=report.ok,
-        error=None if report.ok else "Health check failed after deploy",
+        healthy=healthy,
+        error=(
+            None
+            if healthy
+            else (
+                "Health check failed after deploy"
+                if report.ok is False
+                else "Orphan cleanup failed after deploy"
+            )
+        ),
     )
 
 
