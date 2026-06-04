@@ -10,7 +10,6 @@ import subprocess as _subprocess
 import sys
 import time as _time
 from pathlib import Path
-from subprocess import run as _run_branch_command
 
 # Serialize merges so concurrent ribosomes queue instead of racing.
 _MERGE_LOCK_PATH = Path.home() / "germline" / ".worktrees" / ".merge.lock"
@@ -20,6 +19,41 @@ _AUTO_COMMIT_DENYLIST = (
     "loci/ribosome-outputs/",
     "loci/ribosome-runs.jsonl",
 )
+
+_GIT_ENV_ALLOWLIST = {
+    "HOME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SSH_AUTH_SOCK",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+}
+
+
+def _minimal_git_env() -> dict[str, str]:
+    """Return a minimal environment for git auth via normal credential helpers."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _GIT_ENV_ALLOWLIST and value
+    }
+
+
+def _run_worker_command(command, *args, **kwargs):
+    """Run subprocesses, filtering inherited runtime secrets for git commands."""
+    if (
+        isinstance(command, (list, tuple))
+        and command
+        and command[0] == "git"
+        and "env" not in kwargs
+    ):
+        kwargs["env"] = _minimal_git_env()
+    return _subprocess.run(command, *args, **kwargs)
 
 
 def _status_paths_for_auto_commit(status_output: str) -> list[str]:
@@ -56,12 +90,12 @@ def _cleanup_worktree(work_dir: str) -> None:
             continue
         command = ["git", "rebase", "--abort"] if "rebase" in state_name else ["git", "merge", "--abort"]
         with contextlib.suppress(Exception):
-            _subprocess.run(command, capture_output=True, cwd=work_dir, timeout=10)
+            _run_worker_command(command, capture_output=True, cwd=work_dir, timeout=10)
         break
 
     for command in (["git", "checkout", "--", "."], ["git", "clean", "-fd"]):
         with contextlib.suppress(Exception):
-            _subprocess.run(command, capture_output=True, cwd=work_dir, timeout=10)
+            _run_worker_command(command, capture_output=True, cwd=work_dir, timeout=10)
 
 
 def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
@@ -75,7 +109,7 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     gate catches quality issues after the fact.
     """
     try:
-        branch = _run_branch_command(
+        branch = _run_worker_command(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo_dir,
             capture_output=True,
@@ -89,7 +123,7 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
         print("[auto-commit] WARNING refusing to commit on main/master", file=sys.stderr)
         return False
 
-    run = _subprocess.run
+    run = _run_worker_command
     wf_label = workflow_id or "unknown"
 
     try:
@@ -163,11 +197,11 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
         diff_range = "main..HEAD"
         fallback = False
 
-        stat = _subprocess.run(
+        stat = _run_worker_command(
             ["git", "diff", "--stat", diff_range],
             capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
-        commits_r = _subprocess.run(
+        commits_r = _run_worker_command(
             ["git", "log", "--oneline", diff_range],
             capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
@@ -176,11 +210,11 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
         # Fallback: main..HEAD is empty but base_sha was recorded before execution
         if not commit_lines and not stat.stdout.strip() and base_sha:
             fb_range = f"{base_sha}..HEAD"
-            fb_stat = _subprocess.run(
+            fb_stat = _run_worker_command(
                 ["git", "diff", "--stat", fb_range],
                 capture_output=True, text=True, timeout=10, cwd=work_dir,
             )
-            fb_commits = _subprocess.run(
+            fb_commits = _run_worker_command(
                 ["git", "log", "--oneline", fb_range],
                 capture_output=True, text=True, timeout=10, cwd=work_dir,
             )
@@ -192,11 +226,11 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
                 commit_lines = fb_lines
                 fallback = True
 
-        numstat = _subprocess.run(
+        numstat = _run_worker_command(
             ["git", "diff", "--numstat", diff_range],
             capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
-        patch_r = _subprocess.run(
+        patch_r = _run_worker_command(
             ["git", "diff", diff_range],
             capture_output=True, text=True, timeout=10, cwd=work_dir,
         )
@@ -218,7 +252,7 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
 def _git_pull_ff_only(repo_root: str) -> None:
     """Pull latest so CC-written test files are available before ribosome runs."""
     try:
-        upstream = _subprocess.run(
+        upstream = _run_worker_command(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             capture_output=True,
             text=True,
@@ -226,7 +260,7 @@ def _git_pull_ff_only(repo_root: str) -> None:
             cwd=repo_root,
         )
         if upstream.returncode != 0:
-            fetch = _subprocess.run(
+            fetch = _run_worker_command(
                 ["git", "fetch", "origin", "main"],
                 capture_output=True,
                 text=True,
@@ -236,7 +270,7 @@ def _git_pull_ff_only(repo_root: str) -> None:
             if fetch.returncode != 0:
                 print(f"WARNING: git fetch origin main failed: {fetch.stderr.strip()}", file=sys.stderr)
             return
-        result = _subprocess.run(
+        result = _run_worker_command(
             ["git", "pull", "--ff-only"],
             capture_output=True,
             text=True,
@@ -254,7 +288,7 @@ def _git_pull_ff_only(repo_root: str) -> None:
 def _git_push(repo_root: str) -> None:
     """Push ribosome commits so soma can pull without manual intervention."""
     try:
-        result = _subprocess.run(
+        result = _run_worker_command(
             ["git", "push"],
             capture_output=True,
             text=True,
@@ -280,7 +314,7 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
     worktree_path = os.path.join(worktree_base, branch_name)
 
     if os.path.exists(worktree_path):
-        _subprocess.run(
+        _run_worker_command(
             ["git", "worktree", "remove", "--force", worktree_path],
             capture_output=True,
             timeout=10,
@@ -288,7 +322,7 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
         )
 
     # Delete stale branch if it exists from a prior failed attempt
-    _subprocess.run(
+    _run_worker_command(
         ["git", "branch", "-D", branch_name],
         capture_output=True,
         timeout=5,
@@ -297,7 +331,7 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
 
     last_err = ""
     for attempt in range(retries):
-        result = _subprocess.run(
+        result = _run_worker_command(
             ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
             capture_output=True,
             text=True,
@@ -330,7 +364,7 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
     try:
         _fcntl.flock(lock_fd, _fcntl.LOCK_EX)
 
-        check = _subprocess.run(
+        check = _run_worker_command(
             ["git", "log", "--oneline", f"main..{branch_name}"],
             capture_output=True,
             text=True,
@@ -342,7 +376,7 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
             return True
 
         # Push branch to origin for CC review — no auto-merge
-        push = _subprocess.run(
+        push = _run_worker_command(
             ["git", "push", "origin", branch_name],
             capture_output=True,
             text=True,
@@ -367,7 +401,7 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
         _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
         lock_fd.close()
         with contextlib.suppress(Exception):
-            _subprocess.run(
+            _run_worker_command(
                 ["git", "worktree", "remove", "--force", worktree_path],
                 capture_output=True,
                 timeout=10,
@@ -375,7 +409,7 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
             )
         if delete_branch:
             with contextlib.suppress(Exception):
-                _subprocess.run(
+                _run_worker_command(
                     ["git", "branch", "-D", branch_name],
                     capture_output=True,
                     timeout=10,
@@ -388,7 +422,7 @@ def _detect_prior_commits(
 ) -> list[str]:
     """Find recent commits from a prior killed attempt so retries can resume."""
     try:
-        result = _subprocess.run(
+        result = _run_worker_command(
             [
                 "git",
                 "log",
@@ -422,7 +456,7 @@ def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, 
     pr_body = body or f"Automated PR from ribosome branch `{branch_name}`."
 
     # Check if branch has commits ahead of main
-    log_result = _subprocess.run(
+    log_result = _run_worker_command(
         ["git", "log", "--oneline", f"main..{branch_name}"],
         capture_output=True,
         text=True,
@@ -440,7 +474,7 @@ def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, 
         }
 
     # Push branch to remote
-    push_result = _subprocess.run(
+    push_result = _run_worker_command(
         ["git", "push", "origin", branch_name],
         capture_output=True,
         text=True,
@@ -464,7 +498,7 @@ def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, 
         "--title", pr_title,
         "--body", pr_body,
     ]
-    pr_result = _subprocess.run(
+    pr_result = _run_worker_command(
         pr_cmd,
         capture_output=True,
         text=True,
@@ -512,14 +546,14 @@ def _gc_worktrees(repo_root: str) -> None:
             continue
         print(f"[gc] removing orphaned worktree: {entry}", file=sys.stderr)
         with contextlib.suppress(Exception):
-            _subprocess.run(
+            _run_worker_command(
                 ["git", "worktree", "remove", "--force", wt_path],
                 capture_output=True,
                 timeout=10,
                 cwd=repo_root,
             )
         with contextlib.suppress(Exception):
-            _subprocess.run(
+            _run_worker_command(
                 ["git", "branch", "-D", entry],
                 capture_output=True,
                 timeout=10,

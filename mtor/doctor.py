@@ -854,15 +854,15 @@ def doctor(*, reconcile: bool = False) -> None:
                 "message": "One or more health checks failed",
                 "code": "HEALTH_CHECK_FAILED",
             },
-            "fix": f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+            "fix": f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
             "result": result,
             "next_actions": [
                 _action(
-                    f"ssh {WORKER_HOST} 'sudo systemctl status temporal-worker'",
+                    f"ssh {WORKER_HOST} 'systemctl --user status mtor-worker'",
                     "Check worker service status",
                 ),
                 _action(
-                    f"ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                    f"ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                     "Start the worker",
                 ),
             ],

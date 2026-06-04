@@ -16,6 +16,27 @@ from mtor.cli import app
 # ---------------------------------------------------------------------------
 
 
+SERVICE_OK = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=123\n"
+    "__TEMPORAL_WORKER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+)
+SERVICE_MTOR_INACTIVE = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=failed\nSubState=failed\nMainPID=0\n"
+    "__TEMPORAL_WORKER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+)
+SERVICE_TEMPORAL_ACTIVE = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=123\n"
+    "__TEMPORAL_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=456\n"
+)
+WORKER_ROOT = "123 77 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
+
+
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
     """Invoke CLI and return (exit_code, parsed_json)."""
     captured = io.StringIO()
@@ -138,7 +159,7 @@ class TestCheckHealth:
         assert "Skipped" in str(ssh_check["detail"])
 
     def test_check_health_detects_single_worker_service(self, tmp_path):
-        """Remote health passes when temporal-worker is active and duplicate unit is dead."""
+        """Remote health passes with mtor-worker active and temporal-worker inactive."""
         from mtor.infra import check_health
 
         (tmp_path / ".git").mkdir()
@@ -152,13 +173,10 @@ class TestCheckHealth:
                 result.stdout = "ok\n"
             elif "df -h" in joined:
                 result.stdout = "42%\n"
-            elif "systemctl show temporal-worker.service" in joined:
-                result.stdout = (
-                    "ActiveState=active\nSubState=running\nMainPID=123\n"
-                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
-                )
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
             elif "ps -eo" in joined:
-                result.stdout = "1\n"
+                result.stdout = WORKER_ROOT
             elif cmd[:2] == ["git", "status"]:
                 result.stdout = ""
             else:
@@ -172,6 +190,68 @@ class TestCheckHealth:
         process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
         assert service_check["ok"] is True
         assert process_check["ok"] is True
+
+    def test_check_health_fails_when_mtor_worker_inactive(self, tmp_path):
+        """Remote health fails when the authoritative worker service is inactive."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_MTOR_INACTIVE
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        assert report.ok is False
+        assert service_check["ok"] is False
+        assert "mtor-worker.service" in str(service_check["detail"])
+
+    def test_check_health_fails_when_temporal_worker_active(self, tmp_path):
+        """Remote health fails when the obsolete temporal-worker unit is active."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_TEMPORAL_ACTIVE
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        assert report.ok is False
+        assert service_check["ok"] is False
+        assert "temporal-worker.service" in str(service_check["detail"])
 
     def test_check_health_fails_on_duplicate_worker_roots(self, tmp_path):
         """Remote health fails when more than one mtor.worker root is active."""
@@ -188,13 +268,12 @@ class TestCheckHealth:
                 result.stdout = "ok\n"
             elif "df -h" in joined:
                 result.stdout = "42%\n"
-            elif "systemctl show temporal-worker.service" in joined:
-                result.stdout = (
-                    "ActiveState=active\nSubState=running\nMainPID=123\n"
-                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
-                )
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
             elif "ps -eo" in joined:
-                result.stdout = "2\n"
+                result.stdout = WORKER_ROOT + (
+                    "124 77 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
+                )
             elif cmd[:2] == ["git", "status"]:
                 result.stdout = ""
             else:
@@ -208,6 +287,39 @@ class TestCheckHealth:
         assert report.ok is False
         assert process_check["ok"] is False
         assert "found 2" in str(process_check["detail"])
+
+    def test_check_health_fails_when_worker_root_orphaned(self, tmp_path):
+        """Remote health fails when the only worker root is orphaned under PID 1."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
+            elif "ps -eo" in joined:
+                result.stdout = (
+                    "123 1 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
+                )
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        assert report.ok is False
+        assert process_check["ok"] is False
+        assert "orphaned" in str(process_check["detail"])
 
     def test_check_health_reports_worker_head_match(self, tmp_path):
         """Remote health includes a passing worker_repo_head check."""
@@ -229,13 +341,10 @@ class TestCheckHealth:
                 result.stdout = "ok\n"
             elif "df -h" in joined:
                 result.stdout = "42%\n"
-            elif "systemctl show temporal-worker.service" in joined:
-                result.stdout = (
-                    "ActiveState=active\nSubState=running\nMainPID=123\n"
-                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
-                )
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
             elif "ps -eo" in joined:
-                result.stdout = "1\n"
+                result.stdout = WORKER_ROOT
             else:
                 result.stdout = ""
             return result
@@ -270,13 +379,10 @@ class TestCheckHealth:
                 result.stdout = "ok\n"
             elif "df -h" in joined:
                 result.stdout = "42%\n"
-            elif "systemctl show temporal-worker.service" in joined:
-                result.stdout = (
-                    "ActiveState=active\nSubState=running\nMainPID=123\n"
-                    "ActiveState=inactive\nSubState=dead\nUnitFileState=disabled\n"
-                )
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
             elif "ps -eo" in joined:
-                result.stdout = "1\n"
+                result.stdout = WORKER_ROOT
             else:
                 result.stdout = ""
             return result

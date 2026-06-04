@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mtor import DEPLOY_REMOTE, OUTPUTS_DIR, WORKER_HOST, WORKER_LOG_DIR
+from mtor import OUTPUTS_DIR, WORKER_HOST, WORKER_LOG_DIR
 
 
 def _default_mtor_code_dir() -> str:
@@ -41,6 +41,56 @@ def _host_command(host: str, command: str) -> list[str]:
     if _is_local_host(host):
         return ["bash", "-lc", command]
     return ["ssh", host, command]
+
+
+def _parse_systemctl_show(output: str) -> dict[str, str]:
+    """Parse ``systemctl show`` key=value output into a dict."""
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
+def _split_marked_sections(output: str) -> dict[str, str]:
+    """Split marker-delimited command output into named sections."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in output.splitlines():
+        if line.startswith("__MTOR_") and line.endswith("__"):
+            current = line.strip("_").lower()
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {key: "\n".join(lines) for key, lines in sections.items()}
+
+
+def _parse_worker_roots(output: str) -> tuple[bool, str]:
+    """Validate one non-orphaned ``op run ... python3 -m mtor.worker`` root."""
+    roots: list[tuple[int, int, str]] = []
+    for line in output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        args = parts[2]
+        if "op run" in args and "python3 -m mtor.worker" in args:
+            roots.append((pid, ppid, args))
+
+    orphaned = [pid for pid, ppid, _args in roots if ppid == 1]
+    if len(roots) == 1 and not orphaned:
+        pid, ppid, _args = roots[0]
+        return True, f"one mtor.worker root pid={pid} ppid={ppid}"
+    if orphaned:
+        return False, f"orphaned mtor.worker root(s) under PID 1: {orphaned}; roots={len(roots)}"
+    return False, f"expected one mtor.worker root, found {len(roots)}"
 
 
 @dataclass
@@ -235,28 +285,34 @@ def check_health(
             result = subprocess.run(
                 _host_command(
                     host,
-                    "systemctl show temporal-worker.service "
-                    "--property=ActiveState,SubState,MainPID --no-pager; "
-                    "systemctl show mtor-worker.service "
-                    "--property=ActiveState,SubState,UnitFileState --no-pager 2>/dev/null || true",
+                    "printf '__MTOR_WORKER__\\n'; "
+                    "systemctl --user show mtor-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
+                    "printf '__TEMPORAL_WORKER__\\n'; "
+                    "systemctl --user show temporal-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true",
                 ),
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            output = result.stdout
-            temporal_active = "ActiveState=active" in output and "SubState=running" in output
-            duplicate_absent = "UnitFileState=" not in output
-            duplicate_inactive = (
-                "UnitFileState=disabled" in output
-                and "ActiveState=inactive" in output
-                and "SubState=dead" in output
+            sections = _split_marked_sections(result.stdout)
+            mtor_unit = _parse_systemctl_show(sections.get("mtor_worker", ""))
+            temporal_unit = _parse_systemctl_show(sections.get("temporal_worker", ""))
+            mtor_active = (
+                mtor_unit.get("ActiveState") == "active"
+                and mtor_unit.get("SubState") == "running"
             )
-            service_ok = result.returncode == 0 and temporal_active and (duplicate_inactive or duplicate_absent)
+            temporal_active = temporal_unit.get("ActiveState") == "active"
+            service_ok = result.returncode == 0 and mtor_active and not temporal_active
             service_detail = (
-                "temporal-worker active; mtor-worker absent or disabled/dead"
+                "mtor-worker.service active/running; temporal-worker.service inactive or absent"
                 if service_ok
-                else "Expected temporal-worker active and mtor-worker absent or disabled/dead"
+                else (
+                    "Expected mtor-worker.service active/running and "
+                    "temporal-worker.service inactive or absent "
+                    f"(mtor={mtor_unit or 'absent'}, temporal={temporal_unit or 'absent'})"
+                )
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             service_ok = False
@@ -266,20 +322,15 @@ def check_health(
             result = subprocess.run(
                 _host_command(
                     host,
-                    "ps -eo ppid,args | awk '/mtor[.]worker/ && /op run/ && $1 == 1 {count++} END {print count+0}'",
+                    "ps -eo pid=,ppid=,args=",
                 ),
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            roots = int((result.stdout or "0").strip())
-            process_ok = result.returncode == 0 and roots == 1
-            process_detail = (
-                "one managed mtor.worker root"
-                if process_ok
-                else f"expected one mtor.worker root, found {roots}"
-            )
-        except (ValueError, subprocess.TimeoutExpired, OSError) as exc:
+            process_ok, process_detail = _parse_worker_roots(result.stdout)
+            process_ok = result.returncode == 0 and process_ok
+        except (subprocess.TimeoutExpired, OSError) as exc:
             process_ok = False
             process_detail = f"Worker process check failed: {exc}"
 
@@ -310,23 +361,22 @@ def deploy(
     repo_dir: str | None = None,
     remote_repo_dir: str | None = None,
 ) -> DeployResult:
-    """Sync code to worker host, restart Temporal worker, verify health.
+    """Sync code to worker host, restart mtor worker, verify health.
 
     Steps:
-      1. git push to deploy remote
-      2. SSH merge on worker
-      3. Restart temporal-worker service
+      1. git push local HEAD to origin/main
+      2. SSH fast-forward worker checkout from origin/main
+      3. Restart mtor-worker.service
       4. Verify health with check_health
     """
     host = worker_host or WORKER_HOST
-    remote = deploy_remote or DEPLOY_REMOTE
     repo = repo_dir or MTOR_CODE_DIR
     remote_repo = remote_repo_dir or REMOTE_MTOR_CODE_DIR
     steps: list[dict[str, object]] = []
 
-    # Step 1: push to deploy remote
+    # Step 1: publish local HEAD to origin/main.
     push = subprocess.run(
-        ["git", "push", remote, "main:deploy-sync", "--force"],
+        ["git", "push", "origin", "HEAD:main"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -340,7 +390,7 @@ def deploy(
         )
     steps.append({"step": "push", "ok": True})
 
-    # Step 2: merge on worker
+    # Step 2: fast-forward worker checkout from origin/main.
     merge = subprocess.run(
         [
             "ssh",
@@ -349,8 +399,8 @@ def deploy(
             "-lc",
             (
                 f"set -e; cd {shlex.quote(remote_repo)}; "
-                "git merge deploy-sync --no-edit; "
-                "git branch -d deploy-sync 2>/dev/null || true"
+                "git fetch origin main; "
+                "git merge --ff-only origin/main"
             ),
         ],
         capture_output=True,
@@ -367,7 +417,7 @@ def deploy(
 
     # Step 3: restart worker
     restart = subprocess.run(
-        ["ssh", host, "sudo systemctl restart temporal-worker"],
+        ["ssh", host, "systemctl --user restart mtor-worker"],
         capture_output=True,
         text=True,
         timeout=15,

@@ -30,7 +30,6 @@ from cyclopts import App, Parameter
 from porin import action as _action
 
 from mtor import (
-    DEPLOY_REMOTE,
     LOG_TAIL_LINES,
     OUTPUTS_DIR,
     REPO_DIR,
@@ -759,7 +758,7 @@ def list_cmd(
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
@@ -948,7 +947,7 @@ def status(workflow_id: str, short: bool = False) -> None:
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
@@ -1074,7 +1073,7 @@ def trace(workflow_id: str) -> None:
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
@@ -1230,7 +1229,7 @@ def wait(
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
@@ -1764,7 +1763,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
@@ -2302,15 +2301,15 @@ def publish(
 
 @app.command
 def deploy() -> None:
-    """Sync code to worker host, restart Temporal worker, verify health."""
+    """Sync code to worker host, restart mtor worker, verify health."""
     import time
 
     steps = []
 
-    # Step 1: sync to worker — push to temp branch, then ff-merge on worker
+    # Step 1: publish local HEAD to origin/main, then ff-merge on worker
     print("[deploy] syncing to worker...", file=sys.stderr)
     push = subprocess.run(
-        ["git", "push", DEPLOY_REMOTE, "main:deploy-sync", "--force"],
+        ["git", "push", "origin", "HEAD:main"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -2330,7 +2329,7 @@ def deploy() -> None:
         [
             "ssh",
             WORKER_HOST,
-            f"cd {REPO_DIR} && git merge deploy-sync --no-edit; git branch -d deploy-sync 2>/dev/null; true",
+            f"cd {REPO_DIR} && git fetch origin main && git merge --ff-only origin/main",
         ],
         capture_output=True,
         text=True,
@@ -2339,9 +2338,9 @@ def deploy() -> None:
     steps.append({"step": "sync", "ok": True})
 
     # Step 2: restart worker
-    print("[deploy] restarting temporal-worker...", file=sys.stderr)
+    print("[deploy] restarting mtor-worker...", file=sys.stderr)
     restart = subprocess.run(
-        ["ssh", WORKER_HOST, "sudo systemctl restart temporal-worker"],
+        ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],
         capture_output=True,
         text=True,
         timeout=15,
@@ -2353,7 +2352,7 @@ def deploy() -> None:
                 "mtor deploy",
                 f"Worker restart failed: {restart.stderr.strip()[:200]}",
                 "RESTART_FAILED",
-                f"SSH to {WORKER_HOST} and check: sudo systemctl status temporal-worker",
+                f"SSH to {WORKER_HOST} and check: systemctl --user status mtor-worker",
                 exit_code=1,
             )
         )
@@ -2951,7 +2950,7 @@ def ragulator(
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor tsc", "Run health check")],
                 exit_code=3,
             )

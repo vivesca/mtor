@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 import re
 import shlex
 import subprocess
@@ -311,21 +310,19 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if local.stdout.strip() == remote.stdout.strip():
         return True
 
-    # Auto-deploy: push + merge + restart.
+    # Auto-deploy: push + fast-forward + restart.
     # Use -C to pin git context to ~/germline regardless of caller cwd —
     # otherwise dispatching from a non-`main` repo (e.g. quorate on master)
     # fails with bogus "src refspec main does not match any".
     germline_dir = str(Path.home() / "germline")
-    deploy_branch = f"deploy-sync-{os.getpid()}-{int(time.time() * 1000)}"
     push = subprocess.run(
         [
             "git",
             "-C",
             germline_dir,
             "push",
-            WORKER_HOST + ":~/germline",
-            f"main:{deploy_branch}",
-            "--force",
+            "origin",
+            "HEAD:main",
         ],
         capture_output=True,
         text=True,
@@ -334,15 +331,14 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
-    quoted_branch = shlex.quote(deploy_branch)
     merge = subprocess.run(
         [
             "ssh",
             WORKER_HOST,
             (
                 "cd ~/germline && "
-                f"git merge {quoted_branch} --no-edit && "
-                f"git branch -d {quoted_branch}"
+                "git fetch origin main && "
+                "git merge --ff-only origin/main"
             ),
         ],
         capture_output=True,
@@ -353,7 +349,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
         raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
 
     restart = subprocess.run(
-        ["ssh", WORKER_HOST, "sudo systemctl restart temporal-worker"],
+        ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],
         capture_output=True,
         text=True,
         timeout=15,
@@ -879,7 +875,7 @@ def _dispatch_prompt(
                 cmd,
                 f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
                 "TEMPORAL_UNREACHABLE",
-                f"Start Temporal worker: ssh {WORKER_HOST} 'sudo systemctl start temporal-worker'",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
                 [_action("mtor doctor", "Run health check to diagnose connectivity")],
                 exit_code=3,
             )
