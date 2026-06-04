@@ -19,19 +19,33 @@ from mtor.cli import app
 SERVICE_OK = (
     "__MTOR_WORKER__\n"
     "ActiveState=active\nSubState=running\nMainPID=123\n"
-    "__TEMPORAL_WORKER__\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
     "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
 )
 SERVICE_MTOR_INACTIVE = (
     "__MTOR_WORKER__\n"
     "ActiveState=failed\nSubState=failed\nMainPID=0\n"
-    "__TEMPORAL_WORKER__\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
     "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
 )
 SERVICE_TEMPORAL_ACTIVE = (
     "__MTOR_WORKER__\n"
     "ActiveState=active\nSubState=running\nMainPID=123\n"
-    "__TEMPORAL_WORKER__\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=456\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+)
+SERVICE_SYSTEM_TEMPORAL_ACTIVE = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=123\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
     "ActiveState=active\nSubState=running\nMainPID=456\n"
 )
 WORKER_ROOT = "123 77 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
@@ -166,7 +180,8 @@ class TestCheckHealth:
 
         assert sections == {
             "mtor_worker": "ActiveState=active\nSubState=running\nMainPID=123",
-            "temporal_worker": "ActiveState=inactive\nSubState=dead\nMainPID=0",
+            "temporal_worker_user": "ActiveState=inactive\nSubState=dead\nMainPID=0",
+            "temporal_worker_system": "ActiveState=inactive\nSubState=dead\nMainPID=0",
         }
 
     def test_check_health_detects_single_worker_service(self, tmp_path):
@@ -263,6 +278,37 @@ class TestCheckHealth:
         assert report.ok is False
         assert service_check["ok"] is False
         assert "temporal-worker.service" in str(service_check["detail"])
+
+    def test_check_health_fails_when_system_temporal_worker_active(self, tmp_path):
+        """Remote health fails when the obsolete system temporal-worker unit is active."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_SYSTEM_TEMPORAL_ACTIVE
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        assert report.ok is False
+        assert service_check["ok"] is False
+        assert "temporal_system" in str(service_check["detail"])
 
     def test_check_health_fails_on_duplicate_worker_roots(self, tmp_path):
         """Remote health fails when more than one mtor.worker root is active."""
@@ -500,9 +546,8 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            # Third call is the restart
             call_count[0] += 1
-            if call_count[0] == 3 and "restart" in " ".join(cmd):
+            if cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
                 result.returncode = 1
                 result.stderr = "service not found"
             return result
@@ -632,7 +677,7 @@ class TestDeploy:
         assert any("kill -TERM $pids" in cmd[-1] for cmd in calls if "list_orphans" in cmd[-1])
 
     def test_deploy_runs_settle_cleanup_settle_cleanup_before_health(self):
-        """deploy waits after restart, cleans twice, then checks health."""
+        """deploy retires legacy worker, waits after restart, cleans twice, then checks health."""
         from mtor.infra import HealthReport, deploy
 
         events = []
@@ -642,7 +687,10 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+                events.append("retire")
+                result.stdout = "active=failed\nenabled=disabled\n"
+            elif cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
                 events.append("restart")
             elif cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
                 events.append("cleanup")
@@ -663,6 +711,7 @@ class TestDeploy:
 
         assert result.healthy is True
         assert events == [
+            "retire",
             "restart",
             ("sleep", 3),
             "cleanup",
@@ -670,6 +719,63 @@ class TestDeploy:
             "cleanup",
             "health",
         ]
+
+    def test_deploy_records_legacy_temporal_retirement_before_restart(self):
+        """deploy disables the obsolete system temporal-worker before restart."""
+        from mtor.infra import HealthReport, deploy
+
+        events = []
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+                events.append("retire")
+                result.stdout = "active=failed\nenabled=disabled\n"
+            elif cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
+                events.append("restart")
+            elif cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+                result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep"), \
+             patch("mtor.infra.check_health") as mock_ch:
+            mock_ch.return_value = HealthReport(ok=True, checks=[])
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is True
+        assert events == ["retire", "restart"]
+        retire_step = next(step for step in result.steps if step["step"] == "retire_legacy_temporal_worker")
+        assert retire_step["ok"] is True
+        assert retire_step["active"] == "failed"
+        assert retire_step["enabled"] == "disabled"
+
+    def test_deploy_fails_before_restart_when_legacy_temporal_retirement_fails(self):
+        """deploy aborts if the obsolete system temporal-worker remains enabled."""
+        from mtor.infra import deploy
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+                result.returncode = 1
+                result.stdout = "active=active\nenabled=enabled\n"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is False
+        assert "Legacy temporal-worker retirement failed" in str(result.error)
+        assert not any(cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"] for cmd in calls)
 
     def test_deploy_orphan_cleanup_targets_only_ppid_one_roots(self):
         """cleanup command filters to orphaned op-run worker roots under PID 1."""

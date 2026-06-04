@@ -59,9 +59,7 @@ def _split_marked_sections(output: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for line in output.splitlines():
-        if (
-            line.startswith("__MTOR_") or line == "__TEMPORAL_WORKER__"
-        ) and line.endswith("__"):
+        if line.startswith("__") and line.endswith("__"):
             current = line.strip("_").lower()
             sections[current] = []
             continue
@@ -163,6 +161,46 @@ printf 'found=%s\nterminated=%s\nremaining=%s\npids=%s\n' "$found" "$terminated"
     if result.returncode != 0:
         parsed["error"] = result.stderr.strip()[:200]
     return parsed
+
+
+def _retire_legacy_temporal_worker(host: str) -> dict[str, object]:
+    """Stop and disable the obsolete system-level temporal-worker unit."""
+    retire_script = r"""
+set -u
+sudo systemctl disable --now temporal-worker.service >/dev/null 2>&1 || true
+active="$(systemctl is-active temporal-worker.service 2>/dev/null || true)"
+enabled="$(systemctl is-enabled temporal-worker.service 2>/dev/null || true)"
+printf 'active=%s\nenabled=%s\n' "$active" "$enabled"
+case "$active" in
+  inactive|failed|unknown) active_ok=1 ;;
+  *) active_ok=0 ;;
+esac
+case "$enabled" in
+  disabled|disabled-runtime|not-found|masked) enabled_ok=1 ;;
+  *) enabled_ok=0 ;;
+esac
+[ "$active_ok" = 1 ] && [ "$enabled_ok" = 1 ]
+"""
+    result = subprocess.run(
+        ["ssh", host, "bash", "-lc", retire_script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    payload: dict[str, object] = {
+        "ok": result.returncode == 0,
+        "active": values.get("active", "unknown"),
+        "enabled": values.get("enabled", "unknown"),
+    }
+    if result.returncode != 0:
+        payload["error"] = result.stderr.strip()[:200]
+    return payload
 
 
 @dataclass
@@ -370,20 +408,29 @@ def check_health(
             )
             sections = _split_marked_sections(result.stdout)
             mtor_unit = _parse_systemctl_show(sections.get("mtor_worker", ""))
-            temporal_unit = _parse_systemctl_show(sections.get("temporal_worker", ""))
+            temporal_user_unit = _parse_systemctl_show(sections.get("temporal_worker_user", ""))
+            temporal_system_unit = _parse_systemctl_show(sections.get("temporal_worker_system", ""))
             mtor_active = (
                 mtor_unit.get("ActiveState") == "active"
                 and mtor_unit.get("SubState") == "running"
             )
-            temporal_active = temporal_unit.get("ActiveState") == "active"
-            service_ok = result.returncode == 0 and mtor_active and not temporal_active
+            temporal_user_active = temporal_user_unit.get("ActiveState") == "active"
+            temporal_system_active = temporal_system_unit.get("ActiveState") == "active"
+            service_ok = (
+                result.returncode == 0
+                and mtor_active
+                and not temporal_user_active
+                and not temporal_system_active
+            )
             service_detail = (
-                "mtor-worker.service active/running; temporal-worker.service inactive or absent"
+                "mtor-worker.service active/running; temporal-worker.service inactive in user/system scope"
                 if service_ok
                 else (
                     "Expected mtor-worker.service active/running and "
-                    "temporal-worker.service inactive or absent "
-                    f"(mtor={mtor_unit or 'absent'}, temporal={temporal_unit or 'absent'})"
+                    "legacy temporal-worker.service inactive in user/system scope "
+                    f"(mtor={mtor_unit or 'absent'}, "
+                    f"temporal_user={temporal_user_unit or 'absent'}, "
+                    f"temporal_system={temporal_system_unit or 'absent'})"
                 )
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -487,7 +534,17 @@ def deploy(
             error=f"merge failed: {merge.stderr.strip()[:200]}",
         )
 
-    # Step 3: restart worker
+    # Step 3: retire the obsolete system-level worker before restarting the authoritative unit.
+    retire_legacy = _retire_legacy_temporal_worker(host)
+    steps.append({"step": "retire_legacy_temporal_worker", **retire_legacy})
+    if not retire_legacy["ok"]:
+        return DeployResult(
+            steps=steps,
+            healthy=False,
+            error="Legacy temporal-worker retirement failed",
+        )
+
+    # Step 4: restart worker
     restart = subprocess.run(
         ["ssh", host, "systemctl --user restart mtor-worker"],
         capture_output=True,
@@ -502,7 +559,7 @@ def deploy(
             error=f"Worker restart failed: {restart.stderr.strip()[:200]}",
         )
 
-    # Step 4: let restart settle, then remove late orphan roots twice before health.
+    # Step 5: let restart settle, then remove late orphan roots twice before health.
     time.sleep(3)
     cleanup = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 1, **cleanup})
@@ -510,7 +567,7 @@ def deploy(
     cleanup_repeat = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 2, **cleanup_repeat})
 
-    # Step 5: verify health after post-settle cleanup.
+    # Step 6: verify health after post-settle cleanup.
     report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
     steps.append({"step": "health_check", "ok": report.ok})
     cleanup_ok = bool(cleanup["ok"]) and bool(cleanup_repeat["ok"])
