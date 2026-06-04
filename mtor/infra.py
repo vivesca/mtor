@@ -502,15 +502,19 @@ def deploy(
             error=f"Worker restart failed: {restart.stderr.strip()[:200]}",
         )
 
-    # Step 4: remove restart orphans without touching the systemd-managed root.
-    cleanup = _cleanup_orphaned_worker_roots(host)
-    steps.append({"step": "orphan_cleanup", **cleanup})
-
-    # Step 5: verify health
+    # Step 4: let restart settle, then remove late orphan roots twice before health.
     time.sleep(3)
+    cleanup = _cleanup_orphaned_worker_roots(host)
+    steps.append({"step": "orphan_cleanup", "attempt": 1, **cleanup})
+    time.sleep(3)
+    cleanup_repeat = _cleanup_orphaned_worker_roots(host)
+    steps.append({"step": "orphan_cleanup", "attempt": 2, **cleanup_repeat})
+
+    # Step 5: verify health after post-settle cleanup.
     report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
     steps.append({"step": "health_check", "ok": report.ok})
-    healthy = bool(cleanup["ok"]) and report.ok
+    cleanup_ok = bool(cleanup["ok"]) and bool(cleanup_repeat["ok"])
+    healthy = cleanup_ok and report.ok
 
     return DeployResult(
         steps=steps,

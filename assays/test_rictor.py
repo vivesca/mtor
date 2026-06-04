@@ -444,12 +444,13 @@ class TestDeploy:
         assert isinstance(result, DeployResult)
         assert result.healthy is True
         assert result.error is None
-        # Verify all 4 steps present
+        # Verify required steps present
         step_names = [s["step"] for s in result.steps]
         assert "push" in step_names
         assert "merge" in step_names
         assert "restart" in step_names
         assert "health_check" in step_names
+        assert step_names.count("orphan_cleanup") == 2
         # All steps should be ok
         assert all(s["ok"] for s in result.steps)
 
@@ -619,15 +620,56 @@ class TestDeploy:
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
         assert result.healthy is True
-        step_names = [step["step"] for step in result.steps]
-        assert step_names == ["push", "merge", "restart", "orphan_cleanup", "health_check"]
-        cleanup_step = result.steps[3]
-        assert cleanup_step["ok"] is True
-        assert cleanup_step["found"] == 1
-        assert cleanup_step["terminated"] == 1
-        assert cleanup_step["remaining"] == 0
-        assert cleanup_step["pids"] == ["321"]
+        cleanup_steps = [step for step in result.steps if step["step"] == "orphan_cleanup"]
+        assert len(cleanup_steps) == 2
+        assert [step["attempt"] for step in cleanup_steps] == [1, 2]
+        for cleanup_step in cleanup_steps:
+            assert cleanup_step["ok"] is True
+            assert cleanup_step["found"] == 1
+            assert cleanup_step["terminated"] == 1
+            assert cleanup_step["remaining"] == 0
+            assert cleanup_step["pids"] == ["321"]
         assert any("kill -TERM $pids" in cmd[-1] for cmd in calls if "list_orphans" in cmd[-1])
+
+    def test_deploy_runs_settle_cleanup_settle_cleanup_before_health(self):
+        """deploy waits after restart, cleans twice, then checks health."""
+        from mtor.infra import HealthReport, deploy
+
+        events = []
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            if cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
+                events.append("restart")
+            elif cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+                events.append("cleanup")
+                result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
+            return result
+
+        def fake_sleep(seconds):
+            events.append(("sleep", seconds))
+
+        def fake_health(**kwargs):
+            events.append("health")
+            return HealthReport(ok=True, checks=[])
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
+             patch("mtor.infra.time.sleep", side_effect=fake_sleep), \
+             patch("mtor.infra.check_health", side_effect=fake_health):
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is True
+        assert events == [
+            "restart",
+            ("sleep", 3),
+            "cleanup",
+            ("sleep", 3),
+            "cleanup",
+            "health",
+        ]
 
     def test_deploy_orphan_cleanup_targets_only_ppid_one_roots(self):
         """cleanup command filters to orphaned op-run worker roots under PID 1."""
@@ -652,11 +694,11 @@ class TestDeploy:
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
         assert result.healthy is True
-        assert len(cleanup_commands) == 1
-        cleanup_command = cleanup_commands[0]
-        assert "$2 == 1" in cleanup_command
-        assert 'index($0, "op run")' in cleanup_command
-        assert 'index($0, "python3 -m mtor.worker")' in cleanup_command
+        assert len(cleanup_commands) == 2
+        for cleanup_command in cleanup_commands:
+            assert "$2 == 1" in cleanup_command
+            assert 'index($0, "op run")' in cleanup_command
+            assert 'index($0, "python3 -m mtor.worker")' in cleanup_command
 
     def test_deploy_fails_if_orphan_cleanup_leaves_remaining_roots(self):
         """deploy does not report healthy when cleanup cannot remove all orphans."""
