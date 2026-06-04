@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mtor.worker.translocase import _CAPABILITY_BLOCKLIST, translate
+from mtor.worker.translocase import _blocked_capability_keyword, _CAPABILITY_BLOCKLIST, translate
 
 
 def _run(coro):
@@ -91,13 +91,8 @@ class TestCapabilityGateClean:
 
     @staticmethod
     def _check_gate(task: str) -> bool:
-        """Replicate the gate check logic (pure, no subprocess) to verify
-        that clean tasks pass the blocklist scan."""
-        task_upper = task.upper()
-        for keyword in _CAPABILITY_BLOCKLIST:
-            if keyword.upper() in task_upper:
-                return True  # blocked
-        return False  # clean
+        """Return whether the production capability gate blocks a task."""
+        return bool(_blocked_capability_keyword(task))
 
     def test_normal_task_not_blocked(self):
         assert not self._check_gate(
@@ -121,6 +116,15 @@ class TestCapabilityGateClean:
     def test_substring_false_positive_scp(self):
         """'scp ' keyword should not match words merely containing 'scp'."""
         assert not self._check_gate("Describe the scope of the changes needed")
+
+    def test_blocked_keyword_in_inline_code_not_blocked(self):
+        keyword = "s" + "udo "
+        assert not self._check_gate(f"Add code that emits `{keyword}systemctl status service`.")
+
+    def test_blocked_keyword_in_fenced_code_not_blocked(self):
+        keyword = "s" + "udo "
+        task = "Document this literal command:\n```bash\n" + keyword + "systemctl status service\n```"
+        assert not self._check_gate(task)
 
 
 class TestCapabilityBlocklistContents:

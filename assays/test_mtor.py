@@ -2553,3 +2553,52 @@ class TestDedup:
         record_dispatch("Implement feature X", spec_path=Path("/plans/spec-b.md"), state_path=state_file)
         result3 = check_duplicate("Implement feature X", spec_path=Path("/plans/spec-a.md"), window=300, state_path=state_file)
         assert result3 is not None
+
+
+def test_workflow_summary_preserves_capability_gate_diagnostics():
+    from mtor.worker.workflow import _summarize_workflow_result
+
+    summary = _summarize_workflow_result({
+        "task": "blocked task",
+        "provider": "zhipu",
+        "success": False,
+        "exit_code": -1,
+        "mode": "build",
+        "stderr": "CAPABILITY_GATE: blocked keyword",
+        "gate": "capability",
+        "blocked_keyword": "danger",
+        "review": {"approved": False},
+    })
+
+    assert summary["stderr"] == "CAPABILITY_GATE: blocked keyword"
+    assert summary["gate"] == "capability"
+    assert summary["blocked_keyword"] == "danger"
+
+
+def test_chaperone_dossier_preserves_capability_gate_diagnostics():
+    from mtor.worker.chaperone_review import _build_completion_dossier
+
+    result = {
+        "workflow_id": "wf-capability",
+        "exit_code": -1,
+        "provider": "zhipu",
+        "mode": "build",
+        "task": "blocked task",
+        "stderr": "CAPABILITY_GATE: blocked keyword",
+        "gate": "capability",
+        "blocked_keyword": "danger",
+    }
+    review = {"flags": ["exit_code=-1"], "ts": "2026-06-04T00:00:00Z"}
+    evidence = {
+        "artifact": {},
+        "verification": {},
+        "decision": {"blocking_flags": ["exit_code=-1"], "warnings": []},
+    }
+
+    dossier = _build_completion_dossier(
+        result, review, evidence, approved=False, verdict="rejected", score=30
+    )
+
+    assert dossier["stderr"] == "CAPABILITY_GATE: blocked keyword"
+    assert dossier["gate"] == "capability"
+    assert dossier["blocked_keyword"] == "danger"

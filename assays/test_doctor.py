@@ -304,3 +304,29 @@ class TestReconcileRunningWorkflows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_doctor_fails_when_rictor_topology_fails():
+    from mtor.doctor import doctor
+    from mtor.infra import HealthReport
+
+    class Client:
+        async def list_workflows(self):
+            yield object()
+
+    with patch("mtor.doctor._get_client", return_value=(Client(), None)), \
+         patch("mtor.doctor.COACHING_PATH", None), \
+         patch("mtor.doctor.WORKER_HOST", "ganglion"), \
+         patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}), \
+         patch("mtor.doctor._get_provider_module", return_value=None), \
+         patch("mtor.infra.check_health", return_value=HealthReport(ok=False, checks=[{"name": "worker_process_singleton", "ok": False, "detail": "duplicate"}])), \
+         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+         patch("sys.stderr.write"), \
+         patch("sys.stdout.write") as stdout_write, \
+         pytest.raises(SystemExit):
+        doctor()
+
+    payload = json.loads(stdout_write.call_args[0][0])
+    assert payload["ok"] is False
+    rictor = next(c for c in payload["result"]["checks"] if c["name"] == "rictor_topology")
+    assert rictor["ok"] is False

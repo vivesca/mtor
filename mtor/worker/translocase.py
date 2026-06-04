@@ -284,7 +284,6 @@ _HEARTBEAT_INTERVAL = 30.0
 _ACTIVITY_TIMEOUT = timedelta(hours=2)  # generous circuit breaker; stall detection fires first
 
 # Capability gate: keywords indicating out-of-scope or dangerous operations.
-# Case-insensitive substring match against the task prompt.
 _CAPABILITY_BLOCKLIST: tuple[str, ...] = (
     "sudo ",
     "DROP TABLE",
@@ -304,6 +303,21 @@ _CAPABILITY_BLOCKLIST: tuple[str, ...] = (
     "delete all data",
     "wipe disk",
 )
+
+
+def _strip_markdown_code(text: str) -> str:
+    """Remove Markdown code spans/blocks before capability keyword scanning."""
+    text = _re.sub(r"```.*?```", "", text, flags=_re.DOTALL)
+    return _re.sub(r"`[^`]*`", "", text)
+
+
+def _blocked_capability_keyword(task: str) -> str:
+    """Return the blocked keyword in task prose, ignoring literal code snippets."""
+    task_upper = _strip_markdown_code(task).upper()
+    for keyword in _CAPABILITY_BLOCKLIST:
+        if keyword.upper() in task_upper:
+            return keyword
+    return ""
 
 
 
@@ -592,20 +606,19 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     if _proc_count > 8:
         raise ApplicationError(f"Concurrency gate: {_proc_count} ribosome processes", non_retryable=False)
     # Capability gate: reject tasks containing blocked keywords
-    task_upper = task.upper()
-    for keyword in _CAPABILITY_BLOCKLIST:
-        if keyword.upper() in task_upper:
-            return {
-                "success": False,
-                "exit_code": -1,
-                "provider": provider,
-                "workflow_id": workflow_id,
-                "task": task[:200],
-                "stdout": "",
-                "stderr": f"CAPABILITY_GATE: blocked keyword '{keyword}' detected in task",
-                "gate": "capability",
-                "blocked_keyword": keyword,
-            }
+    blocked_keyword = _blocked_capability_keyword(task)
+    if blocked_keyword:
+        return {
+            "success": False,
+            "exit_code": -1,
+            "provider": provider,
+            "workflow_id": workflow_id,
+            "task": task[:200],
+            "stdout": "",
+            "stderr": f"CAPABILITY_GATE: blocked keyword '{blocked_keyword}' detected in task",
+            "gate": "capability",
+            "blocked_keyword": blocked_keyword,
+        }
 
     task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
     tid_str = task_id_match.group(1) if task_id_match else ""

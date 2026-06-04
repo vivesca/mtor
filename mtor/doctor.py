@@ -511,6 +511,24 @@ def doctor(*, reconcile: bool = False) -> None:
         }
     )
 
+    # Check 3b: authoritative rictor topology. Temporal visibility can be
+    # reachable while stale or duplicate worker services are still present.
+    try:
+        from mtor.infra import check_health as _rictor_check_health
+
+        rictor_report = _rictor_check_health()
+        rictor_detail = "; ".join(
+            f"{c.get('name')}={c.get('ok')}" for c in rictor_report.checks
+        )
+        checks.append({"name": "rictor_topology", "ok": rictor_report.ok, "detail": rictor_detail})
+        if not rictor_report.ok:
+            all_ok = False
+        result_rictor_checks = rictor_report.checks
+    except Exception as exc:
+        all_ok = False
+        checks.append({"name": "rictor_topology", "ok": False, "detail": str(exc)[:200]})
+        result_rictor_checks = []
+
     # Check 3: Coaching file present + size cap (optional — skip if not configured)
     from mtor import COACHING_MAX_KB
 
@@ -552,6 +570,7 @@ def doctor(*, reconcile: bool = False) -> None:
         "worker_alive": worker_ok,
         "task_queue": TASK_QUEUE,
         "checks": checks,
+        "rictor_checks": result_rictor_checks,
     }
 
     # Check 5: Real API probe — only meaningful when soma == worker (API keys

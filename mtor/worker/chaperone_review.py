@@ -177,6 +177,9 @@ def _build_completion_dossier(
         "attempted_providers": result.get("attempted_providers", []),
         "mode": result.get("mode", "build"),
         "task_preview": result.get("task", "")[:200],
+        "stderr": str(result.get("stderr", ""))[:500],
+        "gate": result.get("gate", ""),
+        "blocked_keyword": result.get("blocked_keyword", ""),
         "artifact": {
             "branch_name": result.get("branch_name", artifact.get("branch_name", "")),
             "commit_count": artifact.get("commit_count", 0),
@@ -439,6 +442,9 @@ async def chaperone(result: dict) -> dict:
             "mode": result.get("mode", "build"),
             "output_path": result.get("output_path", ""),
             "cached_log_path": result.get("cached_log_path", ""),
+            "stderr": str(result.get("stderr", ""))[:500],
+            "gate": result.get("gate", ""),
+            "blocked_keyword": result.get("blocked_keyword", ""),
         },
         "artifact": {
             "branch_name": branch_name,

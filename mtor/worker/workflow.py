@@ -35,6 +35,23 @@ _RETRY_POLICY = RetryPolicy(
 _REVIEW_RETRY = RetryPolicy(maximum_attempts=1)
 
 
+
+def _summarize_workflow_result(result: dict) -> dict:
+    """Return the compact result shape exposed by TranslationWorkflow.run."""
+    summary = {
+        "task": result.get("task", "")[:100],
+        "provider": result.get("provider", ""),
+        "success": result.get("success", False),
+        "exit_code": result.get("exit_code", -1),
+        "mode": result.get("mode", "raw"),
+        "review": result.get("review", {}),
+    }
+    for key in ("stderr", "gate", "blocked_keyword"):
+        value = result.get(key, "")
+        if value:
+            summary[key] = str(value)[:500] if key == "stderr" else value
+    return summary
+
 @workflow.defn
 class TranslationWorkflow:
     """Dispatch a batch of translation tasks, review results, report aggregate."""
@@ -246,17 +263,7 @@ class TranslationWorkflow:
             "approved": approved,
             "flagged": flagged,
             "rejected": rejected,
-            "results": [
-                {
-                    "task": r.get("task", "")[:100],
-                    "provider": r.get("provider", ""),
-                    "success": r.get("success", False),
-                    "exit_code": r.get("exit_code", -1),
-                    "mode": r.get("mode", "raw"),
-                    "review": r.get("review", {}),
-                }
-                for r in all_results
-            ],
+            "results": [_summarize_workflow_result(r) for r in all_results],
         }
 
 
