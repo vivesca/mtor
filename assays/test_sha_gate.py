@@ -203,36 +203,47 @@ class TestCheckWorkerSha:
             with pytest.raises(RuntimeError, match="restart failed"):
                 _check_worker_sha()
 
-    def test_deploy_pushes_main_to_unique_deploy_sync_branch(self):
-        """Auto-deploy pushes to a unique deploy-sync branch to avoid ref races."""
+    def test_deploy_pushes_head_to_main_and_ff_merges(self):
+        """Auto-deploy pushes HEAD:main to origin, then ff-merges on the worker.
+
+        The earlier mechanism force-pushed to a unique ``deploy-sync-<pid>-<ts>``
+        branch on the worker and merged/deleted it (hence the old os.getpid +
+        time.time patches). That was replaced (commit 5f43ad9) by an
+        origin-mediated deploy: push HEAD straight to origin/main, then
+        ``git fetch origin main && git merge --ff-only origin/main`` on the
+        worker. No temp branch, no pid, no force-push.
+        """
         from mtor.dispatch import _check_worker_sha
 
         with (
             patch("mtor.dispatch.subprocess") as mock_sp,
-            patch("mtor.dispatch.time") as mock_time,
-            patch("mtor.dispatch.os.getpid", return_value=12345),
+            patch("mtor.dispatch.time"),  # silence time.sleep(3) after restart
             patch("mtor.dispatch._check_worker_checkout"),
         ):
-            mock_time.time.return_value = 42
             mock_sp.run.side_effect = [
-                MagicMock(returncode=0, stdout="aaa\n"),
-                MagicMock(returncode=0, stdout="bbb\n"),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
-                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD
+                MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD (differs)
+                MagicMock(returncode=0, stdout=""),       # push ok
+                MagicMock(returncode=0, stdout=""),       # merge ok
+                MagicMock(returncode=0, stdout=""),       # restart ok
             ]
             _check_worker_sha()
 
-        # Third call should be the push
-        push_call = mock_sp.run.call_args_list[2]
-        push_args = push_call[0][0]
+        # Third call pushes local HEAD straight to origin/main — no temp branch.
+        push_args = mock_sp.run.call_args_list[2][0][0]
         assert "push" in push_args
-        assert "main:deploy-sync-12345-42000" in push_args
+        assert "origin" in push_args
+        assert "HEAD:main" in push_args
+        assert not any("deploy-sync" in str(a) for a in push_args)
 
-        merge_call = mock_sp.run.call_args_list[3]
-        merge_cmd = merge_call[0][0][-1]
-        assert "git merge deploy-sync-12345-42000 --no-edit" in merge_cmd
-        assert "git branch -d deploy-sync-12345-42000" in merge_cmd
+        # Fourth call fast-forwards the worker checkout from origin/main.
+        merge_cmd = mock_sp.run.call_args_list[3][0][0][-1]
+        assert "git fetch origin main" in merge_cmd
+        assert "git merge --ff-only origin/main" in merge_cmd
+
+        # Fifth call restarts the user-scoped worker unit.
+        restart_cmd = mock_sp.run.call_args_list[4][0][0][-1]
+        assert "systemctl --user restart mtor-worker" in restart_cmd
 
     def test_merge_failure_raises(self):
         """If worker merge fails during auto-deploy, raises RuntimeError."""
