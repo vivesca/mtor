@@ -10,13 +10,41 @@ from typing import Any
 
 
 BUCKET_NAMES = (
+    # INVARIANT TRIPWIRE — approve-class verdict that carries a *blocking* flag.
+    # The review gate forces such work to "rejected", so this should always be 0.
+    # A non-zero value means the gate let something dangerous (e.g. destruction)
+    # through an approve-class verdict — investigate immediately.
     "approved_with_blocking_flags",
+    # Approve-class verdict carrying only non-blocking warnings (placeholders,
+    # hardcoded paths, ...). Informational, not a safety failure. This is where
+    # the bulk of "approved_with_flags" reviews legitimately land.
+    "approved_with_warnings",
     "approved_empty_diff",
     "rejected_nontrivial_diff",
     "incomplete_with_branch",
     "success_no_commit",
     "exit0_empty_diff",
 )
+
+# Flags severe enough that an approve-class verdict carrying one is an invariant
+# violation. Mirrors chaperone_review._is_blocking_review_flag; kept local so the
+# read-only audit stays free of the temporalio dependency that module imports.
+_BLOCKING_FLAG_PREFIXES = (
+    "destruction",
+    "errors",
+    "file_shrunk",
+    "pure_deletion",
+    "target_file_missing",
+    "py2_except_syntax",
+    "nested_test_file",
+    "reflex_ban",
+)
+
+
+def _is_blocking_flag(flag: str) -> bool:
+    if flag == "no_commit_on_success":
+        return True
+    return flag.startswith(_BLOCKING_FLAG_PREFIXES)
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
@@ -116,8 +144,14 @@ def summarize_audit(
         flags = _flags(review)
         top_flags.update(flags)
 
-        if verdict == "approved_with_flags" or (verdict == "approved" and flags):
-            buckets["approved_with_blocking_flags"] += 1
+        approve_class = verdict in {"approved", "accepted", "approved_with_flags"}
+        if approve_class and flags:
+            if any(_is_blocking_flag(f) for f in flags):
+                # Should be impossible: the gate rejects blocking flags. If this
+                # fires, an approve-class verdict slipped a blocking flag through.
+                buckets["approved_with_blocking_flags"] += 1
+            else:
+                buckets["approved_with_warnings"] += 1
         if verdict in {"approved", "accepted", "approved_with_flags"} and not diff.strip():
             buckets["approved_empty_diff"] += 1
         if verdict in {"rejected", "failed"} and _diff_changed_lines(diff) > 20:

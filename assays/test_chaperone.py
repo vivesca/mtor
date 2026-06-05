@@ -97,10 +97,88 @@ class TestDestructionFlags:
         assert any("destruction" in f for f in review["flags"])
         assert review["approved"] is False
 
+    def test_rm_rf_hard_rejected_never_approved_with_flags(self):
+        """rm -rf forces verdict=rejected — never approved/approved_with_flags."""
+        result = _make_result(stdout="Running rm -rf /tmp/old to clean up")
+        review = _run(chaperone(result))
+        assert review["verdict"] == "rejected"
+        assert review["verdict"] != "approved_with_flags"
+        assert review["approved"] is False
+
     def test_deleted_all_flagged(self):
         result = _make_result(stderr="deleted all files in the directory")
         review = _run(chaperone(result))
         assert any("destruction" in f for f in review["flags"])
+        assert review["verdict"] == "rejected"
+        assert review["approved"] is False
+
+    def test_rm_rf_in_diff_rejected(self):
+        """rm -rf committed in the DIFF (not narrated to stdout) is still rejected.
+
+        A ribosome can land destructive code without printing it. The diff scan
+        must catch it.
+        """
+        result = _make_result(
+            stdout="Done. Changes committed.",
+            post_diff={
+                "stat": " cleanup.sh | 3 +++\n",
+                "numstat": "3\t0\tcleanup.sh",
+                "commits": ["abc1234 feat: add cleanup"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/cleanup.sh b/cleanup.sh\n"
+                    "--- /dev/null\n"
+                    "+++ b/cleanup.sh\n"
+                    "@@ -0,0 +1,2 @@\n"
+                    "+#!/bin/bash\n"
+                    "+rm -rf /important/data\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert any("destruction" in f for f in review["flags"])
+        assert review["verdict"] == "rejected"
+        assert review["approved"] is False
+
+    def test_rmtree_in_diff_rejected(self):
+        """shutil.rmtree committed in the diff is treated as destruction."""
+        result = _make_result(
+            post_diff={
+                "stat": " wipe.py | 2 ++\n",
+                "numstat": "2\t0\twipe.py",
+                "commits": ["abc1234 feat: wipe"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/wipe.py b/wipe.py\n"
+                    "+++ b/wipe.py\n"
+                    "@@ -0,0 +1,1 @@\n"
+                    "+shutil.rmtree(target_dir)\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert any("destruction" in f for f in review["flags"])
+        assert review["verdict"] == "rejected"
+
+    def test_destruction_overrides_incomplete(self):
+        """exit!=0 + commits + destruction → rejected, not preserved as incomplete.
+
+        A destructive branch must not be kept for re-dispatch.
+        """
+        result = _make_result(
+            exit_code=1,
+            stdout="rm -rf /tmp/work",
+            post_diff={
+                "stat": " foo.py | 5 +++\n",
+                "numstat": "5\t0\tfoo.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+            },
+            branch_name="ribosome-123456",
+        )
+        review = _run(chaperone(result))
+        assert review["verdict"] == "rejected"
+        assert review["approved"] is False
 
 
 class TestPromotedChecks:

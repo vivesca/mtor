@@ -93,6 +93,57 @@ def test_summarize_audit_parses_compact_diffstat_buckets(tmp_path):
     assert result["top_flags"] == {"file_shrunk: foo.py +1/-40": 1}
 
 
+def test_blocking_flags_bucket_is_a_destruction_tripwire(tmp_path):
+    """An approve-class verdict carrying a destruction flag is the invariant
+    violation the blocking-flags bucket exists to catch — and must not be
+    diluted into the warnings bucket."""
+    from mtor.audit import summarize_audit
+
+    runs = tmp_path / "runs.jsonl"
+    reviews = tmp_path / "reviews.jsonl"
+    _write_jsonl(runs, [])
+    _write_jsonl(
+        reviews,
+        [
+            # Invariant violation: approve-class verdict + destruction flag.
+            {"verdict": "approved", "diff": " x.sh | 1 +", "flags": ["destruction: rm -rf"]},
+            {
+                "verdict": "approved_with_flags",
+                "diff": " y.sh | 1 +",
+                "flags": ["destruction: deleted all"],
+            },
+        ],
+    )
+
+    buckets = summarize_audit(runs, reviews)["buckets"]
+
+    assert buckets["approved_with_blocking_flags"] == 2
+    assert buckets["approved_with_warnings"] == 0
+
+
+def test_non_blocking_warnings_do_not_count_as_blocking(tmp_path):
+    """approved_with_flags carrying only warnings (placeholders, hardcoded
+    paths) is informational — it must land in approved_with_warnings, NOT the
+    blocking tripwire. This is the false alarm the old bucket produced."""
+    from mtor.audit import summarize_audit
+
+    runs = tmp_path / "runs.jsonl"
+    reviews = tmp_path / "reviews.jsonl"
+    _write_jsonl(runs, [])
+    _write_jsonl(
+        reviews,
+        [
+            {"verdict": "approved_with_flags", "diff": " a.py | 5 +", "flags": ["placeholders: TODO"]},
+            {"verdict": "approved", "diff": " b.py | 5 +", "flags": ["hardcoded_home_path"]},
+        ],
+    )
+
+    buckets = summarize_audit(runs, reviews)["buckets"]
+
+    assert buckets["approved_with_warnings"] == 2
+    assert buckets["approved_with_blocking_flags"] == 0
+
+
 def test_summarize_audit_lists_large_logs_without_reading_contents(tmp_path):
     from mtor.audit import summarize_audit
 

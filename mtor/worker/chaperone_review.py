@@ -18,6 +18,18 @@ _DESTRUCTION_PATTERNS = _re.compile(
     _re.IGNORECASE,
 )
 
+# Destructive shell/code that deletes or overwrites data when *executed*.
+# Scanned against ADDED diff lines (committed code), where the narration
+# patterns above ("deleted all", "wrote 0 bytes") don't apply but an actual
+# `rm -rf` landing in the patch must still be caught. A ribosome can destroy
+# data through committed code without ever narrating it to stdout.
+_DESTRUCTION_SHELL_PATTERNS = _re.compile(
+    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r|"
+    r"\brmdir\b|git\s+clean\s+-[a-zA-Z]*f|shutil\.rmtree|"
+    r"mkfs|dd\s+if=",
+    _re.IGNORECASE,
+)
+
 _ERROR_PATTERNS = _re.compile(
     r"SyntaxError|ImportError|ModuleNotFoundError|PermissionError|"
     r"Traceback \(most recent|panic:|fatal:",
@@ -230,9 +242,15 @@ async def chaperone(result: dict) -> dict:
     if exit_code != 0:
         flags.append(f"exit_code={exit_code}")
 
+    # Destruction is scanned in two places: narration in stdout/stderr, AND the
+    # actual committed diff (added lines). Either one carrying a destructive
+    # shell command is a hard reject downstream — see the verdict guard below.
+    _post_diff_obj = result.get("post_diff", {})
+    _scan_patch = _post_diff_obj.get("patch", "") if isinstance(_post_diff_obj, dict) else ""
     destruction_hits = _DESTRUCTION_PATTERNS.findall(combined)
+    destruction_hits += _DESTRUCTION_SHELL_PATTERNS.findall(_added_patch_lines(_scan_patch))
     if destruction_hits:
-        flags.append(f"destruction: {', '.join(list(set(destruction_hits))[:3])}")
+        flags.append(f"destruction: {', '.join(list(dict.fromkeys(destruction_hits))[:3])}")
 
     error_hits = _ERROR_PATTERNS.findall(combined)
     if error_hits:
@@ -382,6 +400,18 @@ async def chaperone(result: dict) -> dict:
         verdict = "approved" if approved else "rejected"
         if flags and approved:
             verdict = "approved_with_flags"
+
+    # SAFETY INVARIANT — destruction is an unconditional hard reject.
+    # This is deliberately the LAST word on the verdict: it runs after the
+    # incomplete branch, after the scout/build approval logic, and after the
+    # approved_with_flags upgrade. No mode, exit code, satisfaction score, or
+    # future branch can let a diff that deletes data ("rm -rf", "deleted all",
+    # shutil.rmtree, ...) reach an approve-class verdict. The implicit guard via
+    # _is_blocking_review_flag already rejects today; this makes the invariant
+    # explicit and impossible to regress by editing the branches above.
+    if any(f.startswith("destruction") for f in flags):
+        approved = False
+        verdict = "rejected"
 
     # Satisfaction scoring: 0-100 based on objective signals
     score = 100
