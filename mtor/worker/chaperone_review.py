@@ -60,6 +60,7 @@ _PLACEHOLDER_PATTERNS = _re.compile(r"\bTODO\b|\bFIXME\b|\bstub\b", _re.IGNORECA
 _HARDCODED_HOME = _re.compile(r"/Users/terry/|/home/terry/")
 _PY2_EXCEPT = _re.compile(r"^\s*except\s+\w+\s*,\s*\w+\s*:", _re.MULTILINE)
 _DUPE_FUTURE = _re.compile(r"from\s+__future__\s+import\s+annotations")
+_FUTURE_IMPORT = _re.compile(r"from\s+__future__\s+import\s+(.+)")
 _TEST_COMMAND = _re.compile(
     r"\b(?:uv\s+run\s+pytest|pytest|npm\s+test|pnpm\s+test|bun\s+test)\b[^\n\r]*",
     _re.IGNORECASE,
@@ -74,6 +75,12 @@ _REFLEX_BAN_PATTERNS: tuple[tuple[str, _re.Pattern[str]], ...] = (
     ("typing_optional", _re.compile(r"\b(?:from\s+typing\s+import\s+Optional|Optional\[)")),
     ("os_path_join", _re.compile(r"\bos\.path\.join\(")),
     ("per_class_logger", _re.compile(r"self\.logger\s*=\s*logging\.getLogger\(__name__\)")),
+    # Promoted 2026-06-06 from the (formerly non-blocking) narration warning to a
+    # diff-scoped blocking gate. A hardcoded macOS/linux home path in *committed*
+    # code breaks portability across hosts (genome: "Never hardcode paths").
+    # The narration `hardcoded_home_path` flag below stays as a non-blocking
+    # warning — GLM mentioning a path in prose is not a defect; landing it is.
+    ("hardcoded_home_path", _re.compile(r"/Users/terry/|/home/terry/")),
 )
 
 
@@ -121,6 +128,36 @@ def _added_patch_lines(patch_text: str) -> str:
     return "\n".join(lines)
 
 
+def _dupe_future_in_diff(patch_text: str) -> bool:
+    """True if any single file in the patch ADDS the same __future__ import twice.
+
+    Walks the unified diff tracking the current target file via ``+++ b/...``
+    headers and counts added ``from __future__ import <name>`` lines per file.
+    A name appearing twice within one file's added lines is a genuine duplicate
+    — the new-file case GLM produces (prepending a second
+    ``from __future__ import annotations`` to a file it is creating).
+
+    Limitation: when GLM adds a duplicate to a file that *already* had the
+    import, the pre-existing line is diff context (not an added ``+`` line), so
+    it is invisible here. ribosome-validate's full-file AST check covers that
+    case; this diff-scoped gate covers the new-file case in the merge path.
+    """
+    current: str | None = None
+    per_file: dict[str, list[str]] = {}
+    for line in patch_text.splitlines():
+        if line.startswith("+++ "):
+            current = line[4:].strip()
+            per_file.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            match = _FUTURE_IMPORT.search(line[1:])
+            if match:
+                per_file[current].extend(name.strip() for name in match.group(1).split(","))
+    return any(len(names) != len(set(names)) for names in per_file.values())
+
+
 def _reflex_ban_flags(patch_text: str) -> list[str]:
     """Return deterministic flags for promoted GLM coaching bans."""
     added = _added_patch_lines(patch_text)
@@ -131,6 +168,10 @@ def _reflex_ban_flags(patch_text: str) -> list[str]:
 
     if _re.search(r"except\s+Exception\s*:\s*\n\s*(?:pass|(?:self\.)?logger\.|logging\.|print\()", added):
         flags.append("reflex_ban:broad_exception_swallow")
+
+    # Per-file duplicate __future__ import in the committed diff (blocking).
+    if _dupe_future_in_diff(patch_text):
+        flags.append("reflex_ban:dupe_future_import")
 
     return flags
 

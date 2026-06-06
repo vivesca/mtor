@@ -227,6 +227,98 @@ class TestPromotedChecks:
         assert "reflex_ban:inline_bypass" in review["flags"]
         assert review["approved"] is False
 
+    def test_hardcoded_home_path_in_diff_blocks(self):
+        """A hardcoded home path in committed code is a hard reject.
+
+        Narration mentions stay a non-blocking warning (test_hardcoded_home_path_flagged);
+        landing the path in the diff is a portability defect that blocks the merge.
+        """
+        result = _make_result(
+            stdout="Done. Changes committed.",
+            post_diff={
+                "stat": " conf.py | 1 +\n",
+                "numstat": "1\t0\tconf.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/conf.py b/conf.py\n"
+                    "+++ b/conf.py\n"
+                    "@@\n"
+                    '+ROOT = "/Users/terry/germline"\n'
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert "reflex_ban:hardcoded_home_path" in review["flags"]
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
+
+    def test_dupe_future_import_in_diff_blocks(self):
+        """A new file adding the same __future__ import twice is a hard reject."""
+        result = _make_result(
+            post_diff={
+                "stat": " new.py | 3 +++\n",
+                "numstat": "3\t0\tnew.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/new.py b/new.py\n"
+                    "--- /dev/null\n"
+                    "+++ b/new.py\n"
+                    "@@ -0,0 +1,2 @@\n"
+                    "+from __future__ import annotations\n"
+                    "+from __future__ import annotations\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert "reflex_ban:dupe_future_import" in review["flags"]
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
+
+    def test_single_future_import_in_diff_ok(self):
+        """One __future__ import in a new file does NOT trip the dupe gate."""
+        result = _make_result(
+            post_diff={
+                "stat": " ok.py | 2 ++\n",
+                "numstat": "2\t0\tok.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/ok.py b/ok.py\n"
+                    "+++ b/ok.py\n"
+                    "@@\n"
+                    "+from __future__ import annotations\n"
+                    "+value = 1\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert not any("dupe_future_import" in f for f in review["flags"])
+
+    def test_future_import_split_across_files_not_dupe(self):
+        """Two files each with one __future__ import is not a duplicate (per-file scan)."""
+        result = _make_result(
+            post_diff={
+                "stat": " a.py | 1 +\n b.py | 1 +\n",
+                "numstat": "1\t0\ta.py\n1\t0\tb.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/a.py b/a.py\n"
+                    "+++ b/a.py\n"
+                    "@@\n"
+                    "+from __future__ import annotations\n"
+                    "diff --git a/b.py b/b.py\n"
+                    "+++ b/b.py\n"
+                    "@@\n"
+                    "+from __future__ import annotations\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert not any("dupe_future_import" in f for f in review["flags"])
+
     def test_reflex_ban_ignores_diff_metadata(self):
         result = _make_result(
             post_diff={
