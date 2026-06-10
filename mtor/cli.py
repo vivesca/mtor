@@ -36,6 +36,7 @@ from mtor import (
     TASK_QUEUE,
     TEMPORAL_HOST,
     VERSION,
+    WORKER_GERMLINE_DIR,
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
@@ -2353,6 +2354,12 @@ def deploy() -> None:
     # the merge exit code entirely. Retry with a short backoff to absorb the
     # lag; fail closed (before restart) if the worker never reaches the pushed
     # SHA. Mirrors _check_worker_sha() / infra.deploy() step 2.
+    #
+    # The SSH `cd` target is WORKER_GERMLINE_DIR (the worker's germline path,
+    # e.g. /home/vivesca/germline), NOT REPO_DIR — REPO_DIR is soma's local
+    # path (e.g. /Users/terry/germline) and does not exist on the worker, so
+    # `cd REPO_DIR` over SSH would fail. REPO_DIR is correct only for the local
+    # `cwd=` push above.
     merge_attempts = 3
     merge_backoff = 2.0
     merge_ok = False
@@ -2363,7 +2370,7 @@ def deploy() -> None:
             [
                 "ssh",
                 WORKER_HOST,
-                f"cd {REPO_DIR} && git fetch origin main && git merge --ff-only origin/main",
+                f"cd {WORKER_GERMLINE_DIR} && git fetch origin main && git merge --ff-only origin/main",
             ],
             capture_output=True,
             text=True,
@@ -2373,7 +2380,7 @@ def deploy() -> None:
             merge_err = f"worker merge failed: {merge.stderr.strip()[:200]}"
             break
         worker_head = subprocess.run(
-            ["ssh", WORKER_HOST, f"cd {REPO_DIR} && git rev-parse HEAD"],
+            ["ssh", WORKER_HOST, f"cd {WORKER_GERMLINE_DIR} && git rev-parse HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -2397,7 +2404,7 @@ def deploy() -> None:
                 "mtor deploy",
                 merge_err,
                 "SYNC_FAILED",
-                f"SSH to {WORKER_HOST} and check: cd {REPO_DIR} && git status",
+                f"SSH to {WORKER_HOST} and check: cd {WORKER_GERMLINE_DIR} && git status",
                 exit_code=1,
             )
         )

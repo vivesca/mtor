@@ -2,8 +2,14 @@
 
 `mtor deploy` pushes the local germline HEAD to origin/main, fast-forwards the
 worker checkout, restarts the worker, then verifies health via _doctor(). It is
-the sibling of dispatch._check_worker_sha(): both deploy ~/germline (REPO_DIR),
-not the mtor code repo that infra.deploy() handles.
+the sibling of dispatch._check_worker_sha(): both deploy the germline content
+repo, not the mtor code repo that infra.deploy() handles.
+
+Two paths matter and are NOT interchangeable: the local push uses `cwd=REPO_DIR`
+(soma's local germline, e.g. /Users/terry/germline), while the worker-side SSH
+commands must `cd WORKER_GERMLINE_DIR` (the worker's germline, e.g.
+/home/vivesca/germline). REPO_DIR over SSH would `cd` a path that does not exist
+on the worker.
 
 GitHub push-propagation lag can leave the worker's `git fetch origin main`
 seeing the OLD origin/main, so a clean `git merge --ff-only origin/main` exit is
@@ -52,6 +58,42 @@ class TestDeployCommand:
         mock_doctor.assert_called_once()
         # Matched on first attempt → no backoff sleep, only the post-restart settle.
         mock_sleep.assert_called_once_with(3)
+
+    def test_deploy_uses_worker_germline_dir_over_ssh_not_repo_dir(self):
+        """The worker-side SSH commands must `cd` the worker's germline path,
+        not soma's local REPO_DIR (which does not exist on the worker). The
+        local push, by contrast, must run with cwd=REPO_DIR."""
+        from mtor.cli import deploy
+        from mtor import REPO_DIR, WORKER_GERMLINE_DIR
+
+        with (
+            patch("mtor.cli.subprocess") as mock_sp,
+            patch("time.sleep"),
+            patch("mtor.cli._doctor"),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout=""),       # push
+                MagicMock(returncode=0, stdout="aaa\n"),  # local rev-parse
+                MagicMock(returncode=0, stdout=""),       # worker ff-merge
+                MagicMock(returncode=0, stdout="aaa\n"),  # worker rev-parse
+                MagicMock(returncode=0, stdout=""),       # restart
+            ]
+            deploy()
+
+        calls = mock_sp.run.call_args_list
+        # Local push: cwd=REPO_DIR, no SSH.
+        assert calls[0].kwargs.get("cwd") == REPO_DIR
+        assert "ssh" not in str(calls[0].args[0])
+        # SSH ff-merge and SSH rev-parse both target the worker's germline path.
+        merge_cmd = calls[2].args[0][-1]
+        revparse_cmd = calls[3].args[0][-1]
+        assert WORKER_GERMLINE_DIR in merge_cmd and "ff-only" in merge_cmd
+        assert WORKER_GERMLINE_DIR in revparse_cmd and "rev-parse" in revparse_cmd
+        # The local-path bug must not recur on the SSH side. Only meaningful when
+        # the two paths differ (they coincide if deploy is ever run on the worker).
+        if REPO_DIR != WORKER_GERMLINE_DIR:
+            assert f"cd {REPO_DIR} " not in merge_cmd
+            assert f"cd {REPO_DIR} " not in revparse_cmd
 
     def test_deploy_retries_then_succeeds_when_lag_resolves(self):
         """First fetch sees stale origin/main; a later attempt lands the SHA."""
