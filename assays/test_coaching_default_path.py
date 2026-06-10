@@ -60,8 +60,17 @@ def test_explicit_env_var_wins_over_existing_default(
 
 
 @pytest.fixture(autouse=True)
-def _restore_module():
-    """Reload mtor with real env after each test so other tests see real config."""
+def _restore_module(monkeypatch: pytest.MonkeyPatch):
+    """Reload mtor with real env after each test so other tests see real config.
+
+    Requests ``monkeypatch`` and calls ``monkeypatch.undo()`` before the reload so
+    HOME + MTOR_COACHING_PATH are guaranteed restored first, regardless of fixture
+    request order. A conftest-level autouse fixture that requests ``monkeypatch``
+    would otherwise hoist its env-revert finalizer to run *after* this reload,
+    leaving a tmp MTOR_COACHING_PATH live and polluting mtor.COACHING_PATH for
+    later tests.
+    """
     yield
+    monkeypatch.undo()
     import mtor
     importlib.reload(mtor)
