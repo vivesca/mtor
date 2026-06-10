@@ -184,18 +184,53 @@ def _detect_repo(task: str, default: str) -> str:
     return default
 
 
+def _main_moved_off(work_dir: str, base_sha: str) -> bool:
+    """True if the local ``main`` ref has advanced off the recorded base_sha.
+
+    When the worker branched, ``main`` pointed at ``base_sha``. If ``git
+    rev-parse main`` no longer equals ``base_sha``, a parallel session landed a
+    commit (or a fast-forward merge moved ``main``) after the branch point, so
+    ``main..HEAD`` is no longer the worker's true diff base. Returns False when
+    ``main`` can't be resolved — don't force the base range on a guess.
+    """
+    try:
+        r = _run_worker_command(
+            ["git", "rev-parse", "--verify", "--quiet", "main"],
+            capture_output=True, text=True, timeout=5, cwd=work_dir,
+        )
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    return r.stdout.strip() != base_sha
+
+
 def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dict:
     """Capture git diff stat + numstat + commit list + full patch for review.
 
-    When ``base_sha`` is provided and ``main..HEAD`` yields nothing (worktree
-    creation failed, ribosome committed directly on main), falls back to
-    ``{base_sha}..HEAD`` so the actual work is still captured.
+    The diff base is ``main..HEAD`` in the normal case. But ``main`` is a shared
+    worktree ref: if a parallel session lands a commit on ``main`` after the
+    worker branched, ``main..HEAD`` becomes contaminated — files the parallel
+    commit ADDED to main read as DELETIONS in the worker diff, raising false
+    ``pure_deletion`` / ``file_shrunk`` flags downstream. So when ``base_sha`` is
+    recorded and ``main`` has advanced off it, diff ``{base_sha}..HEAD`` instead
+    — the worker's true scope. This also subsumes the worktree-fallback case
+    where the ribosome committed directly on an advanced main and ``main..HEAD``
+    is empty.
+
+    See ``finding_chaperone_false_positive_parallel_commit_base_drift``.
     """
     work_dir = cwd or str(Path.home() / "germline")
     empty_result = {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""}
     try:
         diff_range = "main..HEAD"
         fallback = False
+
+        # Base-drift guard: main has moved past the recorded branch point, so
+        # diff against base_sha directly rather than the contaminated main..HEAD.
+        if base_sha and _main_moved_off(work_dir, base_sha):
+            diff_range = f"{base_sha}..HEAD"
+            fallback = True
 
         stat = _run_worker_command(
             ["git", "diff", "--stat", diff_range],
@@ -208,7 +243,8 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
         commit_lines = [ln.strip() for ln in commits_r.stdout.strip().splitlines() if ln.strip()]
 
         # Fallback: main..HEAD is empty but base_sha was recorded before execution
-        if not commit_lines and not stat.stdout.strip() and base_sha:
+        # (main never diverged — e.g. main ref missing — but HEAD still has work).
+        if not commit_lines and not stat.stdout.strip() and base_sha and not fallback:
             fb_range = f"{base_sha}..HEAD"
             fb_stat = _run_worker_command(
                 ["git", "diff", "--stat", fb_range],
