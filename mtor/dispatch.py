@@ -331,22 +331,55 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
-    merge = subprocess.run(
-        [
-            "ssh",
-            WORKER_HOST,
-            (
-                "cd ~/germline && "
-                "git fetch origin main && "
-                "git merge --ff-only origin/main"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if merge.returncode != 0:
-        raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
+    # Fast-forward the worker checkout, then verify the worker HEAD actually
+    # advanced to the pushed SHA. GitHub push-propagation lag can leave the
+    # worker's `git fetch origin main` seeing the OLD origin/main, so
+    # `git merge --ff-only origin/main` is a no-op that still exits 0 —
+    # trusting that exit restarts the worker on stale code and reports "in
+    # sync". Retry the fetch/merge a few times with a short backoff to absorb
+    # the lag; fail closed (before restart) if the worker never reaches the
+    # pushed SHA. Mirrors infra.deploy() step 2.
+    pushed_sha = local.stdout.strip()
+    merge_attempts = 3
+    merge_backoff = 2.0
+    merge_ok = False
+    worker_sha = ""
+    for attempt in range(1, merge_attempts + 1):
+        merge = subprocess.run(
+            [
+                "ssh",
+                WORKER_HOST,
+                (
+                    "cd ~/germline && "
+                    "git fetch origin main && "
+                    "git merge --ff-only origin/main"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if merge.returncode != 0:
+            raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
+        worker_head = subprocess.run(
+            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        worker_sha = worker_head.stdout.strip()
+        if worker_head.returncode == 0 and worker_sha == pushed_sha:
+            merge_ok = True
+            break
+        if attempt < merge_attempts:
+            time.sleep(merge_backoff)
+
+    if not merge_ok:
+        raise RuntimeError(
+            "worker HEAD did not advance to pushed SHA after "
+            f"{merge_attempts} attempts: local {pushed_sha[:8] or '<none>'} "
+            f"worker {worker_sha[:8] or '<none>'}"
+        )
 
     restart = subprocess.run(
         ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],

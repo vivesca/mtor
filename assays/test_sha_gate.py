@@ -128,11 +128,13 @@ class TestCheckWorkerSha:
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
+                MagicMock(returncode=0, stdout="aaa111\n"),  # worker HEAD (now matches pushed)
                 MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha()
         assert result is True
-        assert mock_sp.run.call_count == 5
+        assert mock_sp.run.call_count == 6
+        # Worker advanced on first attempt → no backoff sleep, only post-restart settle.
         mock_time.sleep.assert_called_once_with(3)
 
     def test_skip_returns_true_immediately(self):
@@ -198,6 +200,7 @@ class TestCheckWorkerSha:
                 MagicMock(returncode=0, stdout="bbb\n"),
                 MagicMock(returncode=0, stdout=""),  # push ok
                 MagicMock(returncode=0, stdout=""),  # merge ok
+                MagicMock(returncode=0, stdout="aaa\n"),  # worker HEAD matches pushed
                 MagicMock(returncode=1, stderr="systemctl failed"),  # restart fail
             ]
             with pytest.raises(RuntimeError, match="restart failed"):
@@ -225,6 +228,7 @@ class TestCheckWorkerSha:
                 MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD (differs)
                 MagicMock(returncode=0, stdout=""),       # push ok
                 MagicMock(returncode=0, stdout=""),       # merge ok
+                MagicMock(returncode=0, stdout="aaa\n"),  # worker HEAD post-merge (matches)
                 MagicMock(returncode=0, stdout=""),       # restart ok
             ]
             _check_worker_sha()
@@ -241,8 +245,12 @@ class TestCheckWorkerSha:
         assert "git fetch origin main" in merge_cmd
         assert "git merge --ff-only origin/main" in merge_cmd
 
-        # Fifth call restarts the user-scoped worker unit.
-        restart_cmd = mock_sp.run.call_args_list[4][0][0][-1]
+        # Fifth call re-reads the worker HEAD to confirm it reached the pushed SHA.
+        verify_cmd = mock_sp.run.call_args_list[4][0][0][-1]
+        assert "git rev-parse HEAD" in verify_cmd
+
+        # Sixth call restarts the user-scoped worker unit.
+        restart_cmd = mock_sp.run.call_args_list[5][0][0][-1]
         assert "systemctl --user restart mtor-worker" in restart_cmd
 
     def test_merge_failure_raises(self):
@@ -262,6 +270,42 @@ class TestCheckWorkerSha:
             ]
             with pytest.raises(RuntimeError, match="merge failed"):
                 _check_worker_sha()
+
+    def test_worker_head_not_advancing_raises_without_restart(self):
+        """If the ff-merge exits 0 but the worker HEAD never reaches the pushed
+        SHA (GitHub push-propagation lag that never resolves within the retry
+        window), raise BEFORE restarting — never restart on stale code, never
+        return True claiming "in sync"."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time") as mock_time,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa\n"),  # local SHA (pushed)
+                MagicMock(returncode=0, stdout="bbb\n"),  # remote SHA (differs)
+                MagicMock(returncode=0, stdout=""),       # push ok
+                MagicMock(returncode=0, stdout=""),       # merge attempt 1 (no-op, exits 0)
+                MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD still stale
+                MagicMock(returncode=0, stdout=""),       # merge attempt 2
+                MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD still stale
+                MagicMock(returncode=0, stdout=""),       # merge attempt 3
+                MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD still stale
+            ]
+            with pytest.raises(RuntimeError, match="did not advance to pushed SHA"):
+                _check_worker_sha()
+
+        # Fail closed: the worker was never restarted on stale code.
+        assert not any(
+            "restart" in str(call.args[0]) for call in mock_sp.run.call_args_list
+        )
+        # 3 (local/remote/push) + 3 × (merge + rev-parse) = 9 calls, no restart.
+        assert mock_sp.run.call_count == 9
+        # Two backoff sleeps between attempts; the post-restart settle never ran.
+        assert mock_time.sleep.call_count == 2
+        assert (3,) not in [c.args for c in mock_time.sleep.call_args_list]
 
     def test_repo_param_uses_git_minus_c(self):
         """When repo is provided, local SHA lookup uses git -C <repo>."""
