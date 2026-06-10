@@ -11,6 +11,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _run(coro):
     """Run an async function synchronously for testing."""
@@ -46,6 +48,23 @@ def _make_result(
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mtor.worker.translocase import chaperone  # noqa: E402
 import mtor.worker.chaperone_review as chaperone_review  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_review_log(tmp_path, monkeypatch):
+    """Redirect the chaperone review ledger to a temp file for every test.
+
+    chaperone() appends each review to a module-level REVIEW_LOG. Without this
+    redirect those appends land in the REAL production ledger
+    (~/germline/loci/ribosome-reviews.jsonl), polluting `mtor audit` and drift
+    forensics with synthetic test rows. autouse means no future test can leak —
+    every chaperone() call in this module writes to its own tmp_path file.
+    """
+    monkeypatch.setattr(
+        chaperone_review,
+        "REVIEW_LOG",
+        tmp_path / "ribosome-reviews.jsonl",
+    )
 
 
 class TestVerdictBasics:
@@ -779,3 +798,29 @@ class TestPrimaryDiffAuthority:
         review = _run(chaperone(result))
         assert any("file_shrunk" in f for f in review["flags"])
         assert review["approved"] is False
+
+
+class TestReviewLogIsolation:
+    """The production review ledger must never be touched by the test suite."""
+
+    def test_production_review_log_untouched(self):
+        """A chaperone() call must not append to ~/germline/loci/ribosome-reviews.jsonl.
+
+        The autouse _isolate_review_log fixture redirects REVIEW_LOG to a temp
+        file. This guards against a regression where that redirect is removed
+        and chaperone() pollutes the real ledger with synthetic test rows.
+        """
+        prod_log = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
+        before_exists = prod_log.exists()
+        before_size = prod_log.stat().st_size if before_exists else None
+
+        _run(chaperone(_make_result()))
+
+        # Production ledger is unchanged: no new file, no appended bytes.
+        assert prod_log.exists() == before_exists
+        if before_exists:
+            assert prod_log.stat().st_size == before_size
+
+        # The write landed in the redirected (temp) ledger instead.
+        assert chaperone_review.REVIEW_LOG != prod_log
+        assert chaperone_review.REVIEW_LOG.exists()

@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import re as _re
 import time as _time
 from pathlib import Path
 
 from temporalio import activity
 
-REVIEW_LOG = Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
+# Path overridable via env so tests (or alternate hosts) never append to the
+# real production ledger. Tests redirect this per-call; the env fallback is a
+# belt-and-suspenders guard for any path that bypasses the monkeypatch.
+_REVIEW_LOG_ENV = os.environ.get("MTOR_REVIEW_LOG")
+REVIEW_LOG = (
+    Path(_REVIEW_LOG_ENV)
+    if _REVIEW_LOG_ENV
+    else Path.home() / "germline" / "loci" / "ribosome-reviews.jsonl"
+)
 DOSSIER_DIR = Path.home() / "germline" / "loci" / "ribosome-dossiers"
 
 _DESTRUCTION_PATTERNS = _re.compile(
