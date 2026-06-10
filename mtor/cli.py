@@ -36,6 +36,7 @@ from mtor import (
     TASK_QUEUE,
     TEMPORAL_HOST,
     VERSION,
+    WORKER_GERMLINE_DIR,
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
@@ -2304,9 +2305,7 @@ def deploy() -> None:
     """Sync code to worker host, restart mtor worker, verify health."""
     import time
 
-    steps = []
-
-    # Step 1: publish local HEAD to origin/main, then ff-merge on worker
+    # Step 1: publish local HEAD to origin/main.
     print("[deploy] syncing to worker...", file=sys.stderr)
     push = subprocess.run(
         ["git", "push", "origin", "HEAD:main"],
@@ -2325,19 +2324,92 @@ def deploy() -> None:
                 exit_code=1,
             )
         )
-    subprocess.run(
-        [
-            "ssh",
-            WORKER_HOST,
-            f"cd {REPO_DIR} && git fetch origin main && git merge --ff-only origin/main",
-        ],
+
+    # Capture the SHA we just published so we can confirm the worker actually
+    # lands on it (not just that the ff-merge exited 0).
+    local_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=10,
+        cwd=REPO_DIR,
     )
-    steps.append({"step": "sync", "ok": True})
+    if local_head.returncode != 0:
+        sys.exit(
+            _err(
+                "mtor deploy",
+                f"local rev-parse failed: {local_head.stderr.strip()[:200]}",
+                "REVPARSE_FAILED",
+                f"Check the local checkout at {REPO_DIR}",
+                exit_code=1,
+            )
+        )
+    pushed_sha = local_head.stdout.strip()
 
-    # Step 2: restart worker
+    # Fast-forward the worker checkout, then verify its HEAD advanced to the
+    # pushed SHA. GitHub push-propagation lag can leave the worker's
+    # `git fetch origin main` seeing the OLD origin/main, making
+    # `git merge --ff-only origin/main` a no-op that still exits 0 — a clean
+    # merge is not proof the new commit landed, and the previous code ignored
+    # the merge exit code entirely. Retry with a short backoff to absorb the
+    # lag; fail closed (before restart) if the worker never reaches the pushed
+    # SHA. Mirrors _check_worker_sha() / infra.deploy() step 2.
+    #
+    # The SSH `cd` target is WORKER_GERMLINE_DIR (the worker's germline path,
+    # e.g. /home/vivesca/germline), NOT REPO_DIR — REPO_DIR is soma's local
+    # path (e.g. /Users/terry/germline) and does not exist on the worker, so
+    # `cd REPO_DIR` over SSH would fail. REPO_DIR is correct only for the local
+    # `cwd=` push above.
+    merge_attempts = 3
+    merge_backoff = 2.0
+    merge_ok = False
+    merge_err = ""
+    worker_sha = ""
+    for attempt in range(1, merge_attempts + 1):
+        merge = subprocess.run(
+            [
+                "ssh",
+                WORKER_HOST,
+                f"cd {WORKER_GERMLINE_DIR} && git fetch origin main && git merge --ff-only origin/main",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if merge.returncode != 0:
+            merge_err = f"worker merge failed: {merge.stderr.strip()[:200]}"
+            break
+        worker_head = subprocess.run(
+            ["ssh", WORKER_HOST, f"cd {WORKER_GERMLINE_DIR} && git rev-parse HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        worker_sha = worker_head.stdout.strip()
+        if worker_head.returncode == 0 and worker_sha == pushed_sha:
+            merge_ok = True
+            break
+        if attempt < merge_attempts:
+            time.sleep(merge_backoff)
+
+    if not merge_ok:
+        if not merge_err:
+            merge_err = (
+                "worker HEAD did not advance to pushed SHA after "
+                f"{merge_attempts} attempts: local {pushed_sha[:8] or '<none>'} "
+                f"worker {worker_sha[:8] or '<none>'}"
+            )
+        sys.exit(
+            _err(
+                "mtor deploy",
+                merge_err,
+                "SYNC_FAILED",
+                f"SSH to {WORKER_HOST} and check: cd {WORKER_GERMLINE_DIR} && git status",
+                exit_code=1,
+            )
+        )
+
+    # Step 2: restart worker — only after confirming it is on the pushed SHA.
     print("[deploy] restarting mtor-worker...", file=sys.stderr)
     restart = subprocess.run(
         ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],
@@ -2345,7 +2417,6 @@ def deploy() -> None:
         text=True,
         timeout=15,
     )
-    steps.append({"step": "restart worker", "ok": restart.returncode == 0})
     if restart.returncode != 0:
         sys.exit(
             _err(
@@ -2357,13 +2428,11 @@ def deploy() -> None:
             )
         )
 
-    # Step 3: wait + verify
+    # Step 3: wait + verify. _doctor() renders the JSON envelope and exits
+    # (0 if healthy, 3 otherwise), so this is the terminal step.
     time.sleep(3)
     print("[deploy] verifying health...", file=sys.stderr)
     _doctor()
-    steps.append({"step": "health check", "ok": True})
-
-    _ok("mtor deploy", {"steps": steps, "healthy": True}, version=VERSION)
 
 
 @app.command(name="polysome", show=False)
