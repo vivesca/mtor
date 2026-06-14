@@ -23,11 +23,11 @@ integration = pytest.mark.skipif(
 class TestCheckTemporalReachableSuccess(unittest.TestCase):
     """Test successful Temporal connection check."""
 
-    @integration
     @patch("mtor.doctor._get_client")
     def test_check_temporal_reachable_success(self, mock_get_client):
         """Test when Temporal is reachable."""
         from mtor.doctor import doctor
+        from mtor.infra import HealthReport
 
         mock_client = MagicMock()
         mock_get_client.return_value = (mock_client, None)
@@ -47,10 +47,13 @@ class TestCheckTemporalReachableSuccess(unittest.TestCase):
                             with patch("sys.exit") as mock_exit:
                                 with patch("sys.stdout.write"):
                                     with patch("sys.stderr.write"):
-                                        # Execute doctor
-                                        doctor()
-                                        # Should not exit with error if all checks pass
-                                        mock_exit.assert_not_called()
+                                        with patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}):
+                                            with patch("mtor.doctor._get_provider_module", return_value=None):
+                                                with patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])):
+                                                    # Execute doctor
+                                                    doctor()
+                                                    # Should not exit with error if all checks pass
+                                                    mock_exit.assert_not_called()
 
         # Verify client was requested
         mock_get_client.assert_called_once()
@@ -96,11 +99,11 @@ class TestCheckTemporalUnreachable(unittest.TestCase):
 class TestCheckWorkerAlive(unittest.TestCase):
     """Test worker alive check."""
 
-    @integration
     @patch("mtor.doctor._get_client")
     def test_check_worker_alive(self, mock_get_client):
         """Test worker liveness probe."""
         from mtor.doctor import doctor
+        from mtor.infra import HealthReport
 
         # Create mock client that works with async iteration
         mock_client = MagicMock()
@@ -127,9 +130,12 @@ class TestCheckWorkerAlive(unittest.TestCase):
                             with patch("sys.exit") as mock_exit:
                                 with patch("sys.stdout.write"):
                                     with patch("sys.stderr.write"):
-                                        doctor()
-                                        # Should work fine if all pass
-                                        mock_exit.assert_not_called()
+                                        with patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}):
+                                            with patch("mtor.doctor._get_provider_module", return_value=None):
+                                                with patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])):
+                                                    doctor()
+                                                    # Should work fine if all pass
+                                                    mock_exit.assert_not_called()
 
 
 class TestCheckProviderApiProbe(unittest.TestCase):
