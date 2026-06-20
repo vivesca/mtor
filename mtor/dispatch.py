@@ -362,14 +362,22 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if push.returncode != 0:
         raise RuntimeError(f"push failed: {push.stderr.strip()}")
 
-    # Fast-forward the worker checkout, then verify the worker HEAD actually
-    # advanced to the pushed SHA. GitHub push-propagation lag can leave the
-    # worker's `git fetch origin main` seeing the OLD origin/main, so
-    # `git merge --ff-only origin/main` is a no-op that still exits 0 —
-    # trusting that exit restarts the worker on stale code and reports "in
-    # sync". Retry the fetch/merge a few times with a short backoff to absorb
-    # the lag; fail closed (before restart) if the worker never reaches the
-    # pushed SHA. Mirrors infra.deploy() step 2.
+    # Fast-forward the worker checkout, then verify the worker HEAD CONTAINS the
+    # pushed SHA. Two independent forces make origin/main a moving target while
+    # this runs:
+    #   (1) GitHub push-propagation lag can leave the worker's
+    #       `git fetch origin main` seeing the OLD origin/main, so
+    #       `git merge --ff-only origin/main` is a no-op that still exits 0.
+    #   (2) The worker runs its own `git-sync-germline` timer (pull --ff-only
+    #       every 5 min) and other sessions push to origin/main, so the worker
+    #       can fast-forward PAST the pushed SHA to a newer commit.
+    # An exact `worker_sha == pushed_sha` equality check fails spuriously in
+    # case (2) even though the worker is healthy and already running code that
+    # contains the pushed SHA — this is the "worker HEAD did not advance"
+    # false-negative that forced --skip-sha-check. So assert CONTAINMENT
+    # (pushed_sha is an ancestor of, or equal to, the worker HEAD) rather than
+    # equality. Retry to absorb case (1) lag; fail closed (before restart) if
+    # the worker never reaches the pushed SHA. Mirrors infra.deploy() step 2.
     pushed_sha = local.stdout.strip()
     merge_attempts = 3
     merge_backoff = 2.0
@@ -392,14 +400,35 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
         )
         if merge.returncode != 0:
             raise RuntimeError(f"merge failed: {merge.stderr.strip()}")
-        worker_head = subprocess.run(
-            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+        # One round-trip reports the worker HEAD and whether it contains the
+        # pushed SHA. `git merge-base --is-ancestor` exits 0 when pushed_sha is
+        # an ancestor of HEAD, 1 when not, and 128 when pushed_sha is not yet a
+        # known object on the worker (propagation lag); both non-zero cases
+        # collapse to CONTAINS:0 and retry.
+        probe = subprocess.run(
+            [
+                "ssh",
+                WORKER_HOST,
+                (
+                    "cd ~/germline && "
+                    "echo HEAD:$(git rev-parse HEAD) && "
+                    "{ git merge-base --is-ancestor "
+                    f"{shlex.quote(pushed_sha)} HEAD "
+                    "&& echo CONTAINS:1 || echo CONTAINS:0 ; }"
+                ),
+            ],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        worker_sha = worker_head.stdout.strip()
-        if worker_head.returncode == 0 and worker_sha == pushed_sha:
+        worker_sha = ""
+        contains = False
+        for line in probe.stdout.splitlines():
+            if line.startswith("HEAD:"):
+                worker_sha = line[len("HEAD:") :].strip()
+            elif line.startswith("CONTAINS:"):
+                contains = line.strip().endswith("1")
+        if probe.returncode == 0 and contains:
             merge_ok = True
             break
         if attempt < merge_attempts:
@@ -407,8 +436,8 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
 
     if not merge_ok:
         raise RuntimeError(
-            "worker HEAD did not advance to pushed SHA after "
-            f"{merge_attempts} attempts: local {pushed_sha[:8] or '<none>'} "
+            "worker HEAD does not contain pushed SHA after "
+            f"{merge_attempts} attempts: pushed {pushed_sha[:8] or '<none>'} "
             f"worker {worker_sha[:8] or '<none>'}"
         )
 
