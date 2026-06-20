@@ -1043,6 +1043,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         if _post_head and _post_head != pre_sha:
             _test_paths = _extract_test_paths(task)
             _tests_pass = True
+            _test_r = None
             if _test_paths:
                 _test_r = await asyncio.to_thread(
                     _subprocess.run,
@@ -1053,6 +1054,21 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     timeout=300,
                 )
                 _tests_pass = _test_r.returncode == 0
+
+            # Preserve the auto-verifier command + a trimmed pytest tail so the
+            # chaperone's stdout/stderr-based detection (_detected_test_commands,
+            # _TEST_PASSED) can mark verification.status = "passed" instead of
+            # "unknown". Only built when tests actually ran — the no-tests early
+            # exit keeps its original (verifier-free) stdout unchanged.
+            _verifier_cmd = ""
+            _verifier_tail = ""
+            if _test_paths and _test_r is not None:
+                _verifier_cmd = "uv run pytest -x " + " ".join(_test_paths)
+                _vout = (_test_r.stdout or "")
+                _verr = (_test_r.stderr or "")
+                _verifier_tail = (
+                    f"{_vout}\n{_verr}".strip()[-1200:] if _verr.strip() else _vout.strip()[-1200:]
+                )
 
             if _tests_pass:
                 # Capture diff evidence BEFORE removing the worktree so
@@ -1085,6 +1101,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                             ["git", "worktree", "remove", "--force", worktree_path],
                             capture_output=True, timeout=10, cwd=repo_root,
                         )
+                _ee_stdout = stdout[:1000]
+                if _verifier_cmd:
+                    _ee_stdout = (
+                        f"{_ee_stdout}\n\n[auto-verify] {_verifier_cmd}\n{_verifier_tail}"
+                    )
                 _r = {
                     "success": True,
                     "exit_code": 0,
@@ -1095,7 +1116,7 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "requested_provider": provider,
                     "attempted_providers": sorted(_attempted),
                     "task": task[:200],
-                    "stdout": stdout[:1000],
+                    "stdout": _ee_stdout,
                     "stderr": stderr[:500],
                     "pre_diff": pre_diff,
                     "post_diff": _post_diff,
@@ -1107,6 +1128,13 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                     "verdict": "early_exit_clean",
                     "post_head": _post_head,
                 }
+                if _verifier_cmd:
+                    _r["verification"] = {
+                        "command": _verifier_cmd,
+                        "returncode": _test_r.returncode,
+                        "status": "passed",
+                        "output_tail": _verifier_tail[-500:],
+                    }
                 finalize_trace(_trace, _r)
                 return _r
 

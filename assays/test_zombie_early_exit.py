@@ -151,6 +151,15 @@ class TestEarlyExitCleanCommit:
         assert result["post_diff"] is not None
         assert isinstance(result["post_diff"], dict)
         assert "stat" in result["post_diff"]
+        # Verifier evidence must be preserved so chaperone can mark
+        # verification.status = "passed" instead of "unknown".
+        assert "uv run pytest -x assays/test_zombie_early_exit.py" in result["stdout"]
+        assert "1 passed" in result["stdout"]
+        verification = result["verification"]
+        assert verification["command"] == "uv run pytest -x assays/test_zombie_early_exit.py"
+        assert verification["returncode"] == 0
+        assert verification["status"] == "passed"
+        assert "1 passed" in verification["output_tail"]
         # Verify finalize_trace was called (trace cleanup)
         mock_finalize.assert_called_once()
 
@@ -336,6 +345,9 @@ class TestEarlyExitNoTestsField:
         assert result["success"] is True
         assert result.get("verdict") == "early_exit_clean"
         assert not pytest_called  # pytest was NOT called (no test paths found)
+        # No tests listed -> no verifier evidence injected; behavior unchanged.
+        assert "verification" not in result
+        assert "[auto-verify]" not in result["stdout"]
         # post_diff must carry snapshot evidence, not be empty
         assert result["post_diff"] is not None
         assert isinstance(result["post_diff"], dict)

@@ -591,6 +591,39 @@ class TestCompletionEvidence:
         assert evidence["decision"]["approved"] is True
         assert evidence["decision"]["verdict"] == review["verdict"]
 
+    def test_early_exit_verifier_evidence_marks_passed(self):
+        """Early-exit results inject the auto-verifier command + pytest tail into
+        stdout so chaperone detection reports verification.status = passed."""
+        result = _make_result(
+            task="---\ntests:\n  - assays/test_zombie_early_exit.py\n---\nFix the bug",
+            stdout=(
+                "Done.\n\n"
+                "[auto-verify] uv run pytest -x assays/test_zombie_early_exit.py\n"
+                "===== 5 passed in 1.20s ====="
+            ),
+            post_diff={
+                "stat": " mtor/worker/translocase.py | 12 ++++++\n",
+                "numstat": "12\t0\tmtor/worker/translocase.py",
+                "commits": ["abc1234 fix the bug"],
+                "commit_count": 1,
+            },
+        )
+        result["verdict"] = "early_exit_clean"
+        result["verification"] = {
+            "command": "uv run pytest -x assays/test_zombie_early_exit.py",
+            "returncode": 0,
+            "status": "passed",
+            "output_tail": "===== 5 passed in 1.20s =====",
+        }
+
+        review = _run(chaperone(result))
+
+        evidence = review["completion_evidence"]
+        assert evidence["verification"]["status"] == "passed"
+        assert evidence["verification"]["detected_commands"] == [
+            "uv run pytest -x assays/test_zombie_early_exit.py"
+        ]
+
     def test_missing_requested_path_is_in_scope_evidence(self):
         result = _make_result(
             task="Update mtor/worker/chaperone_review.py",
