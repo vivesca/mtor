@@ -1012,10 +1012,28 @@ def status(workflow_id: str, short: bool = False) -> None:
             and result_payload.get("verdict") not in _APPROVED_VERDICTS
         ):
             failure_reason = "No diagnostic information available"
+            have_task_reason = False
             if wf_result and isinstance(wf_result, dict):
                 task_result = _extract_first_result(wf_result)
                 if task_result:
                     failure_reason = _build_failure_reason(task_result)
+                    have_task_reason = failure_reason != "No diagnostic information available"
+
+            # TERMINATED workflows usually leave no task result. Fall back to the
+            # on-disk ribosome log for a detected kill reason + stderr tail.
+            if status_val == "TERMINATED" and not have_task_reason:
+                diag = _terminated_diagnostics(workflow_id)
+                if diag.get("kill_reason") or diag.get("stderr_tail") or diag.get("log_path"):
+                    result_payload["terminated_diagnostics"] = diag
+                    if diag.get("kill_reason"):
+                        result_payload["kill_reason"] = diag["kill_reason"]
+                    if diag.get("log_path"):
+                        result_payload["log_path"] = diag["log_path"]
+                    derived = _trace_diagnosis(
+                        {"operator_state": "terminated", "kill_reason": diag.get("kill_reason")}
+                    )
+                    failure_reason = derived
+
             result_payload["failure_reason"] = failure_reason
 
         if short:

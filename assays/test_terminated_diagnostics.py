@@ -8,14 +8,48 @@ detected kill-reason marker from the log file on disk.
 """
 from __future__ import annotations
 
+import io
 import json
 import shlex
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from mtor import cli
+
+
+def _terminated_client():
+    """Mock Temporal client whose handle describes a TERMINATED workflow."""
+    client = MagicMock()
+    handle = MagicMock()
+    desc = MagicMock()
+    desc.status = MagicMock()
+    desc.status.name = "TERMINATED"
+    desc.start_time = MagicMock()
+    desc.start_time.isoformat.return_value = "2026-05-27T00:00:00+00:00"
+    desc.close_time = MagicMock()
+    desc.close_time.isoformat.return_value = "2026-05-27T00:28:00+00:00"
+    handle.describe = AsyncMock(return_value=desc)
+    # TERMINATED never reaches handle.result(); guard against accidental use.
+    handle.result = AsyncMock(side_effect=AssertionError("result() must not be called"))
+    client.get_workflow_handle = MagicMock(return_value=handle)
+    return client
+
+
+def _run_status(workflow_id: str, *, short: bool = False) -> str:
+    captured = io.StringIO()
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = captured
+        try:
+            cli.status(workflow_id, short=short)
+        except SystemExit:
+            pass
+    finally:
+        sys.stdout = old_stdout
+    return captured.getvalue()
 
 
 def _write_log(tmp_path: Path, workflow_id: str, content: str) -> Path:
@@ -89,6 +123,54 @@ def test_reap_worker_processes_failure_returns_error():
     assert out["ok"] is False
     assert out["terminated_pids"] == []
     assert "connection refused" in out["error"]
+
+
+def test_status_terminated_surfaces_diagnostics_fallback(tmp_path: Path):
+    wf_id = "ribosome-terminated-1"
+    _write_log(tmp_path, wf_id, "ribosome: working...\n[wall-limit] aborting at 28m cap\n")
+    client = _terminated_client()
+    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
+        cli, "_get_client", return_value=(client, None)
+    ):
+        out = _run_status(wf_id)
+    data = json.loads(out)
+    result = data["result"]
+    assert result["operator_state"] == "terminated"
+    assert result["kill_reason"] == "wall-limit"
+    assert result["log_path"].endswith(".txt")
+    assert "wall-limit" in result["terminated_diagnostics"]["stderr_tail"].lower()
+    assert "wall-limit" in result["failure_reason"].lower()
+    assert result["failure_reason"] != "No diagnostic information available"
+
+
+def test_status_terminated_short_includes_kill_reason_without_tail(tmp_path: Path):
+    wf_id = "ribosome-terminated-2"
+    _write_log(
+        tmp_path,
+        wf_id,
+        "ribosome: working...\n" + "noise line\n" * 50 + "[oom] killed\n",
+    )
+    client = _terminated_client()
+    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
+        cli, "_get_client", return_value=(client, None)
+    ):
+        out = _run_status(wf_id, short=True)
+    assert "oom" in out.lower()
+    # One-line short output must not dump the multi-line tail.
+    assert out.count("\n") <= 1
+    assert "noise line" not in out
+
+
+def test_status_terminated_no_log_keeps_default_reason(tmp_path: Path):
+    client = _terminated_client()
+    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
+        cli, "_get_client", return_value=(client, None)
+    ):
+        out = _run_status("ribosome-no-log-xyz")
+    result = json.loads(out)["result"]
+    assert result["failure_reason"] == "No diagnostic information available"
+    assert "terminated_diagnostics" not in result
+    assert "kill_reason" not in result
 
 
 def test_running_trace_with_no_pending_activity_is_stale():
