@@ -57,6 +57,8 @@ def test_summarize_audit_counts_reviews_and_runs(tmp_path):
 
     assert result["runs_total"] == 2
     assert result["reviews_total"] == 2
+    assert result["synthetic_reviews"] == 2
+    assert result["production_reviews"] == 0
     assert result["bad_runs"] == 1
     assert result["bad_reviews"] == 1
     assert result["run_providers"] == {"zhipu": 1, "volcano": 1}
@@ -90,7 +92,58 @@ def test_summarize_audit_parses_compact_diffstat_buckets(tmp_path):
     assert buckets["approved_empty_diff"] == 1
     assert buckets["rejected_nontrivial_diff"] == 1
     assert buckets["approved_with_blocking_flags"] == 1
+    assert result["synthetic_reviews"] == 3
+    assert result["production_reviews"] == 0
     assert result["top_flags"] == {"file_shrunk: foo.py +1/-40": 1}
+
+
+def test_audit_provenance_split_counts_empty_workflow_id_as_synthetic(tmp_path):
+    from mtor.audit import summarize_audit
+
+    runs = tmp_path / "runs.jsonl"
+    reviews = tmp_path / "reviews.jsonl"
+    _write_jsonl(runs, [])
+    _write_jsonl(
+        reviews,
+        [
+            {"verdict": "approved", "completion_dossier": {"workflow_id": "ribosome-real-123"}},
+            {"verdict": "approved", "completion_dossier": {}},
+        ],
+    )
+
+    result = summarize_audit(runs, reviews)
+
+    assert result["reviews_total"] == 2
+    assert result["synthetic_reviews"] == 1
+    assert result["production_reviews"] == 1
+
+
+def test_audit_provenance_split_counts_known_fixture_ids_as_synthetic(tmp_path):
+    from mtor.audit import summarize_audit
+
+    runs = tmp_path / "runs.jsonl"
+    reviews = tmp_path / "reviews.jsonl"
+    _write_jsonl(runs, [])
+    _write_jsonl(
+        reviews,
+        [
+            {
+                "verdict": "approved",
+                "completion_dossier": {"workflow_id": "ribosome-glm51-dossier-test"},
+            },
+            {
+                "verdict": "approved",
+                "completion_dossier": {"workflow_id": "ribosome-provider-fallback-test"},
+            },
+            {"verdict": "approved", "completion_dossier": {"workflow_id": "ribosome-real-test-name"}},
+        ],
+    )
+
+    result = summarize_audit(runs, reviews)
+
+    assert result["reviews_total"] == 3
+    assert result["synthetic_reviews"] == 2
+    assert result["production_reviews"] == 1
 
 
 def test_blocking_flags_bucket_is_a_destruction_tripwire(tmp_path):

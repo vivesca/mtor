@@ -40,6 +40,13 @@ _BLOCKING_FLAG_PREFIXES = (
     "reflex_ban",
 )
 
+_SYNTHETIC_WORKFLOW_IDS = frozenset(
+    {
+        "ribosome-glm51-dossier-test",
+        "ribosome-provider-fallback-test",
+    }
+)
+
 
 def _is_blocking_flag(flag: str) -> bool:
     if flag == "no_commit_on_success":
@@ -111,6 +118,14 @@ def _flags(row: dict[str, Any]) -> list[str]:
     return []
 
 
+def _is_synthetic_review(row: dict[str, Any]) -> bool:
+    completion_dossier = row.get("completion_dossier")
+    workflow_id = ""
+    if isinstance(completion_dossier, dict):
+        workflow_id = str(completion_dossier.get("workflow_id") or "")
+    return not workflow_id or workflow_id in _SYNTHETIC_WORKFLOW_IDS
+
+
 def _large_logs(logs_dir: Path | None, limit: int) -> list[dict[str, Any]]:
     if logs_dir is None or not logs_dir.exists():
         return []
@@ -137,6 +152,7 @@ def summarize_audit(
 
     buckets = {name: 0 for name in BUCKET_NAMES}
     top_flags: Counter[str] = Counter()
+    synthetic_reviews = sum(1 for review in reviews if _is_synthetic_review(review))
 
     for review in reviews:
         verdict = str(review.get("verdict") or review.get("status") or "").lower()
@@ -171,6 +187,8 @@ def summarize_audit(
     return {
         "runs_total": len(runs),
         "reviews_total": len(reviews),
+        "synthetic_reviews": synthetic_reviews,
+        "production_reviews": len(reviews) - synthetic_reviews,
         "bad_runs": bad_runs,
         "bad_reviews": bad_reviews,
         "run_providers": _counter_values(runs, "provider"),
