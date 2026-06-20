@@ -409,7 +409,12 @@ def _check_worker_opencode_runtime() -> dict:
         'timeout 120 op run --env-file "$HOME/germline/loci/env.op" -- '
         "opencode run --model zhipuai-coding-plan/glm-5.2 --format json "
         '--dangerously-skip-permissions --dir "$PWD" '
-        f"{quoted_prompt}"
+        f"{quoted_prompt} >out.jsonl 2>err.log; "
+        "run_exit=$?; "
+        "printf 'exit=%s\\n' \"$run_exit\"; "
+        "printf 'stdout_bytes=%s\\n' \"$(wc -c < out.jsonl)\"; "
+        "printf 'stderr_bytes=%s\\n' \"$(wc -c < err.log)\"; "
+        "grep -q 'coding-plan-ok' out.jsonl && printf 'probe_text=present\\n' || printf 'probe_text=missing\\n'"
     )
     run_command = (
         ["bash", "-lc", command]
@@ -431,7 +436,9 @@ def _check_worker_opencode_runtime() -> dict:
         }
 
     output = result.stdout
-    ok = result.returncode == 0 and "coding-plan-ok" in output
+    ok = (
+        result.returncode == 0 and "exit=0" in output and "probe_text=present" in output
+    )
     detail = (
         "zhipuai-coding-plan/glm-5.2 returned coding-plan-ok"
         if ok
