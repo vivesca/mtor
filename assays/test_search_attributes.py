@@ -46,7 +46,9 @@ def test_dispatch_sets_search_attributes(mock_sha, mock_get_client):
 
     # Use 'scout' command which dispatches with mode='scout'
     # Use --no-wait to avoid polling logs which calls SSH
-    exit_code, data = invoke(["scout", "test prompt", "--provider", "zhipu", "--no-wait"])
+    exit_code, data = invoke(
+        ["scout", "test prompt", "--provider", "zhipu", "--no-wait"]
+    )
 
     assert exit_code == 0
     assert client.start_workflow.called
@@ -72,13 +74,26 @@ def test_riboseq_uses_search_attribute_filters(mock_get_client):
         if False:
             yield  # make it an async generator
         return
+
     client.list_workflows = _fake_list
     mock_get_client.return_value = (client, None)
 
-    with patch.object(client, "list_workflows", side_effect=client.list_workflows) as mock_list:
+    with patch.object(
+        client, "list_workflows", side_effect=client.list_workflows
+    ) as mock_list:
         # Need to mock load_triage as well to avoid FileNotFoundError
         with patch("mtor.cli.load_triage", return_value={}):
-            invoke(["riboseq", "--provider", "infini", "--mode", "build", "--verdict", "accepted"])
+            invoke(
+                [
+                    "riboseq",
+                    "--provider",
+                    "infini",
+                    "--mode",
+                    "build",
+                    "--verdict",
+                    "accepted",
+                ]
+            )
 
             assert mock_list.called
             query = mock_list.call_args.kwargs.get("query")
@@ -103,7 +118,9 @@ def test_setup_search_attrs_cli(mock_connect):
 
 @patch("mtor.dispatch._worker_sha_plan")
 @patch("mtor.dispatch._get_client")
-def test_spec_explain_is_read_only_and_includes_dispatch_plan(mock_get_client, mock_worker_sha, tmp_path):
+def test_spec_explain_is_read_only_and_includes_dispatch_plan(
+    mock_get_client, mock_worker_sha, tmp_path
+):
     """Spec explanation returns dispatch inputs without starting Temporal or mutating the spec."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -155,7 +172,9 @@ Update dispatch explanation.
 
 @patch("mtor.dispatch._worker_sha_plan")
 @patch("mtor.dispatch._get_client")
-def test_prompt_explain_reports_dedup_and_risk_without_dispatch(mock_get_client, mock_worker_sha):
+def test_prompt_explain_reports_dedup_and_risk_without_dispatch(
+    mock_get_client, mock_worker_sha
+):
     mock_worker_sha.return_value = {
         "skipped": False,
         "in_sync": True,
@@ -178,6 +197,83 @@ def test_prompt_explain_reports_dedup_and_risk_without_dispatch(mock_get_client,
     assert not mock_get_client.called
 
 
+@patch("mtor.dispatch._worker_target_repo_state")
+@patch("mtor.dispatch._worker_sha_plan")
+@patch("mtor.dispatch._get_client")
+def test_prompt_explain_blocks_unknown_provider_without_dispatch(
+    mock_get_client, mock_worker_sha, mock_target_repo
+):
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": True,
+        "auto_deploy_would_occur": False,
+        "local_sha": "same",
+        "worker_sha": "same",
+        "error": "",
+    }
+    mock_target_repo.return_value = {
+        "ok": True,
+        "skipped": False,
+        "detail": "target repo preflight passed",
+    }
+
+    exit_code, data = invoke(
+        [
+            "Write tests for mtor dispatch explanation",
+            "--provider",
+            "unknown-ai",
+            "--explain",
+        ]
+    )
+
+    assert exit_code == 0
+    result = data["result"]
+    assert result["would_dispatch"] is False
+    assert "provider_unknown" in result["blocked_reasons"]
+    assert result["provider"]["selected"] == "unknown-ai"
+    assert result["provider"]["retired_reason"] == ""
+    assert not mock_get_client.called
+
+
+@patch("mtor.dispatch._worker_target_repo_state")
+@patch("mtor.dispatch._worker_sha_plan")
+@patch("mtor.dispatch._get_client")
+def test_prompt_explain_reports_retired_provider_not_unknown(
+    mock_get_client, mock_worker_sha, mock_target_repo
+):
+    mock_worker_sha.return_value = {
+        "skipped": False,
+        "in_sync": True,
+        "auto_deploy_would_occur": False,
+        "local_sha": "same",
+        "worker_sha": "same",
+        "error": "",
+    }
+    mock_target_repo.return_value = {
+        "ok": True,
+        "skipped": False,
+        "detail": "target repo preflight passed",
+    }
+
+    exit_code, data = invoke(
+        [
+            "Write tests for mtor dispatch explanation",
+            "--provider",
+            "infini",
+            "--explain",
+        ]
+    )
+
+    assert exit_code == 0
+    result = data["result"]
+    assert result["would_dispatch"] is False
+    assert "provider_retired" in result["blocked_reasons"]
+    assert "provider_unknown" not in result["blocked_reasons"]
+    assert result["provider"]["selected"] == "infini"
+    assert result["provider"]["retired_reason"]
+    assert not mock_get_client.called
+
+
 @patch("mtor.dispatch._worker_sha_plan")
 def test_explain_reports_pause_and_freeze_as_blocked_plan(mock_worker_sha):
     mock_worker_sha.return_value = {
@@ -189,7 +285,10 @@ def test_explain_reports_pause_and_freeze_as_blocked_plan(mock_worker_sha):
         "error": "",
     }
 
-    with patch("mtor.cli._is_paused", return_value=True), patch("mtor.cli._is_frozen", return_value=True):
+    with (
+        patch("mtor.cli._is_paused", return_value=True),
+        patch("mtor.cli._is_frozen", return_value=True),
+    ):
         exit_code, data = invoke(["Improve mtor robustness safely", "--explain"])
 
     assert exit_code == 0
@@ -315,11 +414,26 @@ def test_dispatch_prompt_blocks_before_starting_workflow_on_target_repo_drift(
     }
 
     with pytest.raises(SystemExit) as exc:
-        _dispatch_prompt("Make assays/test_search_attributes.py pass", repo="~/code/mtor")
+        _dispatch_prompt(
+            "Make assays/test_search_attributes.py pass", repo="~/code/mtor"
+        )
 
     assert exc.value.code == 1
     assert not mock_get_client.called
     client.start_workflow.assert_not_called()
+
+
+@patch("mtor.dispatch._get_client")
+def test_dispatch_prompt_blocks_unknown_provider_before_temporal(mock_get_client):
+    with pytest.raises(SystemExit) as exc:
+        _dispatch_prompt(
+            "Make assays/test_search_attributes.py pass",
+            provider="unknown-ai",
+            skip_sha_check=True,
+        )
+
+    assert exc.value.code == 2
+    assert not mock_get_client.called
 
 
 @patch("mtor.dispatch._worker_target_repo_state")

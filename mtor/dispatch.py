@@ -136,6 +136,36 @@ PROVIDER_TO_MODEL: dict[str, str] = {
     "droid": "glm5",
 }
 
+
+def _known_providers() -> set[str]:
+    """All provider names mtor recognizes, including retired ones.
+
+    Retired providers stay "known" so an explicit retired provider keeps
+    returning PROVIDER_RETIRED rather than the harsher PROVIDER_UNKNOWN.
+    """
+    return (
+        set(PROVIDER_TO_MODEL)
+        | set(ROUTE_TO_PROVIDER.values())
+        | set(RETIRED_PROVIDERS)
+    )
+
+
+def _provider_validation_error(provider: str | None) -> str | None:
+    """Map an explicit provider to a blocked-reason tag, or None if acceptable.
+
+    - retired provider -> "provider_retired"
+    - unknown explicit provider -> "provider_unknown"
+    - default resolution (provider is None) or a known provider -> None
+    """
+    if not provider:
+        return None
+    if provider in RETIRED_PROVIDERS:
+        return "provider_retired"
+    if provider not in _known_providers():
+        return "provider_unknown"
+    return None
+
+
 _SLUG_WORD_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -710,8 +740,9 @@ def _dispatch_explanation(
         blocked_reasons.append("spec_invalid")
     if dedup.get("blocked"):
         blocked_reasons.append("dedup_blocked")
-    if provider in RETIRED_PROVIDERS:
-        blocked_reasons.append("provider_retired")
+    provider_issue = _provider_validation_error(provider)
+    if provider_issue:
+        blocked_reasons.append(provider_issue)
     if worker_sha.get("error"):
         blocked_reasons.append("worker_sha_unknown")
     if not target_repo.get("ok"):
@@ -846,6 +877,18 @@ def _dispatch_prompt(
                 f"Provider '{provider}' is retired: {RETIRED_PROVIDERS[provider]}",
                 "PROVIDER_RETIRED",
                 "Use zhipu for coding dispatch, or gemini/codex only as explicit escape hatches.",
+                [_action("mtor tsc", "Show current provider routing")],
+                exit_code=2,
+            )
+        )
+
+    if provider and provider not in _known_providers():
+        sys.exit(
+            _err(
+                cmd,
+                f"Provider '{provider}' is not a known provider",
+                "PROVIDER_UNKNOWN",
+                "Use a known provider: " + ", ".join(sorted(_known_providers())) + ".",
                 [_action("mtor tsc", "Show current provider routing")],
                 exit_code=2,
             )
