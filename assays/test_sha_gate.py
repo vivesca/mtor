@@ -126,6 +126,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
+                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
                 MagicMock(returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"),  # worker HEAD contains pushed
@@ -133,7 +134,7 @@ class TestCheckWorkerSha:
             ]
             result = _check_worker_sha()
         assert result is True
-        assert mock_sp.run.call_count == 6
+        assert mock_sp.run.call_count == 7
         # Worker advanced on first attempt → no backoff sleep, only post-restart settle.
         mock_time.sleep.assert_called_once_with(3)
 
@@ -152,6 +153,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA (pushed)
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (differs)
+                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
                 # Worker overshot to ccc999 (a newer origin/main commit) that
@@ -161,14 +163,44 @@ class TestCheckWorkerSha:
             ]
             result = _check_worker_sha()
         assert result is True
-        assert mock_sp.run.call_count == 6
+        assert mock_sp.run.call_count == 7
         # No backoff sleep needed; only the post-restart settle ran.
         mock_time.sleep.assert_called_once_with(3)
 
-        # The containment probe carried the pushed SHA into merge-base.
-        probe_cmd = mock_sp.run.call_args_list[4][0][0][-1]
+        # The post-merge containment probe carried the pushed SHA into merge-base.
+        probe_cmd = mock_sp.run.call_args_list[5][0][0][-1]
         assert "git merge-base --is-ancestor" in probe_cmd
         assert "aaa111" in probe_cmd
+
+    def test_worker_contains_local_short_circuits_no_deploy(self):
+        """When local and worker HEADs differ but the worker already CONTAINS
+        local HEAD (worker is ahead via its git-sync timer), the gate returns
+        True WITHOUT pushing or restarting — this avoids a doomed non-ff push
+        when local is behind origin, and a pointless restart (germline is read
+        fresh per task from a worktree, never cached in the worker process)."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout"),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD (behind)
+                MagicMock(returncode=0, stdout="ccc\n"),  # worker HEAD (ahead, differs)
+                MagicMock(returncode=0, stdout=""),       # contains-local probe: CONTAINED (rc 0)
+            ]
+            result = _check_worker_sha()
+        assert result is True
+        # No push, no merge, no restart — only the three lookups ran.
+        assert mock_sp.run.call_count == 3
+        assert not any(
+            "push" in str(c.args[0]) or "restart" in str(c.args[0])
+            for c in mock_sp.run.call_args_list
+        )
+        # The short-circuit probe asked whether the worker contains local HEAD.
+        contains_cmd = mock_sp.run.call_args_list[2][0][0][-1]
+        assert "git merge-base --is-ancestor" in contains_cmd
+        assert "aaa" in contains_cmd
 
     def test_skip_returns_true_immediately(self):
         """skip=True returns True without any subprocess calls."""
@@ -214,6 +246,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
+                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=1, stderr="remote rejected"),
             ]
             with pytest.raises(RuntimeError, match="push failed"):
@@ -231,6 +264,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
+                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push ok
                 MagicMock(returncode=0, stdout=""),  # merge ok
                 MagicMock(returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"),  # worker HEAD contains pushed
@@ -259,6 +293,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD
                 MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD (differs)
+                MagicMock(returncode=1, stdout=""),       # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),       # push ok
                 MagicMock(returncode=0, stdout=""),       # merge ok
                 MagicMock(returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"),  # worker HEAD post-merge (contains)
@@ -266,26 +301,31 @@ class TestCheckWorkerSha:
             ]
             _check_worker_sha()
 
-        # Third call pushes local HEAD straight to origin/main — no temp branch.
-        push_args = mock_sp.run.call_args_list[2][0][0]
+        # Third call probes whether the worker already contains local HEAD
+        # (skip-deploy short-circuit); here it does not, so deploy proceeds.
+        contains_cmd = mock_sp.run.call_args_list[2][0][0][-1]
+        assert "git merge-base --is-ancestor" in contains_cmd
+
+        # Fourth call pushes local HEAD straight to origin/main — no temp branch.
+        push_args = mock_sp.run.call_args_list[3][0][0]
         assert "push" in push_args
         assert "origin" in push_args
         assert "HEAD:main" in push_args
         assert not any("deploy-sync" in str(a) for a in push_args)
 
-        # Fourth call fast-forwards the worker checkout from origin/main.
-        merge_cmd = mock_sp.run.call_args_list[3][0][0][-1]
+        # Fifth call fast-forwards the worker checkout from origin/main.
+        merge_cmd = mock_sp.run.call_args_list[4][0][0][-1]
         assert "git fetch origin main" in merge_cmd
         assert "git merge --ff-only origin/main" in merge_cmd
 
-        # Fifth call re-reads the worker HEAD and confirms it CONTAINS the
+        # Sixth call re-reads the worker HEAD and confirms it CONTAINS the
         # pushed SHA (ancestry), tolerating a worker that fast-forwarded past it.
-        verify_cmd = mock_sp.run.call_args_list[4][0][0][-1]
+        verify_cmd = mock_sp.run.call_args_list[5][0][0][-1]
         assert "git rev-parse HEAD" in verify_cmd
         assert "git merge-base --is-ancestor" in verify_cmd
 
-        # Sixth call restarts the user-scoped worker unit.
-        restart_cmd = mock_sp.run.call_args_list[5][0][0][-1]
+        # Seventh call restarts the user-scoped worker unit.
+        restart_cmd = mock_sp.run.call_args_list[6][0][0][-1]
         assert "systemctl --user restart mtor-worker" in restart_cmd
 
     def test_merge_failure_raises(self):
@@ -300,6 +340,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
+                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push ok
                 MagicMock(returncode=1, stderr="merge conflict"),  # merge fail
             ]
@@ -321,6 +362,7 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local SHA (pushed)
                 MagicMock(returncode=0, stdout="bbb\n"),  # remote SHA (differs)
+                MagicMock(returncode=1, stdout=""),       # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),       # push ok
                 MagicMock(returncode=0, stdout=""),       # merge attempt 1 (no-op, exits 0)
                 MagicMock(returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"),  # worker HEAD lacks pushed SHA
@@ -336,8 +378,8 @@ class TestCheckWorkerSha:
         assert not any(
             "restart" in str(call.args[0]) for call in mock_sp.run.call_args_list
         )
-        # 3 (local/remote/push) + 3 × (merge + rev-parse) = 9 calls, no restart.
-        assert mock_sp.run.call_count == 9
+        # 4 (local/remote/contains-probe/push) + 3 × (merge + probe) = 10 calls, no restart.
+        assert mock_sp.run.call_count == 10
         # Two backoff sleeps between attempts; the post-restart settle never ran.
         assert mock_time.sleep.call_count == 2
         assert (3,) not in [c.args for c in mock_time.sleep.call_args_list]

@@ -341,6 +341,34 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if local.stdout.strip() == remote.stdout.strip():
         return True
 
+    # The worker can legitimately be AHEAD of the dispatcher's local checkout:
+    # its git-sync-germline timer (pull --ff-only every 5 min) keeps the worker
+    # at the latest origin/main while the dispatcher's working checkout lags. If
+    # the worker already CONTAINS local HEAD it is running germline that includes
+    # everything local has — effectively in sync. Deploying anyway would (a) run
+    # `git push origin HEAD:main`, which FAILS as a non-fast-forward when local
+    # is behind origin, and (b) restart the worker for nothing — ribosome reads
+    # germline fresh per task from a worktree, so no germline state is cached in
+    # the worker process and a restart loads no new germline. Short-circuit when
+    # the worker contains local HEAD. `git merge-base --is-ancestor` exits 0 when
+    # contained, 1 when not, and 128 when local HEAD is not yet a worker object
+    # (local ahead with unpushed commits); both non-zero cases fall through to
+    # auto-deploy, which is correct.
+    local_sha = local.stdout.strip()
+    contains_local = subprocess.run(
+        [
+            "ssh",
+            WORKER_HOST,
+            "cd ~/germline && git merge-base --is-ancestor "
+            f"{shlex.quote(local_sha)} HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if contains_local.returncode == 0:
+        return True
+
     # Auto-deploy: push + fast-forward + restart.
     # Use -C to pin git context to ~/germline regardless of caller cwd —
     # otherwise dispatching from a non-`main` repo (e.g. quorate on master)
