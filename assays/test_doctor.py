@@ -37,8 +37,7 @@ class TestCheckTemporalReachableSuccess(unittest.TestCase):
                 with patch("mtor.doctor.COACHING_PATH", None):
                     with patch("subprocess.run") as mock_subprocess:
                         mock_subprocess.return_value = MagicMock(
-                            returncode=0,
-                            stdout='[{"name": "zhipu", "health": "OK"}]'
+                            returncode=0, stdout='[{"name": "zhipu", "health": "OK"}]'
                         )
                         with patch("mtor.doctor._probe_provider") as mock_probe:
                             mock_probe.return_value = ProbeResult(
@@ -47,13 +46,44 @@ class TestCheckTemporalReachableSuccess(unittest.TestCase):
                             with patch("sys.exit") as mock_exit:
                                 with patch("sys.stdout.write"):
                                     with patch("sys.stderr.write"):
-                                        with patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}):
-                                            with patch("mtor.doctor._get_provider_module", return_value=None):
-                                                with patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])):
-                                                    # Execute doctor
-                                                    doctor()
-                                                    # Should not exit with error if all checks pass
-                                                    mock_exit.assert_not_called()
+                                        with patch(
+                                            "mtor.doctor._check_coding_plan_lane",
+                                            return_value={
+                                                "name": "coding_plan_lane",
+                                                "ok": True,
+                                                "detail": "ok",
+                                            },
+                                        ):
+                                            with patch(
+                                                "mtor.doctor._check_opencode_config_file",
+                                                return_value={
+                                                    "name": "opencode_config_local",
+                                                    "ok": True,
+                                                    "detail": "ok",
+                                                },
+                                            ):
+                                                with patch(
+                                                    "mtor.doctor._check_worker_opencode_config",
+                                                    return_value={
+                                                        "name": "opencode_config_worker",
+                                                        "ok": True,
+                                                        "detail": "ok",
+                                                    },
+                                                ):
+                                                    with patch(
+                                                        "mtor.doctor._get_provider_module",
+                                                        return_value=None,
+                                                    ):
+                                                        with patch(
+                                                            "mtor.infra.check_health",
+                                                            return_value=HealthReport(
+                                                                ok=True, checks=[]
+                                                            ),
+                                                        ):
+                                                            # Execute doctor
+                                                            doctor()
+                                                            # Should not exit with error if all checks pass
+                                                            mock_exit.assert_not_called()
 
         # Verify client was requested
         mock_get_client.assert_called_once()
@@ -74,8 +104,7 @@ class TestCheckTemporalUnreachable(unittest.TestCase):
                 with patch("mtor.doctor.COACHING_PATH", None):
                     with patch("subprocess.run") as mock_subprocess:
                         mock_subprocess.return_value = MagicMock(
-                            returncode=0,
-                            stdout='[]'
+                            returncode=0, stdout="[]"
                         )
                         with patch("mtor.doctor._probe_provider") as mock_probe:
                             mock_probe.return_value = ProbeResult(
@@ -84,16 +113,35 @@ class TestCheckTemporalUnreachable(unittest.TestCase):
                             with patch("sys.exit") as mock_exit:
                                 with patch("sys.stdout.write") as mock_stdout:
                                     with patch("sys.stderr.write"):
-                                        # Execute doctor
-                                        doctor()
-                                        # Should exit with code 3
-                                        mock_exit.assert_called_once_with(3)
+                                        with patch(
+                                            "mtor.doctor._check_opencode_config_file",
+                                            return_value={
+                                                "name": "opencode_config_local",
+                                                "ok": True,
+                                                "detail": "ok",
+                                            },
+                                        ):
+                                            with patch(
+                                                "mtor.doctor._check_worker_opencode_config",
+                                                return_value={
+                                                    "name": "opencode_config_worker",
+                                                    "ok": True,
+                                                    "detail": "ok",
+                                                },
+                                            ):
+                                                # Execute doctor
+                                                doctor()
+                                                # Should exit with code 3
+                                                mock_exit.assert_called_once_with(3)
 
-                                        # Check that the payload has ok=False
-                                        args = mock_stdout.call_args[0][0]
-                                        payload = json.loads(args.strip())
-                                        self.assertFalse(payload["ok"])
-                                        self.assertEqual(payload["error"]["code"], "HEALTH_CHECK_FAILED")
+                                                # Check that the payload has ok=False
+                                                args = mock_stdout.call_args[0][0]
+                                                payload = json.loads(args.strip())
+                                                self.assertFalse(payload["ok"])
+                                                self.assertEqual(
+                                                    payload["error"]["code"],
+                                                    "HEALTH_CHECK_FAILED",
+                                                )
 
 
 class TestCheckWorkerAlive(unittest.TestCase):
@@ -111,6 +159,7 @@ class TestCheckWorkerAlive(unittest.TestCase):
         # Mock async list_workflows
         async def mock_list():
             yield 1
+
         mock_client.list_workflows = mock_list
 
         mock_get_client.return_value = (mock_client, None)
@@ -120,8 +169,7 @@ class TestCheckWorkerAlive(unittest.TestCase):
                 with patch("mtor.doctor.COACHING_PATH", None):
                     with patch("subprocess.run") as mock_subprocess:
                         mock_subprocess.return_value = MagicMock(
-                            returncode=0,
-                            stdout='[{"name": "zhipu", "health": "OK"}]'
+                            returncode=0, stdout='[{"name": "zhipu", "health": "OK"}]'
                         )
                         with patch("mtor.doctor._probe_provider") as mock_probe:
                             mock_probe.return_value = ProbeResult(
@@ -130,12 +178,43 @@ class TestCheckWorkerAlive(unittest.TestCase):
                             with patch("sys.exit") as mock_exit:
                                 with patch("sys.stdout.write"):
                                     with patch("sys.stderr.write"):
-                                        with patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}):
-                                            with patch("mtor.doctor._get_provider_module", return_value=None):
-                                                with patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])):
-                                                    doctor()
-                                                    # Should work fine if all pass
-                                                    mock_exit.assert_not_called()
+                                        with patch(
+                                            "mtor.doctor._check_coding_plan_lane",
+                                            return_value={
+                                                "name": "coding_plan_lane",
+                                                "ok": True,
+                                                "detail": "ok",
+                                            },
+                                        ):
+                                            with patch(
+                                                "mtor.doctor._check_opencode_config_file",
+                                                return_value={
+                                                    "name": "opencode_config_local",
+                                                    "ok": True,
+                                                    "detail": "ok",
+                                                },
+                                            ):
+                                                with patch(
+                                                    "mtor.doctor._check_worker_opencode_config",
+                                                    return_value={
+                                                        "name": "opencode_config_worker",
+                                                        "ok": True,
+                                                        "detail": "ok",
+                                                    },
+                                                ):
+                                                    with patch(
+                                                        "mtor.doctor._get_provider_module",
+                                                        return_value=None,
+                                                    ):
+                                                        with patch(
+                                                            "mtor.infra.check_health",
+                                                            return_value=HealthReport(
+                                                                ok=True, checks=[]
+                                                            ),
+                                                        ):
+                                                            doctor()
+                                                            # Should work fine if all pass
+                                                            mock_exit.assert_not_called()
 
 
 class TestCheckProviderApiProbe(unittest.TestCase):
@@ -181,7 +260,11 @@ class TestFormatReportAllPass(unittest.TestCase):
     def test_format_report_all_pass(self):
         """Test format_health_display with all checks passing."""
         checks = [
-            {"name": "temporal_reachable", "ok": True, "detail": "Connected to localhost:7233"},
+            {
+                "name": "temporal_reachable",
+                "ok": True,
+                "detail": "Connected to localhost:7233",
+            },
             {"name": "worker_host", "ok": True, "detail": "MTOR_WORKER_HOST=worker"},
             {"name": "worker_alive", "ok": True, "detail": "Worker service responsive"},
         ]
@@ -196,7 +279,11 @@ class TestFormatReportAllPass(unittest.TestCase):
 
         # Verify all checks have pass mark
         for line in output.splitlines():
-            if "temporal_reachable" in line or "worker_host" in line or "worker_alive" in line:
+            if (
+                "temporal_reachable" in line
+                or "worker_host" in line
+                or "worker_alive" in line
+            ):
                 self.assertIn("✔", line)
 
     def test_provider_routing_displays_glm52(self):
@@ -221,7 +308,11 @@ class TestFormatReportWithFailures(unittest.TestCase):
     def test_format_report_with_failures(self):
         """Test format_health_display with failing checks."""
         checks = [
-            {"name": "temporal_reachable", "ok": True, "detail": "Connected to localhost:7233"},
+            {
+                "name": "temporal_reachable",
+                "ok": True,
+                "detail": "Connected to localhost:7233",
+            },
             {"name": "worker_host", "ok": False, "detail": "MTOR_WORKER_HOST not set"},
             {"name": "worker_alive", "ok": False, "detail": "Worker probe failed"},
         ]
@@ -320,19 +411,87 @@ def test_doctor_fails_when_rictor_topology_fails():
         async def list_workflows(self):
             yield object()
 
-    with patch("mtor.doctor._get_client", return_value=(Client(), None)), \
-         patch("mtor.doctor.COACHING_PATH", None), \
-         patch("mtor.doctor.WORKER_HOST", "ganglion"), \
-         patch("mtor.doctor._check_coding_plan_lane", return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"}), \
-         patch("mtor.doctor._get_provider_module", return_value=None), \
-         patch("mtor.infra.check_health", return_value=HealthReport(ok=False, checks=[{"name": "worker_process_singleton", "ok": False, "detail": "duplicate"}])), \
-         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")), \
-         patch("sys.stderr.write"), \
-         patch("sys.stdout.write") as stdout_write, \
-         pytest.raises(SystemExit):
+    with (
+        patch("mtor.doctor._get_client", return_value=(Client(), None)),
+        patch("mtor.doctor.COACHING_PATH", None),
+        patch("mtor.doctor.WORKER_HOST", "ganglion"),
+        patch(
+            "mtor.doctor._check_coding_plan_lane",
+            return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"},
+        ),
+        patch("mtor.doctor._get_provider_module", return_value=None),
+        patch(
+            "mtor.infra.check_health",
+            return_value=HealthReport(
+                ok=False,
+                checks=[
+                    {
+                        "name": "worker_process_singleton",
+                        "ok": False,
+                        "detail": "duplicate",
+                    }
+                ],
+            ),
+        ),
+        patch(
+            "subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")
+        ),
+        patch("sys.stderr.write"),
+        patch("sys.stdout.write") as stdout_write,
+        pytest.raises(SystemExit),
+    ):
         doctor()
 
     payload = json.loads(stdout_write.call_args[0][0])
     assert payload["ok"] is False
-    rictor = next(c for c in payload["result"]["checks"] if c["name"] == "rictor_topology")
+    rictor = next(
+        c for c in payload["result"]["checks"] if c["name"] == "rictor_topology"
+    )
     assert rictor["ok"] is False
+
+
+def test_doctor_env_enables_opencode_runtime_probe():
+    from mtor.doctor import doctor
+    from mtor.infra import HealthReport
+
+    class Client:
+        async def list_workflows(self):
+            yield object()
+
+    with (
+        patch.dict("os.environ", {"MTOR_PROBE_OPENCODE": "1"}),
+        patch("mtor.doctor._get_client", return_value=(Client(), None)),
+        patch("mtor.doctor.COACHING_PATH", None),
+        patch("mtor.doctor.WORKER_HOST", "ganglion"),
+        patch(
+            "mtor.doctor._check_coding_plan_lane",
+            return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"},
+        ),
+        patch(
+            "mtor.doctor._check_opencode_config_file",
+            return_value={"name": "opencode_config_local", "ok": True, "detail": "ok"},
+        ),
+        patch(
+            "mtor.doctor._check_worker_opencode_config",
+            return_value={
+                "name": "opencode_config_worker",
+                "ok": True,
+                "detail": "ok",
+            },
+        ),
+        patch(
+            "mtor.doctor._check_worker_opencode_runtime",
+            return_value={
+                "name": "opencode_runtime_probe",
+                "ok": True,
+                "detail": "coding-plan-ok",
+            },
+        ) as runtime_probe,
+        patch("mtor.doctor._get_provider_module", return_value=None),
+        patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])),
+        patch("sys.stderr.write"),
+        patch("sys.stdout.write"),
+    ):
+        doctor()
+
+    runtime_probe.assert_called_once_with()

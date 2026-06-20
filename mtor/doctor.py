@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -24,7 +25,12 @@ HEARTBEAT_STALE_THRESHOLD = 120
 _CODING_PLAN_CONFIG_PATH = os.path.expanduser(
     "~/germline/loci/ribosome-config.lock.json"
 )
+_OPENCODE_CONFIG_PATH = os.path.expanduser("~/.config/opencode/opencode.json")
 _CODING_PLAN_EXPECTED_URL = "https://open.bigmodel.cn/api/anthropic"
+_OPENCODE_EXPECTED_PROVIDER = "zhipuai-coding-plan"
+_OPENCODE_EXPECTED_API = "https://open.bigmodel.cn/api/coding/paas/v4"
+_OPENCODE_EXPECTED_MODEL = "zhipuai-coding-plan/glm-5.2"
+_OPENCODE_EXPECTED_SMALL_MODEL = "zhipuai-coding-plan/glm-4.5-air"
 
 PROVIDER_MODELS = {
     "zhipu": "glm-5.2",
@@ -268,6 +274,179 @@ def _check_coding_plan_lane(config_path: str | None = None) -> dict:
     }
 
 
+def _secret_placeholder_ok(value: object) -> bool:
+    """Return True when a config value delegates secret loading to the environment."""
+    return isinstance(value, str) and value.startswith("{env:") and value.endswith("}")
+
+
+def _authorization_placeholder_ok(value: object) -> bool:
+    """Return True when an Authorization header uses an environment placeholder."""
+    return (
+        isinstance(value, str)
+        and value.startswith("Bearer {env:")
+        and value.endswith("}")
+    )
+
+
+def _check_opencode_config_payload(config: dict, *, source: str = "local") -> dict:
+    """Validate an OpenCode config payload against the BigModel coding-plan lane."""
+    if not isinstance(config, dict):
+        return {
+            "name": f"opencode_config_{source}",
+            "ok": False,
+            "detail": f"{source}: config root is {type(config).__name__}, expected object",
+        }
+    provider = config.get("provider", {})
+    provider_keys = set(provider)
+    zhipu_provider = provider.get(_OPENCODE_EXPECTED_PROVIDER, {})
+    options = zhipu_provider.get("options", {})
+    permission = config.get("permission", {})
+    mcp = config.get("mcp", {})
+
+    failures: list[str] = []
+    if provider_keys != {_OPENCODE_EXPECTED_PROVIDER}:
+        failures.append(f"provider keys={sorted(provider_keys)}")
+    if options.get("baseURL") != _OPENCODE_EXPECTED_API:
+        failures.append(f"baseURL={options.get('baseURL')!r}")
+    if not _secret_placeholder_ok(options.get("apiKey")):
+        failures.append("apiKey is not an env placeholder")
+    if config.get("model") != _OPENCODE_EXPECTED_MODEL:
+        failures.append(f"model={config.get('model')!r}")
+    if config.get("small_model") != _OPENCODE_EXPECTED_SMALL_MODEL:
+        failures.append(f"small_model={config.get('small_model')!r}")
+    if (
+        permission.get("*") != "allow"
+        or permission.get("external_directory", {}).get("*") != "allow"
+    ):
+        failures.append("permissions do not allow external_directory")
+
+    for name, entry in mcp.items():
+        auth_header = entry.get("headers", {}).get("Authorization")
+        if auth_header is not None and not _authorization_placeholder_ok(auth_header):
+            failures.append(f"mcp {name} Authorization is not an env placeholder")
+
+    return {
+        "name": f"opencode_config_{source}",
+        "ok": not failures,
+        "detail": (
+            f"{source}: {_OPENCODE_EXPECTED_MODEL} via {_OPENCODE_EXPECTED_API}"
+            if not failures
+            else f"{source}: " + "; ".join(failures)
+        ),
+        "provider": _OPENCODE_EXPECTED_PROVIDER,
+        "model": config.get("model"),
+        "small_model": config.get("small_model"),
+        "base_url": options.get("baseURL"),
+    }
+
+
+def _check_opencode_config_file(
+    config_path: str | None = None, *, source: str = "local"
+) -> dict:
+    """Validate a local OpenCode config file."""
+    path = config_path or _OPENCODE_CONFIG_PATH
+    try:
+        with open(path) as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return {
+            "name": f"opencode_config_{source}",
+            "ok": False,
+            "detail": f"Config file not found: {path}",
+        }
+    except json.JSONDecodeError as exc:
+        return {
+            "name": f"opencode_config_{source}",
+            "ok": False,
+            "detail": f"Config is not valid JSON: {exc}",
+        }
+    return _check_opencode_config_payload(config, source=source)
+
+
+def _check_worker_opencode_config() -> dict:
+    """Validate OpenCode config on the worker host without exposing secrets."""
+    if WORKER_HOST == "localhost":
+        return _check_opencode_config_file(source="worker")
+    try:
+        result = subprocess.run(
+            ["ssh", WORKER_HOST, "cat ~/.config/opencode/opencode.json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {
+            "name": "opencode_config_worker",
+            "ok": False,
+            "detail": f"Cannot read worker OpenCode config: {exc}",
+        }
+    if result.returncode != 0:
+        return {
+            "name": "opencode_config_worker",
+            "ok": False,
+            "detail": f"Cannot read worker OpenCode config: {result.stderr.strip()[:200]}",
+        }
+    try:
+        config = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "name": "opencode_config_worker",
+            "ok": False,
+            "detail": f"Worker config is not valid JSON: {exc}",
+        }
+    return _check_opencode_config_payload(config, source="worker")
+
+
+def _check_worker_opencode_runtime() -> dict:
+    """Run a minimal worker-host OpenCode probe through the worker bootstrap path."""
+    probe_prompt = "Reply with exactly coding-plan-ok and do not edit files."
+    quoted_prompt = shlex.quote(probe_prompt)
+    command = (
+        'tmp=$(mktemp -d); cd "$tmp"; git init -q; '
+        "git config user.email canary@example.invalid; "
+        "git config user.name Canary; "
+        'source "$HOME/.env.bootstrap"; '
+        'timeout 120 op run --env-file "$HOME/germline/loci/env.op" -- '
+        "opencode run --model zhipuai-coding-plan/glm-5.2 --format json "
+        '--dangerously-skip-permissions --dir "$PWD" '
+        f"{quoted_prompt}"
+    )
+    run_command = (
+        ["bash", "-lc", command]
+        if WORKER_HOST == "localhost"
+        else ["ssh", WORKER_HOST, "bash", "-lc", command]
+    )
+    try:
+        result = subprocess.run(
+            run_command,
+            capture_output=True,
+            text=True,
+            timeout=150,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {
+            "name": "opencode_runtime_probe",
+            "ok": False,
+            "detail": f"Probe failed before completion: {exc}",
+        }
+
+    output = result.stdout
+    ok = result.returncode == 0 and "coding-plan-ok" in output
+    detail = (
+        "zhipuai-coding-plan/glm-5.2 returned coding-plan-ok"
+        if ok
+        else (
+            f"exit={result.returncode}; stdout={len(result.stdout)} bytes; "
+            f"stderr={len(result.stderr)} bytes"
+        )
+    )
+    return {
+        "name": "opencode_runtime_probe",
+        "ok": ok,
+        "detail": detail,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Human-readable health display
 # ---------------------------------------------------------------------------
@@ -440,11 +619,12 @@ def reconcile_running_workflows(client) -> list[dict]:
     return classifications
 
 
-def doctor(*, reconcile: bool = False) -> None:
+def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
     cmd = "mtor doctor"
     checks = []
     all_ok = True
+    probe_opencode = probe_opencode or os.environ.get("MTOR_PROBE_OPENCODE") == "1"
 
     # Check 1: Temporal server reachable
     client, err = _get_client()
@@ -520,13 +700,17 @@ def doctor(*, reconcile: bool = False) -> None:
         rictor_detail = "; ".join(
             f"{c.get('name')}={c.get('ok')}" for c in rictor_report.checks
         )
-        checks.append({"name": "rictor_topology", "ok": rictor_report.ok, "detail": rictor_detail})
+        checks.append(
+            {"name": "rictor_topology", "ok": rictor_report.ok, "detail": rictor_detail}
+        )
         if not rictor_report.ok:
             all_ok = False
         result_rictor_checks = rictor_report.checks
     except Exception as exc:
         all_ok = False
-        checks.append({"name": "rictor_topology", "ok": False, "detail": str(exc)[:200]})
+        checks.append(
+            {"name": "rictor_topology", "ok": False, "detail": str(exc)[:200]}
+        )
         result_rictor_checks = []
 
     # Check 3: Coaching file present + size cap (optional — skip if not configured)
@@ -634,6 +818,31 @@ def doctor(*, reconcile: bool = False) -> None:
     if not lane_check["ok"]:
         all_ok = False
     checks.append(lane_check)
+
+    # Check 5c: OpenCode config agreement on local and worker hosts.
+    local_opencode_check = _check_opencode_config_file(source="local")
+    if not local_opencode_check["ok"]:
+        all_ok = False
+    checks.append(local_opencode_check)
+
+    worker_opencode_check = _check_worker_opencode_config()
+    if not worker_opencode_check["ok"]:
+        all_ok = False
+    checks.append(worker_opencode_check)
+
+    if probe_opencode:
+        runtime_probe = _check_worker_opencode_runtime()
+        if not runtime_probe["ok"]:
+            all_ok = False
+        checks.append(runtime_probe)
+    else:
+        checks.append(
+            {
+                "name": "opencode_runtime_probe",
+                "ok": True,
+                "detail": "Skipped; run mtor doctor --probe-opencode for a live BigModel coding-plan call",
+            }
+        )
 
     # Check 6: Circuit-breaker health state for each provider
     pm = _get_provider_module()

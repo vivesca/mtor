@@ -18,6 +18,7 @@ import pytest
 from mtor.doctor import (
     ProbeResult,
     _check_coding_plan_lane,
+    _check_opencode_config_payload,
     _classify_response_error,
     _probe_provider,
 )
@@ -157,3 +158,64 @@ def test_coding_plan_lane_rejects_api_z_ai(tmp_path):
     result = _check_coding_plan_lane(str(config_file))
     assert result["ok"] is False
     assert "api.z.ai" in result["detail"]
+
+
+# --- OpenCode config lane check --------------------------------------------
+
+
+def _opencode_config() -> dict:
+    return {
+        "provider": {
+            "zhipuai-coding-plan": {
+                "options": {
+                    "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "apiKey": "{env:ZHIPU_API_KEY}",
+                }
+            }
+        },
+        "model": "zhipuai-coding-plan/glm-5.2",
+        "small_model": "zhipuai-coding-plan/glm-4.5-air",
+        "permission": {"*": "allow", "external_directory": {"*": "allow"}},
+    }
+
+
+def test_opencode_config_payload_accepts_bigmodel_coding_plan():
+    result = _check_opencode_config_payload(_opencode_config(), source="test")
+    assert result["ok"] is True
+    assert result["provider"] == "zhipuai-coding-plan"
+    assert result["model"] == "zhipuai-coding-plan/glm-5.2"
+
+
+def test_opencode_config_payload_rejects_old_provider_name():
+    config = _opencode_config()
+    config["provider"] = {
+        "zhipu-coding": {
+            "options": {
+                "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+                "apiKey": "{env:ZHIPU_API_KEY}",
+            }
+        }
+    }
+
+    result = _check_opencode_config_payload(config, source="test")
+
+    assert result["ok"] is False
+    assert "zhipu-coding" in result["detail"]
+
+
+def test_opencode_config_payload_rejects_literal_secrets():
+    config = _opencode_config()
+    config["provider"]["zhipuai-coding-plan"]["options"]["apiKey"] = "literal-secret"
+    config["mcp"] = {
+        "zread": {
+            "headers": {
+                "Authorization": "Bearer literal-secret-value",
+            }
+        }
+    }
+
+    result = _check_opencode_config_payload(config, source="test")
+
+    assert result["ok"] is False
+    assert "apiKey is not an env placeholder" in result["detail"]
+    assert "Authorization is not an env placeholder" in result["detail"]

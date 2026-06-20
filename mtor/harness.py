@@ -19,7 +19,7 @@ from typing import Any
 
 PROVIDER_HARNESS_MAP: dict[str, str] = {
     "claude": "claude",
-    "zhipu": "claude",
+    "zhipu": "opencode",
     "gemini": "claude",
     "codex": "codex",
     "opencode": "opencode",
@@ -145,7 +145,10 @@ def run_harness(
             command=cmd,
         )
     except subprocess.TimeoutExpired:
-        print(f"[harness] timeout after {timeout}s for provider {provider}", file=sys.stderr)
+        print(
+            f"[harness] timeout after {timeout}s for provider {provider}",
+            file=sys.stderr,
+        )
         return HarnessResult(
             stdout="",
             stderr=f"timeout after {timeout}s",

@@ -398,8 +398,11 @@ def check_health(
                     "printf '__MTOR_WORKER__\\n'; "
                     "systemctl --user show mtor-worker.service "
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
-                    "printf '__TEMPORAL_WORKER__\\n'; "
+                    "printf '__TEMPORAL_WORKER_USER__\\n'; "
                     "systemctl --user show temporal-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
+                    "printf '__TEMPORAL_WORKER_SYSTEM__\\n'; "
+                    "systemctl show temporal-worker.service "
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true",
                 ),
                 capture_output=True,

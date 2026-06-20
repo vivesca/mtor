@@ -41,6 +41,12 @@ class TestRunHarness:
         assert "--dangerously-skip-permissions" in cmd
         assert "write a test" in cmd
 
+    def test_run_harness_zhipu_uses_opencode_glm52(self):
+        """Provider 'zhipu' should not route through the Claude harness."""
+        cmd = build_command("zhipu", "write a test")
+        assert cmd[:2] == ["opencode", "run"]
+        assert "zhipuai-coding-plan/glm-5.2" in cmd
+
     @patch("mtor.harness.subprocess.run")
     def test_run_harness_result_captures_output(self, mock_run):
         """run_harness returns a HarnessResult with captured stdout/stderr."""
@@ -77,6 +83,7 @@ class TestRunHarness:
             "droid",
         }
         assert set(PROVIDER_HARNESS_MAP.keys()) == expected_providers
+        assert PROVIDER_HARNESS_MAP["zhipu"] == "opencode"
         # Every harness value should have a command builder
         for provider, harness in PROVIDER_HARNESS_MAP.items():
             assert isinstance(harness, str)
