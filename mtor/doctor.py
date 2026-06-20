@@ -840,7 +840,7 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
             {
                 "name": "opencode_runtime_probe",
                 "ok": True,
-                "detail": "Skipped; run mtor doctor --probe-opencode for a live BigModel coding-plan call",
+                "detail": "Skipped; run MTOR_PROBE_OPENCODE=1 mtor doctor for a live BigModel coding-plan call",
             }
         )
 
