@@ -13,26 +13,67 @@ from mtor.rptor import scan_specs
 
 ACCEPTED_VERDICTS = {"accepted", "approved", "approved_with_flags", "early_exit_clean"}
 
+# Worker/remote home roots that map onto the local home directory. A completion
+# dossier produced on the ganglion worker records absolute paths under the worker
+# home (/home/vivesca). When reconciling locally those roots must be re-rooted to
+# the local home so existing files are not falsely reported missing.
+_REMOTE_HOME_ROOTS = ("/home/vivesca", "/root")
 
-def check_code_exists(file_or_function: str, repo_root: Path = Path.home() / "code" / "mtor") -> bool:
+
+def _candidate_paths(path_part: str, repo_root: Path) -> list[Path]:
+    """Resolve a spec file entry to candidate filesystem paths to probe.
+
+    - strips surrounding markdown inline-code backticks and whitespace
+    - "~/..." → expand against the local home
+    - absolute "/..." → the literal path, plus a local-home remap for any known
+      remote/worker home root so a remote dossier root does not poison the check
+    - otherwise → resolved against ``repo_root``
+    """
+    path_part = path_part.strip().strip("`").strip()
+    if not path_part:
+        return []
+
+    candidates: list[Path] = []
+    if path_part.startswith("~"):
+        candidates.append(Path(path_part).expanduser())
+    elif path_part.startswith("/"):
+        candidates.append(Path(path_part))
+        home = Path.home()
+        for root in _REMOTE_HOME_ROOTS:
+            if path_part == root or path_part.startswith(root + "/"):
+                rel = path_part[len(root) :].lstrip("/")
+                if rel:
+                    candidates.append(home / rel)
+    else:
+        candidates.append(repo_root / path_part)
+    return candidates
+
+
+def check_code_exists(
+    file_or_function: str, repo_root: Path = Path.home() / "code" / "mtor"
+) -> bool:
     """Check if a function or file exists in the codebase.
 
     Supports:
     - "file.py" → check if file exists
     - "file.py:func_name" → check if file exists and function is defined
     - "module.file.py:ClassName.method" → check file and method/function
+
+    Entries may be wrapped in markdown inline-code backticks and may carry a
+    remote/worker home root; both are normalised before probing the filesystem.
     """
-    parts = file_or_function.split(":")
+    raw = file_or_function.strip().strip("`").strip()
+    parts = raw.split(":")
     path_part = parts[0]
-    func_name = parts[1].strip() if len(parts) > 1 else None
+    func_name = parts[1].strip().strip("`").strip() if len(parts) > 1 else None
 
-    # Expand tilde and check absolute path
-    if path_part.startswith("~/"):
-        file_path = Path(path_part).expanduser()
-    else:
-        file_path = repo_root / path_part
+    file_path = None
+    for candidate in _candidate_paths(path_part, repo_root):
+        if candidate.exists():
+            file_path = candidate
+            break
 
-    if not file_path.exists():
+    if file_path is None:
         return False
 
     if not func_name:
@@ -95,11 +136,12 @@ def _search_attr_value(execution: Any, wanted_key: str) -> str:
 def has_commit_for_spec(spec_name: str) -> bool:
     """Check if there are commits referencing this spec on main branch."""
     import subprocess
+
     result = subprocess.run(
         ["git", "log", "--oneline", "main", f"--grep={spec_name}", "-n", "1"],
         capture_output=True,
         text=True,
-        cwd=Path.home() / "code" / "mtor"
+        cwd=Path.home() / "code" / "mtor",
     )
     return result.returncode == 0 and bool(result.stdout.strip())
 
@@ -158,7 +200,9 @@ def reconcile_spec(
             result["changed"] = True
         else:
             latest_status = _status_name(latest)
-            verdict = str(spec.get("verdict", "") or "") or _search_attr_value(latest, "mtor_verdict")
+            verdict = str(spec.get("verdict", "") or "") or _search_attr_value(
+                latest, "mtor_verdict"
+            )
 
             if latest_status == "RUNNING":
                 return result
@@ -181,7 +225,9 @@ def reconcile_spec(
                 else:
                     new_status = "ready"
                     result["now"] = new_status
-                    result["reason"] = "workflow completed but verdict/commits were not found"
+                    result["reason"] = (
+                        "workflow completed but verdict/commits were not found"
+                    )
                     result["changed"] = True
             elif latest_status in {"TERMINATED", "CANCELED", "FAILED"}:
                 new_status = "failed"
@@ -208,7 +254,7 @@ def reconcile_spec(
         files_match = re.search(
             r"##\s*(Files? (?:to modify|to change|to edit)|File list)\s*\n(.*?)(?:\n##|\Z)",
             body,
-            re.DOTALL | re.IGNORECASE
+            re.DOTALL | re.IGNORECASE,
         )
         if not files_match:
             return result
@@ -239,7 +285,9 @@ def reconcile_spec(
                 missing.append(entry)
 
         if missing:
-            result["warning"] = f"status=done but {len(missing)} file(s)/function(s) not found: {', '.join(missing)}"
+            result["warning"] = (
+                f"status=done but {len(missing)} file(s)/function(s) not found: {', '.join(missing)}"
+            )
 
     elif status in ("ready", "blocked") and "depends_on" in spec:
         depends_on = spec.get("depends_on", [])
@@ -270,29 +318,38 @@ def reconcile_all(
 
     for spec in scanned:
         workflow_id = str(spec.get("workflow_id", "") or "")
-        if workflow_descriptions is not None and workflow_id not in workflow_descriptions:
+        if (
+            workflow_descriptions is not None
+            and workflow_id not in workflow_descriptions
+        ):
             correct += 1
             continue
         result = reconcile_spec(
             spec,
             dry_run=dry_run,
             client=client,
-            workflow_description=workflow_descriptions.get(workflow_id) if workflow_descriptions else None,
+            workflow_description=workflow_descriptions.get(workflow_id)
+            if workflow_descriptions
+            else None,
         )
         if result["changed"]:
-            fixed.append({
-                "name": result["name"],
-                "was": result["was"],
-                "now": result["now"],
-                "reason": result["reason"],
-            })
+            fixed.append(
+                {
+                    "name": result["name"],
+                    "was": result["was"],
+                    "now": result["now"],
+                    "reason": result["reason"],
+                }
+            )
         elif result["warning"]:
-            fixed.append({
-                "name": result["name"],
-                "was": result["was"],
-                "now": result["now"],
-                "warning": result["warning"],
-            })
+            fixed.append(
+                {
+                    "name": result["name"],
+                    "was": result["was"],
+                    "now": result["now"],
+                    "warning": result["warning"],
+                }
+            )
         else:
             correct += 1
 

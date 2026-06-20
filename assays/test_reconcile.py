@@ -44,6 +44,37 @@ class TestReconcileCheckCodeExists:
         """Missing function in existing file → returns False."""
         assert check_code_exists("mtor/reconcile.py:missing_function") is False
 
+    def test_backtick_wrapped_absolute_file_path_returns_true(self, tmp_path: Path):
+        target = tmp_path / "receptor.md"
+        target.write_text("# Receptor\n")
+
+        assert check_code_exists(f"`{target}`", repo_root=tmp_path) is True
+
+    def test_backtick_wrapped_absolute_function_path_returns_true(self, tmp_path: Path):
+        target = tmp_path / "module.py"
+        target.write_text("def present_function():\n    return True\n")
+
+        assert (
+            check_code_exists(f"`{target}:present_function`", repo_root=tmp_path)
+            is True
+        )
+
+    def test_worker_home_path_maps_to_local_home(self, tmp_path: Path, monkeypatch):
+        local_file = (
+            tmp_path / "germline" / "membrane" / "receptors" / "tecton" / "SKILL.md"
+        )
+        local_file.parent.mkdir(parents=True)
+        local_file.write_text("# Tecton\n")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        assert (
+            check_code_exists(
+                "`/home/vivesca/germline/membrane/receptors/tecton/SKILL.md`",
+                repo_root=tmp_path,
+            )
+            is True
+        )
+
 
 class TestReconcileSpecs:
     """reconcile_specs scans dispatched specs and updates status from Temporal."""
@@ -95,7 +126,9 @@ workflow_id: wf-12345
     def test_completed_accepted_workflow_becomes_done(self, tmp_path: Path):
         """dispatched + workflow_id + accepted Temporal verdict → done."""
         spec_path = tmp_path / "accepted.md"
-        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-accepted\n---\nBody\n")
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-accepted\n---\nBody\n"
+        )
         spec_dict = {
             "name": "accepted",
             "path": str(spec_path),
@@ -117,7 +150,9 @@ workflow_id: wf-12345
     def test_completed_approved_workflow_becomes_done(self, tmp_path: Path):
         """dispatched + workflow_id + approved Temporal verdict → done."""
         spec_path = tmp_path / "approved.md"
-        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-approved\n---\nBody\n")
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-approved\n---\nBody\n"
+        )
         spec_dict = {
             "name": "approved",
             "path": str(spec_path),
@@ -162,7 +197,9 @@ workflow_id: wf-12345
     def test_completed_rejected_workflow_becomes_failed(self, tmp_path: Path):
         """dispatched + workflow_id + rejected Temporal verdict → failed."""
         spec_path = tmp_path / "rejected.md"
-        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-rejected\n---\nBody\n")
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-rejected\n---\nBody\n"
+        )
         spec_dict = {
             "name": "rejected",
             "path": str(spec_path),
@@ -183,7 +220,9 @@ workflow_id: wf-12345
     def test_running_workflow_stays_dispatched(self, tmp_path: Path):
         """RUNNING workflow leaves the spec dispatched."""
         spec_path = tmp_path / "running.md"
-        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-running\n---\nBody\n")
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-running\n---\nBody\n"
+        )
         spec_dict = {
             "name": "running",
             "path": str(spec_path),
@@ -204,7 +243,9 @@ workflow_id: wf-12345
     def test_missing_workflow_clears_workflow_id(self, tmp_path: Path):
         """Missing workflow returns spec to ready and clears stale workflow_id."""
         spec_path = tmp_path / "missing.md"
-        spec_path.write_text("---\nstatus: dispatched\nworkflow_id: wf-missing\n---\nBody\n")
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-missing\n---\nBody\n"
+        )
         spec_dict = {
             "name": "missing",
             "path": str(spec_path),
@@ -225,12 +266,18 @@ workflow_id: wf-12345
         """Opportunistic list reconciliation updates only workflows already listed."""
         matched = tmp_path / "matched.md"
         unmatched = tmp_path / "unmatched.md"
-        matched.write_text("---\nstatus: dispatched\nworkflow_id: wf-matched\n---\nBody\n")
-        unmatched.write_text("---\nstatus: dispatched\nworkflow_id: wf-unmatched\n---\nBody\n")
+        matched.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-matched\n---\nBody\n"
+        )
+        unmatched.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-unmatched\n---\nBody\n"
+        )
 
         result = reconcile_all(
             tmp_path,
-            workflow_descriptions={"wf-matched": self._workflow("COMPLETED", "accepted")},
+            workflow_descriptions={
+                "wf-matched": self._workflow("COMPLETED", "accepted")
+            },
         )
 
         assert result["fixed"] == [
@@ -292,6 +339,30 @@ status: done
         assert result["warning"] is not None
         assert "nonexistent.py" in result["warning"]
         assert "missing_function" in result["warning"]
+
+    def test_done_with_backtick_absolute_file_has_no_warning(self, tmp_path: Path):
+        """done + markdown-wrapped absolute Files to edit entry does not warn."""
+        target = tmp_path / "done_target.py"
+        target.write_text("VALUE = 1\n")
+        spec_path = tmp_path / "test-done-backtick.md"
+        spec_path.write_text(f"""---
+name: test-done-backtick
+status: done
+---
+## Files to edit
+- `{target}`
+""")
+
+        spec_dict = {
+            "name": "test-done-backtick",
+            "path": str(spec_path),
+            "status": "done",
+            "body": spec_path.read_text(),
+        }
+
+        result = reconcile_spec(spec_dict, dry_run=True)
+        assert result["changed"] is False
+        assert result["warning"] is None
 
     def test_completed_rejected_becomes_failed(self, tmp_path: Path):
         """COMPLETED + rejected verdict → status: failed."""
