@@ -414,7 +414,7 @@ def _check_worker_opencode_runtime() -> dict:
     run_command = (
         ["bash", "-lc", command]
         if WORKER_HOST == "localhost"
-        else ["ssh", WORKER_HOST, "bash", "-lc", command]
+        else ["ssh", WORKER_HOST, shlex.join(["bash", "-lc", command])]
     )
     try:
         result = subprocess.run(
