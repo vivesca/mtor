@@ -984,6 +984,199 @@ class TestTrace:
         assert "lifecycle_events" not in result
 
 
+class TestDossier:
+    def _full_dossier(self):
+        return {
+            "workflow_id": "ribosome-test1234",
+            "repo_root": "/home/vivesca/code/mtor",
+            "resolved_provider": "zhipu",
+            "mode": "build",
+            "artifact": {
+                "branch_name": "ribosome-test1234",
+                "commit_count": 2,
+                "commits": ["abc123 feat: add x", "def456 test: cover x"],
+                "changed_paths": ["mtor/cli.py", "assays/test_mtor.py"],
+                "has_patch": True,
+                "patch_bytes": 4096,
+                "output_path": "/home/vivesca/outputs/ribosome-test1234.txt",
+                "cached_log_path": "/home/vivesca/.cache/mtor/logs/ribosome-test1234.jsonl",
+            },
+            "verification": {"status": "passed", "detected_commands": ["uv run pytest"]},
+            "review": {
+                "approved": True,
+                "verdict": "approved_with_flags",
+                "flags": ["thin_output: 8 words"],
+                "blocking_flags": [],
+                "warnings": ["thin_output: 8 words"],
+                "satisfaction": 90,
+            },
+            "operator": {
+                "state": "approved",
+                "next_action": {"command": "mtor review ribosome-test1234"},
+            },
+        }
+
+    def test_dossier_compact_view_from_completion_dossier(self):
+        """A workflow with a completion dossier returns the compact evidence index."""
+        dossier = self._full_dossier()
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "provider": "zhipu",
+                        "mode": "build",
+                        "review": {
+                            "approved": True,
+                            "verdict": "approved_with_flags",
+                            "completion_dossier": dossier,
+                            "dossier_path": "/home/vivesca/germline/loci/ribosome-dossiers/ribosome-test1234.json",
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["dossier", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["workflow_id"] == "ribosome-test1234"
+        assert result["status"] == "COMPLETED"
+        assert result["operator_state"] == "approved"
+        assert result["verdict"] == "approved_with_flags"
+        assert result["approved"] is True
+        assert result["provider"] == "zhipu"
+        assert result["mode"] == "build"
+        assert result["commit_count"] == 2
+        assert result["commits"] == ["abc123 feat: add x", "def456 test: cover x"]
+        assert result["changed_paths"] == ["mtor/cli.py", "assays/test_mtor.py"]
+        assert result["verification_status"] == "passed"
+        assert result["warnings"] == ["thin_output: 8 words"]
+        assert result["blocking_flags"] == []
+        assert result["dossier_present"] is True
+        assert result["evidence"]["dossier_path"].endswith("ribosome-test1234.json")
+        assert result["evidence"]["output_path"].endswith("ribosome-test1234.txt")
+        assert result["next_action"]["command"] == "mtor review ribosome-test1234"
+        # Compact: no full patch, raw stderr, or lifecycle events leak in.
+        assert "patch" not in result
+        assert "stderr" not in result
+        assert "lifecycle_events" not in result
+
+    def test_dossier_missing_dossier_does_not_crash(self):
+        """A completed workflow without a completion dossier still yields a view."""
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "provider": "zhipu",
+                        "mode": "build",
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["dossier", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["dossier_present"] is False
+        assert result["verdict"] == "approved"
+        assert result["operator_state"] == "approved"
+        assert result["commits"] == []
+        assert result["changed_paths"] == []
+        assert result["verification_status"] == "unknown"
+        assert result["provider"] == "zhipu"
+
+    def test_dossier_partial_dossier_falls_back_to_review(self):
+        """A dossier missing nested sections does not crash; falls back gracefully."""
+        partial = {"workflow_id": "ribosome-test1234", "operator": {"state": "incomplete"}}
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 1,
+                        "success": False,
+                        "provider": "zhipu",
+                        "review": {
+                            "verdict": "incomplete",
+                            "flags": ["exit_code=1"],
+                            "completion_dossier": partial,
+                        },
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["dossier", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["operator_state"] == "incomplete"
+        assert result["verdict"] == "incomplete"
+        assert result["commits"] == []
+        assert result["flags"] == ["exit_code=1"]
+        assert result["dossier_present"] is True
+
+    def test_dossier_applies_verdict_override(self):
+        """Local verdict overrides flow through to the compact view, like status/trace."""
+        dossier = self._full_dossier()
+        dossier["review"]["verdict"] = "rejected"
+        dossier["review"]["approved"] = False
+        dossier["operator"]["state"] = "failed_review"
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 0,
+                        "success": True,
+                        "review": {"verdict": "rejected", "completion_dossier": dossier},
+                    }
+                ]
+            }
+        )
+
+        with _patch_client(mock_client), patch(
+            "mtor.cli.get_verdict_overrides",
+            return_value={"ribosome-test1234": "false_positive"},
+        ):
+            exit_code, data = invoke(["dossier", "ribosome-test1234"])
+
+        assert exit_code == 0
+        result = data["result"]
+        assert result["verdict"] == "false_positive"
+        assert result["verdict_override"] == "false_positive"
+        assert result["operator_state"] == "approved"
+
+    def test_dossier_not_found(self):
+        mock_client, mock_handle = make_mock_client()
+        mock_handle.describe = AsyncMock(side_effect=Exception("workflow not found"))
+
+        with _patch_client(mock_client):
+            exit_code, data = invoke(["dossier", "ribosome-missing"])
+
+        assert exit_code == 4
+        assert data["error"]["code"] == "WORKFLOW_NOT_FOUND"
+
+    def test_dossier_temporal_unreachable(self):
+        with _patch_client_error():
+            exit_code, data = invoke(["dossier", "ribosome-test1234"])
+
+        assert exit_code == 3
+        assert data["error"]["code"] == "TEMPORAL_UNREACHABLE"
+
+
 # ---------------------------------------------------------------------------
 # Cancel tests
 # ---------------------------------------------------------------------------

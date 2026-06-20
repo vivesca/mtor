@@ -1205,6 +1205,180 @@ def trace(workflow_id: str) -> None:
         )
 
 
+def _compact_dossier_payload(
+    workflow_id: str,
+    status_val: str,
+    task_result: dict | None,
+    review: dict | None,
+    dossier: dict | None,
+) -> dict[str, Any]:
+    """Distill the durable completion dossier into an operator-facing summary.
+
+    Prefers fields from the stored ``completion_dossier``; falls back to the live
+    review/task_result so partial or missing dossiers still yield a usable view
+    instead of crashing. Excludes full patches, raw stderr, and lifecycle events.
+    """
+    dossier = dossier if isinstance(dossier, dict) else {}
+    task_result = task_result if isinstance(task_result, dict) else {}
+    review = review if isinstance(review, dict) else {}
+
+    artifact = dossier.get("artifact") if isinstance(dossier.get("artifact"), dict) else {}
+    d_review = dossier.get("review") if isinstance(dossier.get("review"), dict) else {}
+    operator = dossier.get("operator") if isinstance(dossier.get("operator"), dict) else {}
+    verification = dossier.get("verification") if isinstance(dossier.get("verification"), dict) else {}
+
+    verdict = d_review.get("verdict") or review.get("verdict")
+    approved = d_review.get("approved")
+    if approved is None:
+        approved = review.get("approved")
+
+    provider = dossier.get("resolved_provider") or task_result.get("provider") or ""
+    mode = dossier.get("mode") or task_result.get("mode") or ""
+
+    commits = artifact.get("commits") or []
+    changed_paths = artifact.get("changed_paths") or []
+    commit_count = artifact.get("commit_count")
+    if commit_count is None:
+        commit_count = len(commits)
+
+    flags = d_review.get("flags") or review.get("flags") or []
+    blocking_flags = d_review.get("blocking_flags") or []
+    warnings = d_review.get("warnings") or []
+    satisfaction = d_review.get("satisfaction")
+    if satisfaction is None:
+        satisfaction = review.get("satisfaction")
+
+    operator_state = operator.get("state") or _operator_state(
+        status_val, {"verdict": verdict, "success": task_result.get("success")}
+    )
+
+    dossier_path = review.get("dossier_path") or dossier.get("dossier_path") or ""
+    output_path = (
+        artifact.get("output_path")
+        or review.get("output_path")
+        or task_result.get("output_path")
+        or ""
+    )
+    cached_log_path = artifact.get("cached_log_path") or _cached_log_path(workflow_id)
+
+    return {
+        "workflow_id": workflow_id,
+        "status": status_val,
+        "operator_state": operator_state,
+        "verdict": verdict,
+        "approved": approved,
+        "provider": provider,
+        "mode": mode,
+        "commit_count": commit_count,
+        "commits": commits,
+        "changed_paths": changed_paths,
+        "verification_status": verification.get("status", "unknown"),
+        "flags": flags,
+        "blocking_flags": blocking_flags,
+        "warnings": warnings,
+        "satisfaction": satisfaction,
+        "evidence": {
+            "dossier_path": dossier_path,
+            "cached_log_path": cached_log_path,
+            "output_path": output_path,
+        },
+        "dossier_present": bool(dossier),
+    }
+
+
+@app.command
+def dossier(workflow_id: str) -> None:
+    """Compact operator view of a workflow's completion dossier (evidence index).
+
+    Surfaces the trust signal — verdict, approval, blocking flags, changed paths,
+    commits, verification, provider, mode, and evidence paths — without the full
+    `mtor status` or `mtor trace` JSON. Reuses status/trace fetch + review logic.
+    """
+    cmd = f"mtor dossier {workflow_id}"
+
+    client, err = _get_client()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect to Temporal at {TEMPORAL_HOST}: {err}",
+                "TEMPORAL_UNREACHABLE",
+                f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
+                [_action("mtor tsc", "Run health check to diagnose connectivity")],
+                exit_code=3,
+            )
+        )
+
+    try:
+
+        async def _dossier():
+            handle = client.get_workflow_handle(workflow_id)
+            desc = await handle.describe()
+            wf_result = None
+            status_name = desc.status.name if desc.status else "UNKNOWN"
+            if status_name != "RUNNING":
+                with contextlib.suppress(Exception):
+                    wf_result = await handle.result()
+            return desc, wf_result
+
+        desc, wf_result = asyncio.run(_dossier())
+        status_val = desc.status.name if desc.status else "UNKNOWN"
+        task_result = _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        review = task_result.get("review", {}) if task_result else {}
+        dossier_obj = review.get("completion_dossier") if isinstance(review, dict) else None
+
+        result_payload = _compact_dossier_payload(
+            workflow_id, status_val, task_result, review, dossier_obj
+        )
+
+        # Reuse status/trace verdict overrides so the compact view matches the
+        # visible operator surface (false-positive corrections). No policy change.
+        vo = get_verdict_overrides()
+        if workflow_id in vo:
+            result_payload["verdict"] = vo[workflow_id]
+            result_payload["verdict_override"] = vo[workflow_id]
+            result_payload["operator_state"] = _operator_state(
+                status_val,
+                {
+                    "verdict": vo[workflow_id],
+                    "success": task_result.get("success") if task_result else None,
+                },
+            )
+
+        result_payload["next_action"] = _trace_next_action(
+            workflow_id, result_payload["operator_state"]
+        )
+
+        _ok(
+            cmd,
+            result_payload,
+            _status_next_actions(workflow_id, result_payload["operator_state"]),
+            version=VERSION,
+        )
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                cmd,
+                exc_str,
+                "DOSSIER_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
+
+
 @app.command
 def wait(
     workflow_id: str,
