@@ -53,6 +53,12 @@ class TestHarnessRouting:
 
         assert env["RIBOSOME_PROVIDER"] == "goose"
 
+    def test_opencode_harness_routes_to_ribosome_provider(self, tmp_path):
+        """OpenCode can be selected as the ribosome harness for zhipu."""
+        env = self._translate_and_capture_env(tmp_path, harness="opencode")
+
+        assert env["RIBOSOME_PROVIDER"] == "opencode"
+
     def test_harness_default_falls_back_to_resolved_provider(self, tmp_path):
         """Without harness, translate() uses the resolved provider."""
         env = self._translate_and_capture_env(tmp_path, harness="")

@@ -32,6 +32,15 @@ class TestRunHarness:
         cmd = build_command("droid", "inspect the repo")
         assert cmd == ["droid", "exec", "inspect the repo"]
 
+    def test_run_harness_opencode_builds_glm52_command(self):
+        """Provider 'opencode' builds an OpenCode command on GLM-5.2."""
+        cmd = build_command("opencode", "write a test")
+        assert cmd[:2] == ["opencode", "run"]
+        assert "--model" in cmd
+        assert "zhipuai-coding-plan/glm-5.2" in cmd
+        assert "--dangerously-skip-permissions" in cmd
+        assert "write a test" in cmd
+
     @patch("mtor.harness.subprocess.run")
     def test_run_harness_result_captures_output(self, mock_run):
         """run_harness returns a HarnessResult with captured stdout/stderr."""
@@ -58,7 +67,15 @@ class TestRunHarness:
 
     def test_provider_to_harness_mapping(self):
         """Each provider in PROVIDER_HARNESS_MAP maps to a known harness."""
-        expected_providers = {"claude", "zhipu", "gemini", "codex", "goose", "droid"}
+        expected_providers = {
+            "claude",
+            "zhipu",
+            "gemini",
+            "codex",
+            "opencode",
+            "goose",
+            "droid",
+        }
         assert set(PROVIDER_HARNESS_MAP.keys()) == expected_providers
         # Every harness value should have a command builder
         for provider, harness in PROVIDER_HARNESS_MAP.items():

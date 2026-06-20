@@ -22,6 +22,7 @@ PROVIDER_HARNESS_MAP: dict[str, str] = {
     "zhipu": "claude",
     "gemini": "claude",
     "codex": "codex",
+    "opencode": "opencode",
     "goose": "goose",
     "droid": "droid",
 }
@@ -57,6 +58,20 @@ def _build_codex_command(task: str) -> list[str]:
     return ["codex", "--full-auto", task]
 
 
+def _build_opencode_command(task: str) -> list[str]:
+    """Build an ``opencode run`` command for the task."""
+    return [
+        "opencode",
+        "run",
+        "--model",
+        "zhipuai-coding-plan/glm-5.2",
+        "--format",
+        "json",
+        "--dangerously-skip-permissions",
+        task,
+    ]
+
+
 def _build_goose_command(task: str) -> list[str]:
     """Build a ``goose`` CLI command for the task."""
     return ["goose", "run", "--name", "ribosome", "--task", task]
@@ -70,6 +85,7 @@ def _build_droid_command(task: str) -> list[str]:
 _COMMAND_BUILDERS: dict[str, Any] = {
     "claude": _build_claude_command,
     "codex": _build_codex_command,
+    "opencode": _build_opencode_command,
     "goose": _build_goose_command,
     "droid": _build_droid_command,
 }

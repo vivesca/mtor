@@ -27,7 +27,7 @@ _CODING_PLAN_CONFIG_PATH = os.path.expanduser(
 _CODING_PLAN_EXPECTED_URL = "https://open.bigmodel.cn/api/anthropic"
 
 PROVIDER_MODELS = {
-    "zhipu": "glm-5.1",
+    "zhipu": "glm-5.2",
 }
 
 
@@ -121,7 +121,7 @@ def _probe_provider(provider: str) -> ProbeResult:
         "zhipu": "https://open.bigmodel.cn/api/anthropic/v1/messages",
     }
     models = {
-        "zhipu": "glm-5.1",
+        "zhipu": "glm-5.2",
     }
 
     endpoint = endpoints[provider]

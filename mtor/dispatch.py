@@ -127,11 +127,12 @@ def _receptor_suffix() -> str:
 # ---------------------------------------------------------------------------
 
 PROVIDER_TO_MODEL: dict[str, str] = {
-    "zhipu": "glm51",
+    "zhipu": "glm52",
     "infini": "mm27",
     "volcano": "doubao",
     "gemini": "gem31",
     "codex": "gpt54",
+    "opencode": "glm52o",
     "goose": "glm51g",
     "droid": "glm5",
 }
@@ -564,7 +565,9 @@ def _worker_target_repo_state(repo: str | None, *, skip: bool = False) -> dict:
         if remote.returncode != 0:
             state["ok"] = False
             state["local_sha"] = local.stdout.strip()
-            state["detail"] = f"worker target repo check failed: {remote.stderr.strip()}"
+            state["detail"] = (
+                f"worker target repo check failed: {remote.stderr.strip()}"
+            )
             return state
 
         status_lines: list[str] = []
@@ -915,7 +918,12 @@ def _dispatch_prompt(
                     f"Target repo preflight failed: {target_repo['detail']}",
                     "TARGET_REPO_PREFLIGHT_FAILED",
                     "Repair or update the worker target checkout explicitly, then retry dispatch.",
-                    [_action("mtor --explain <prompt>", "Inspect dispatch preflight state")],
+                    [
+                        _action(
+                            "mtor --explain <prompt>",
+                            "Inspect dispatch preflight state",
+                        )
+                    ],
                     exit_code=1,
                 )
             )
@@ -1109,7 +1117,7 @@ def _strip_cd_prefix(run_cmd: str, repo: str) -> str:
     # Derive the tilde form from the absolute form directly, in case
     # _normalize_spec_repo_for_worker couldn't (e.g. local HOME differs).
     if abs_form.startswith("/home/vivesca/"):
-        direct_tilde = "~" + abs_form[len("/home/vivesca"):]
+        direct_tilde = "~" + abs_form[len("/home/vivesca") :]
         candidates.add(direct_tilde)
         candidates.add(f"'{direct_tilde}'")
         candidates.add(f'"{direct_tilde}"')
@@ -1119,7 +1127,7 @@ def _strip_cd_prefix(run_cmd: str, repo: str) -> str:
             for gap in (f" {sep} ", f"{sep} "):
                 prefix = f"cd {r}{gap}"
                 if run_cmd.startswith(prefix):
-                    return run_cmd[len(prefix):]
+                    return run_cmd[len(prefix) :]
 
     return run_cmd
 

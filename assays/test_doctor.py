@@ -199,20 +199,20 @@ class TestFormatReportAllPass(unittest.TestCase):
             if "temporal_reachable" in line or "worker_host" in line or "worker_alive" in line:
                 self.assertIn("✔", line)
 
-    def test_provider_routing_displays_glm51(self):
-        """Doctor display makes the primary GLM-5.1/Zhipu route visible."""
+    def test_provider_routing_displays_glm52(self):
+        """Doctor display makes the primary GLM-5.2/Zhipu route visible."""
         checks = [
             {
                 "name": "provider_routing",
                 "ok": True,
-                "detail": "priority: zhipu(glm-5.1, limit=3)",
+                "detail": "priority: zhipu(glm-5.2, limit=3)",
             },
         ]
 
         output = format_health_display(checks)
 
         self.assertIn("provider_routing", output)
-        self.assertIn("zhipu(glm-5.1", output)
+        self.assertIn("zhipu(glm-5.2", output)
 
 
 class TestFormatReportWithFailures(unittest.TestCase):
