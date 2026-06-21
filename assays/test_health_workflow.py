@@ -138,3 +138,19 @@ def test_run_default_empty_health():
     asyncio.run(_run_workflow(wf, None))
 
     assert wf._health == {}
+
+
+def test_rate_limit_uses_passed_now_epoch():
+    """The deterministic workflow-signal path supplies now_epoch, so
+    cooldown_until is computed from it rather than wall-clock time.time().
+
+    Guards the determinism fix: the rate_limit signal passes
+    workflow.now().timestamp() so the value replays identically.
+    """
+    wf = HealthWorkflow()
+    wf._apply_rate_limit("acme", now_epoch=2000.0)
+
+    entry = wf._health["acme"]
+    assert entry["state"] == "open"
+    assert entry["cooldown_until"] == 2000.0 + DEFAULT_COOLDOWN_SECONDS
+    assert entry["consecutive_failures"] == 1

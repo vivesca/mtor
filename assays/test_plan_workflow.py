@@ -205,3 +205,64 @@ class TestPlanWorkflow:
             assert result["succeeded"] == 1
         finally:
             wf._execute_child = original_execute_child
+
+    @pytest.mark.anyio
+    async def test_run_blocks_dependent_of_failed_dep(self):
+        """A dependent of a spec that produced zero successes is recorded as
+        predecessor_failed and is NEVER dispatched (no build on a failed dep)."""
+        wf = PlanWorkflow()
+        plan_specs = [
+            {"name": "a", "depends_on": [], "task": "t", "provider": "zhipu"},
+            {"name": "b", "depends_on": ["a"], "task": "t", "provider": "zhipu"},
+        ]
+        dispatched = []
+
+        async def mock_execute(spec):
+            # Mirror the real _execute_child success-gating.
+            name = spec["name"]
+            dispatched.append(name)
+            result = {"succeeded": 0}  # 'a' fails
+            if result.get("succeeded", 0) > 0:
+                wf._completed.add(name)
+            else:
+                wf._failed.add(name)
+            return result
+
+        wf._execute_child = mock_execute
+
+        result = await wf.run(plan_specs)
+
+        assert dispatched == ["a"]  # b never dispatched
+        assert result["total"] == 2
+        assert result["succeeded"] == 0
+        assert result["blocked"] == 1
+        b_result = next(r for r in result["results"] if r["name"] == "b")
+        assert b_result["result"]["verdict"] == "predecessor_failed"
+
+    @pytest.mark.anyio
+    async def test_run_terminates_on_unsatisfiable_external_dep(self):
+        """A spec depending on a name absent from the plan is recorded as
+        unsatisfiable_dependency and run() returns promptly (no 2h hang)."""
+        wf = PlanWorkflow()
+        plan_specs = [
+            {"name": "a", "depends_on": [], "task": "t", "provider": "zhipu"},
+            {"name": "b", "depends_on": ["ghost"], "task": "t", "provider": "zhipu"},
+        ]
+        dispatched = []
+
+        async def mock_execute(spec):
+            name = spec["name"]
+            dispatched.append(name)
+            wf._completed.add(name)
+            return {"succeeded": 1}
+
+        wf._execute_child = mock_execute
+
+        result = await wf.run(plan_specs)
+
+        assert dispatched == ["a"]  # 'ghost' never exists, so b is unrunnable
+        assert result["total"] == 2
+        assert result["succeeded"] == 1
+        assert result["blocked"] == 1
+        b_result = next(r for r in result["results"] if r["name"] == "b")
+        assert b_result["result"]["verdict"] == "unsatisfiable_dependency"

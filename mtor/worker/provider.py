@@ -219,11 +219,13 @@ def update_health(
 def parse_rate_limit_window(stderr: str) -> float:
     """Extract cooldown window in hours from stderr.
 
-    Looks for the pattern ``window=Nh`` (e.g. ``window=2h``) and returns
-    the value as a float.  Returns the default of ``1.0`` hours when no
-    match is found.
+    Looks for the pattern ``window=Nh`` (e.g. ``window=2h`` or ``window=1.5h``)
+    and returns the value as a float.  Returns the default of ``1.0`` hours when
+    no match is found.
     """
-    m = re.search(r"window=(\d+)h", stderr)
+    # Accept a decimal so fractional windows (e.g. window=1.5h) are honoured
+    # rather than silently falling back to the 1.0h default.
+    m = re.search(r"window=(\d+(?:\.\d+)?)h", stderr)
     if m:
         return float(m.group(1))
     return 1.0

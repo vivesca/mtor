@@ -9,7 +9,6 @@ Executes plan specs respecting dependency ordering:
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 
 from temporalio import workflow
 
@@ -59,6 +58,7 @@ class PlanWorkflow:
 
     def __init__(self) -> None:
         self._completed: set[str] = set()
+        self._failed: set[str] = set()
         self._results: dict[str, dict] = {}
         self._pending: set[str] = set()
         self._specs: list[dict] = []
@@ -74,7 +74,10 @@ class PlanWorkflow:
 
     async def _execute_child(self, spec: dict) -> dict:
         """Execute a spec as a child TranslationWorkflow."""
-        from mtor.worker.workflow import TranslationWorkflow
+        # Imports inside workflow code must pass through the Temporal sandbox
+        # (determinism rule); mirrors the module-level TASK_QUEUE import.
+        with workflow.unsafe.imports_passed_through():
+            from mtor.worker.workflow import TranslationWorkflow
 
         name = spec.get("name", "")
         task = spec.get("task", "")
@@ -93,14 +96,32 @@ class PlanWorkflow:
             task_queue=TASK_QUEUE,
         )
 
-        self._completed.add(name)
+        # Only unblock dependents when the child actually produced a success.
+        # A child that completes with zero successes (all tasks rejected/failed)
+        # must NOT satisfy `dep in completed`, or dependents would build on a
+        # failed prerequisite. Track failures separately so run() can terminate
+        # their now-unreachable dependents instead of waiting forever.
+        if isinstance(result, dict) and result.get("succeeded", 0) > 0:
+            self._completed.add(name)
+        else:
+            self._failed.add(name)
         return result
 
     @workflow.run
     async def run(self, plan_specs: list[dict]) -> dict:
-        """Execute plan specs respecting DAG dependencies."""
+        """Execute plan specs respecting DAG dependencies.
+
+        Each wave of ready specs is dispatched and awaited before the next is
+        computed, so nothing is in flight when no spec is ready. A pending set
+        with no ready spec therefore means the remainder is permanently blocked
+        — an upstream spec failed, a ``depends_on`` name is absent from the plan
+        (typo / external dep), or the deps form a cycle. Those are recorded as
+        blocked and the plan returns promptly, instead of parking on a
+        multi-hour ``wait_condition`` whose timeout would abort the whole run.
+        """
         self._specs = plan_specs
         self._pending = {s.get("name", "") for s in plan_specs}
+        known = {s.get("name", "") for s in plan_specs}
 
         all_results: list[dict] = []
 
@@ -108,11 +129,38 @@ class PlanWorkflow:
             ready = self._find_ready()
 
             if not ready:
-                await workflow.wait_condition(
-                    lambda: len(self._find_ready()) > 0,
-                    timeout=timedelta(hours=2),
-                )
-                continue
+                for spec in sorted(self._specs, key=lambda s: s.get("name", "")):
+                    name = spec.get("name", "")
+                    if name not in self._pending:
+                        continue
+                    blocking = [
+                        dep for dep in spec.get("depends_on", [])
+                        if dep not in self._completed
+                    ]
+                    missing = [dep for dep in blocking if dep not in known]
+                    failed = [dep for dep in blocking if dep in self._failed]
+                    if missing:
+                        verdict = "unsatisfiable_dependency"
+                        reason = f"depends_on not in plan: {missing}"
+                    elif failed:
+                        verdict = "predecessor_failed"
+                        reason = f"blocked by failed deps: {failed}"
+                    else:
+                        verdict = "blocked"
+                        reason = f"unresolved deps (cycle?): {blocking}"
+                    self._pending.discard(name)
+                    self._failed.add(name)
+                    all_results.append({
+                        "name": name,
+                        "result": {
+                            "total": 0,
+                            "succeeded": 0,
+                            "blocked": True,
+                            "verdict": verdict,
+                            "reason": reason,
+                        },
+                    })
+                break
 
             # Start ready specs in parallel
             for spec in ready:
@@ -132,9 +180,11 @@ class PlanWorkflow:
             1 for r in self._results.values()
             if isinstance(r, dict) and r.get("succeeded", 0) > 0
         )
+        blocked = sum(1 for r in all_results if r.get("result", {}).get("blocked"))
 
         return {
             "total": len(plan_specs),
             "succeeded": succeeded,
+            "blocked": blocked,
             "results": all_results,
         }

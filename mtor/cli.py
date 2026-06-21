@@ -2293,12 +2293,36 @@ def approve(workflow_id: str) -> None:
             )
         )
 
-    async def _signal():
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal("approve_task", workflow_id)
+    try:
 
-    asyncio.run(_signal())
-    _ok("mtor approve", {"workflow_id": workflow_id, "decision": "approved"}, version=VERSION)
+        async def _signal():
+            handle = client.get_workflow_handle(workflow_id)
+            await handle.signal("approve_task", workflow_id)
+
+        asyncio.run(_signal())
+        _ok("mtor approve", {"workflow_id": workflow_id, "decision": "approved"}, version=VERSION)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    "mtor approve",
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List all recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                "mtor approve",
+                exc_str,
+                "APPROVE_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
 
 
 @app.command
@@ -2316,12 +2340,36 @@ def deny(workflow_id: str) -> None:
             )
         )
 
-    async def _signal():
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal("reject_task", workflow_id)
+    try:
 
-    asyncio.run(_signal())
-    _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
+        async def _signal():
+            handle = client.get_workflow_handle(workflow_id)
+            await handle.signal("reject_task", workflow_id)
+
+        asyncio.run(_signal())
+        _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    "mtor deny",
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List all recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                "mtor deny",
+                exc_str,
+                "DENY_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
 
 
 @app.command(name="reactivate")
@@ -3552,6 +3600,11 @@ def dispatch_all(
         base_prompt = spec.get("body", "") or spec.get("name", "")
         spec_path = Path(spec["path"])
 
+        # Preview only — _dispatch_prompt performs the real injection below.
+        # Do NOT pass this already-injected prompt into _dispatch_prompt: it
+        # re-injects whenever spec_path is set, which would double the
+        # CONSTRAINT/exclude/Run block and make the workflow-ID + dedup hash
+        # diverge from the normal `mtor --spec` path (both hash the full prompt).
         prompt = _inject_spec_constraints(
             base_prompt,
             spec_path=spec_path,
@@ -3572,7 +3625,7 @@ def dispatch_all(
         try:
             sys.stdout = captured
             workflow_id = _dispatch_prompt(
-                prompt,
+                base_prompt,
                 provider=provider,
                 spec_path=spec_path,
             )
