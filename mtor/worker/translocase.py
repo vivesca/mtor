@@ -765,19 +765,29 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         ]
 
         _run_start = _time.monotonic()
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=work_dir,
-            env={
-                **os.environ,
-                "RIBOSOME_PROVIDER": harness or resolved_provider,
-                "RIBOSOME_TASK_ID": workflow_id,
-                "HOME": str(Path.home()),
-            },
-            start_new_session=True,  # process group kill — prevents orphan ribosome processes
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=work_dir,
+                env={
+                    **os.environ,
+                    "RIBOSOME_PROVIDER": harness or resolved_provider,
+                    "RIBOSOME_TASK_ID": workflow_id,
+                    "HOME": str(Path.home()),
+                },
+                start_new_session=True,  # process group kill — prevents orphan ribosome processes
+            )
+        except BaseException:
+            # This await is the only cancellation/exception point between the
+            # _active_count increment above and the try/finally below that owns
+            # the decrement. A spawn failure (e.g. OSError under fd/process
+            # exhaustion) or an activity cancel here would otherwise leak the
+            # reserved slot permanently, eventually pinning the provider over
+            # its concurrency cap until the worker restarts. Release it here.
+            _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
+            raise
         _log_event(workflow_id, "subprocess_started", pid=proc.pid)
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat

@@ -2293,12 +2293,36 @@ def approve(workflow_id: str) -> None:
             )
         )
 
-    async def _signal():
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal("approve_task", workflow_id)
+    try:
 
-    asyncio.run(_signal())
-    _ok("mtor approve", {"workflow_id": workflow_id, "decision": "approved"}, version=VERSION)
+        async def _signal():
+            handle = client.get_workflow_handle(workflow_id)
+            await handle.signal("approve_task", workflow_id)
+
+        asyncio.run(_signal())
+        _ok("mtor approve", {"workflow_id": workflow_id, "decision": "approved"}, version=VERSION)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    "mtor approve",
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List all recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                "mtor approve",
+                exc_str,
+                "APPROVE_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
 
 
 @app.command
@@ -2316,12 +2340,36 @@ def deny(workflow_id: str) -> None:
             )
         )
 
-    async def _signal():
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal("reject_task", workflow_id)
+    try:
 
-    asyncio.run(_signal())
-    _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
+        async def _signal():
+            handle = client.get_workflow_handle(workflow_id)
+            await handle.signal("reject_task", workflow_id)
+
+        asyncio.run(_signal())
+        _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
+    except Exception as exc:
+        exc_str = str(exc)
+        if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
+            sys.exit(
+                _err(
+                    "mtor deny",
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify the workflow ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List all recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
+                "mtor deny",
+                exc_str,
+                "DENY_ERROR",
+                "Check Temporal server health with: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
 
 
 @app.command(name="reactivate")

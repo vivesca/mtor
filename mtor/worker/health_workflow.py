@@ -33,8 +33,15 @@ class HealthWorkflow:
     # Internal state helpers (callable without Temporal runtime)
     # ------------------------------------------------------------------
 
-    def _apply_rate_limit(self, provider: str) -> None:
-        """Open circuit for *provider* (rate limited)."""
+    def _apply_rate_limit(self, provider: str, now_epoch: float | None = None) -> None:
+        """Open circuit for *provider* (rate limited).
+
+        ``now_epoch`` lets the Temporal signal pass a deterministic
+        ``workflow.now().timestamp()`` so ``cooldown_until`` replays
+        identically. When omitted — e.g. direct unit-test calls outside a
+        workflow runtime — it falls back to wall-clock ``time.time()``.
+        """
+        now = now_epoch if now_epoch is not None else time.time()
         if provider not in self._health:
             self._health[provider] = {
                 "state": "closed",
@@ -43,7 +50,7 @@ class HealthWorkflow:
             }
         entry = self._health[provider]
         entry["state"] = "open"
-        entry["cooldown_until"] = time.time() + DEFAULT_COOLDOWN_SECONDS
+        entry["cooldown_until"] = now + DEFAULT_COOLDOWN_SECONDS
         entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
 
     def _apply_success(self, provider: str) -> None:
@@ -66,7 +73,9 @@ class HealthWorkflow:
     @workflow.signal
     async def rate_limit(self, provider: str) -> None:
         """Signal: trip circuit to open for *provider*."""
-        self._apply_rate_limit(provider)
+        # Pass a deterministic timestamp so cooldown_until is replay-stable
+        # (workflow code must never call wall-clock time.time() directly).
+        self._apply_rate_limit(provider, now_epoch=workflow.now().timestamp())
 
     @workflow.signal
     async def success(self, provider: str) -> None:
