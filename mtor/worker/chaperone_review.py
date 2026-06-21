@@ -21,9 +21,15 @@ REVIEW_LOG = (
 )
 DOSSIER_DIR = Path.home() / "germline" / "loci" / "ribosome-dossiers"
 
+# Narration patterns that report destruction *happened*. Bare "No such file"
+# was deliberately removed (review-gate-1): it signals a file was ABSENT
+# (benign FileNotFoundError / `ls`-style narration), not that anything was
+# destroyed, yet it tripped the unconditional destruction hard-reject below
+# and sank good committed work. Genuine destructive code committed to the diff
+# is caught by _DESTRUCTION_SHELL_PATTERNS against added patch lines.
 _DESTRUCTION_PATTERNS = _re.compile(
     r"rm -rf|rmdir|replaced entire|overwrote|deleted all|"
-    r"file is now empty|wrote 0 bytes|No such file",
+    r"file is now empty|wrote 0 bytes",
     _re.IGNORECASE,
 )
 
@@ -39,10 +45,15 @@ _DESTRUCTION_SHELL_PATTERNS = _re.compile(
     _re.IGNORECASE,
 )
 
+# `fatal:` is anchored to start-of-line under MULTILINE (review-gate-3):
+# genuine git/tool fatal errors are emitted line-leading, whereas an
+# unanchored `fatal:` also matched benign mid-line prose narration and
+# rejected good work. The other patterns are substantive enough to match
+# anywhere.
 _ERROR_PATTERNS = _re.compile(
     r"SyntaxError|ImportError|ModuleNotFoundError|PermissionError|"
-    r"Traceback \(most recent|panic:|fatal:",
-    _re.IGNORECASE,
+    r"Traceback \(most recent|panic:|^fatal:",
+    _re.IGNORECASE | _re.MULTILINE,
 )
 
 
@@ -64,6 +75,15 @@ def _is_blocking_review_flag(flag: str) -> bool:
         )
     )
 
+
+# A single-file deletion this large is a wholesale wipe, not an incidental
+# trim in a refactor. The net_positive guard below suppresses the ratio-based
+# pure_deletion/file_shrunk flags to avoid truncated-diff false positives, but
+# it must NOT mask a genuine gutting of one file just because an unrelated
+# larger file was added in the same change (review-gate-2). Above this line
+# count, pure_deletion fires regardless of net_positive. Kept well above the
+# modest (<=50 line) removals a legitimate net-positive refactor produces.
+_LARGE_FILE_DELETION_LINES = 200
 
 _PLACEHOLDER_PATTERNS = _re.compile(r"\bTODO\b|\bFIXME\b|\bstub\b", _re.IGNORECASE)
 _HARDCODED_HOME = _re.compile(r"/Users/terry/|/home/terry/")
@@ -385,7 +405,14 @@ async def chaperone(result: dict) -> dict:
             norm = _normalize_task_path(task_file)
             if (
                 norm
-                and not any(norm in df or df.endswith(norm) for df in diff_files)
+                # Path-segment match, not unbounded substring: requested
+                # `api.py` must not be "satisfied" by an unrelated
+                # `legacy_api.py` (review-gate-4). Either the diff path equals
+                # the requested path, or the requested path is a trailing path
+                # segment of it (preceded by `/`).
+                and not any(
+                    df == norm or df.endswith("/" + norm) for df in diff_files
+                )
                 and any(
                     kw in task.lower()
                     for kw in ["modify", "edit", "change", "add to", "update", "fix", "create"]
@@ -425,7 +452,10 @@ async def chaperone(result: dict) -> dict:
                         if not net_positive:
                             flags.append(f"file_shrunk: {fname} +{a}/-{r}")
                     if a == 0 and r > 5:
-                        if not net_positive:
+                        # Non-suppressible escape hatch: a large absolute
+                        # single-file wipe is dangerous even when the overall
+                        # change is net-positive (review-gate-2).
+                        if not net_positive or r > _LARGE_FILE_DELETION_LINES:
                             flags.append(f"pure_deletion: {fname} -{r}")
                 except ValueError:
                     pass

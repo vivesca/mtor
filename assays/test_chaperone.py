@@ -833,6 +833,145 @@ class TestPrimaryDiffAuthority:
         assert review["approved"] is False
 
 
+class TestMergeSafetyGateHeldFindings:
+    """Regression tests for the four held merge-safety-gate findings.
+
+    These were deferred from PR #6 (the adversarial sweep's verifiers died on
+    the spend wall) and re-verified by hand against chaperone_review.py before
+    landing. Each gate gets both directions: the fix fires on the real defect,
+    and the previously-misclassified benign case is now clean.
+    """
+
+    # ---- review-gate-2: wholesale single-file wipe slips a net-positive change ----
+
+    def test_wholesale_wipe_flagged_even_when_net_positive(self):
+        """A single-file wipe (a==0, large r) is flagged even when an unrelated
+        larger file makes the overall change net-positive (the false-accept)."""
+        result = _make_result(
+            post_diff={
+                "stat": " new_big.py | 400 ++++\n wiped.py | 300 ----\n",
+                "numstat": "400\t0\tnew_big.py\n0\t300\twiped.py",
+                "commits": ["abc feat: big add then wipe one file"],
+                "commit_count": 1,
+            },
+            pre_diff={"stat": "", "numstat": ""},
+        )
+        review = _run(chaperone(result))
+        assert any("pure_deletion: wiped.py" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
+
+    def test_modest_net_positive_deletion_still_suppressed(self):
+        """The escape hatch only catches wholesale wipes — a modest deletion in
+        a net-positive refactor stays suppressed (no new false-reject)."""
+        result = _make_result(
+            post_diff={
+                "stat": " new.py | 400 ++++\n trimmed.py | 40 ----\n",
+                "numstat": "400\t0\tnew.py\n0\t40\ttrimmed.py",
+                "commits": ["abc refactor: trim a few lines"],
+                "commit_count": 1,
+            },
+            pre_diff={"stat": "", "numstat": ""},
+        )
+        review = _run(chaperone(result))
+        assert not any("pure_deletion" in f for f in review["flags"])
+
+    # ---- review-gate-4: target_file_missing substring match ----
+
+    def test_target_file_missing_not_satisfied_by_substring(self):
+        """Requested `api.py` is NOT satisfied by an unrelated `legacy_api.py`
+        (the unbounded substring match was the false-accept)."""
+        result = _make_result(
+            task="modify api.py to add the new endpoint",
+            post_diff={
+                "stat": " legacy_api.py | 10 ++++\n",
+                "numstat": "10\t0\tlegacy_api.py",
+                "commits": ["abc edit legacy_api"],
+                "commit_count": 1,
+            },
+        )
+        review = _run(chaperone(result))
+        assert "target_file_missing: api.py" in review["flags"]
+
+    def test_target_file_satisfied_by_path_segment(self):
+        """A requested file IS satisfied when it is a trailing path segment of
+        the diff path (`mtor/api.py` satisfies requested `api.py`)."""
+        result = _make_result(
+            task="modify api.py to add the new endpoint",
+            post_diff={
+                "stat": " mtor/api.py | 10 ++++\n",
+                "numstat": "10\t0\tmtor/api.py",
+                "commits": ["abc edit api"],
+                "commit_count": 1,
+            },
+        )
+        review = _run(chaperone(result))
+        assert not any("target_file_missing" in f for f in review["flags"])
+
+    # ---- review-gate-1: benign "No such file" narration ----
+
+    def test_benign_no_such_file_not_destruction(self):
+        """Benign FileNotFoundError narration ('No such file') is absence, not
+        destruction, and must not unconditionally reject good committed work."""
+        result = _make_result(
+            stdout=(
+                "Tried to read the optional config.\n"
+                "FileNotFoundError: [Errno 2] No such file or directory: 'old.cfg'\n"
+                "Fell back to defaults. Done. Changes committed."
+            ),
+        )
+        review = _run(chaperone(result))
+        assert not any("destruction" in f for f in review["flags"])
+        assert review["approved"] is True
+
+    def test_committed_rm_rf_still_destruction(self):
+        """Dropping bare 'No such file' does not weaken genuine destruction:
+        an rm -rf landed in the committed diff is still a hard reject."""
+        result = _make_result(
+            stdout="FileNotFoundError: No such file or directory: 'gone'",
+            post_diff={
+                "stat": " cleanup.sh | 2 ++\n",
+                "numstat": "2\t0\tcleanup.sh",
+                "commits": ["abc add cleanup"],
+                "commit_count": 1,
+                "patch": (
+                    "diff --git a/cleanup.sh b/cleanup.sh\n"
+                    "--- /dev/null\n"
+                    "+++ b/cleanup.sh\n"
+                    "@@ -0,0 +1,2 @@\n"
+                    "+#!/bin/bash\n"
+                    "+rm -rf /important/data\n"
+                ),
+            },
+        )
+        review = _run(chaperone(result))
+        assert any("destruction" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
+
+    # ---- review-gate-3: benign mid-line "fatal:" ----
+
+    def test_benign_midline_fatal_not_error(self):
+        """'fatal:' in mid-line prose narration does not trip the errors gate."""
+        result = _make_result(
+            stdout="The bug was fatal: the cache never expired. Fixed it. Done, committed.",
+        )
+        review = _run(chaperone(result))
+        assert not any("errors" in f for f in review["flags"])
+        assert review["approved"] is True
+
+    def test_line_leading_fatal_still_errors(self):
+        """A genuine line-leading git fatal still trips the errors gate."""
+        result = _make_result(
+            stdout="Done.",
+            stderr="fatal: not a git repository (or any of the parent directories)",
+        )
+        review = _run(chaperone(result))
+        assert any("errors" in f for f in review["flags"])
+        assert review["approved"] is False
+        assert review["verdict"] == "rejected"
+
+
 class TestReviewLogIsolation:
     """The production review ledger must never be touched by the test suite."""
 
