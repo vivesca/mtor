@@ -183,6 +183,12 @@ def test_parse_window_multiple_matches():
     assert result == 3.0
 
 
+def test_parse_window_fractional():
+    """Fractional windows (e.g. window=1.5h) are honoured, not dropped to 1.0h."""
+    assert parse_rate_limit_window("retry after window=1.5h") == 1.5
+    assert parse_rate_limit_window("cooldown window=0.5h please wait") == 0.5
+
+
 # ---------------------------------------------------------------------------
 # load_health / save_health tests
 # ---------------------------------------------------------------------------

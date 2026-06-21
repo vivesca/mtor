@@ -3600,6 +3600,11 @@ def dispatch_all(
         base_prompt = spec.get("body", "") or spec.get("name", "")
         spec_path = Path(spec["path"])
 
+        # Preview only — _dispatch_prompt performs the real injection below.
+        # Do NOT pass this already-injected prompt into _dispatch_prompt: it
+        # re-injects whenever spec_path is set, which would double the
+        # CONSTRAINT/exclude/Run block and make the workflow-ID + dedup hash
+        # diverge from the normal `mtor --spec` path (both hash the full prompt).
         prompt = _inject_spec_constraints(
             base_prompt,
             spec_path=spec_path,
@@ -3620,7 +3625,7 @@ def dispatch_all(
         try:
             sys.stdout = captured
             workflow_id = _dispatch_prompt(
-                prompt,
+                base_prompt,
                 provider=provider,
                 spec_path=spec_path,
             )
