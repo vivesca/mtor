@@ -46,6 +46,7 @@ from mtor.worker.git_ops import (
     _create_worktree,
     _detect_prior_commits,
     _detect_repo,
+    _format_landing_banner,
     _gc_worktrees,
     _git_pull_ff_only,
     _git_snapshot,
@@ -726,6 +727,13 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         pre_sha = pre_sha_r.stdout.strip() if pre_sha_r.returncode == 0 else None
     except Exception:
         pre_sha = None
+    with contextlib.suppress(Exception):
+        print(
+            _format_landing_banner(
+                repo_root, str(work_dir), branch_name, worktree_path, mode, pre_sha
+            ),
+            file=sys.stderr,
+        )
     pre_diff = await asyncio.to_thread(_git_snapshot, work_dir)
 
     # SRP: detect [supervised] marker in task string
