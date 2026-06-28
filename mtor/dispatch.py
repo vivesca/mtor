@@ -313,6 +313,8 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if skip:
         return True
 
+    worker_repo_dir = _worker_addressable_repo_path(repo) or "/home/vivesca/germline"
+
     local_cmd = ["git"]
     if repo:
         local_cmd += ["-C", str(Path(repo).expanduser())]
@@ -328,7 +330,11 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
         raise RuntimeError(f"local git HEAD lookup failed: {local.stderr.strip()}")
 
     remote = subprocess.run(
-        ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+        [
+            "ssh",
+            WORKER_HOST,
+            f"cd {shlex.quote(worker_repo_dir)} && git rev-parse HEAD",
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -359,7 +365,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
         [
             "ssh",
             WORKER_HOST,
-            "cd ~/germline && git merge-base --is-ancestor "
+            f"cd {shlex.quote(worker_repo_dir)} && git merge-base --is-ancestor "
             f"{shlex.quote(local_sha)} HEAD",
         ],
         capture_output=True,
@@ -417,7 +423,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
                 "ssh",
                 WORKER_HOST,
                 (
-                    "cd ~/germline && "
+                    f"cd {shlex.quote(worker_repo_dir)} && "
                     "git fetch origin main && "
                     "git merge --ff-only origin/main"
                 ),
@@ -438,7 +444,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
                 "ssh",
                 WORKER_HOST,
                 (
-                    "cd ~/germline && "
+                    f"cd {shlex.quote(worker_repo_dir)} && "
                     "echo HEAD:$(git rev-parse HEAD) && "
                     "{ git merge-base --is-ancestor "
                     f"{shlex.quote(pushed_sha)} HEAD "
