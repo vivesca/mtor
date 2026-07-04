@@ -1,16 +1,28 @@
-"""Tests for GitHub PR review workflow configuration."""
+"""Tests for GitHub Actions cost controls."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 
-def test_pr_review_workflow_uses_current_pr_agent_action():
-    """AI review workflow should use the maintained PR-Agent action."""
-    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "pr-review.yml").read_text()
+WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 
-    assert "uses: qodo-ai/pr-agent@main" in workflow
-    assert "OPENAI_KEY:" in workflow
-    assert "pull-requests: write" in workflow
+
+def test_only_deterministic_ci_workflow_remains():
+    """The repo should not spend Actions minutes on non-gating AI review."""
+    workflows = sorted(path.name for path in WORKFLOWS.glob("*.yml"))
+
+    assert workflows == ["ci.yml"]
+
+
+def test_ci_skips_redundant_and_superseded_runs():
+    """CI should keep safety gates while trimming duplicated GitHub minutes."""
+    workflow = (WORKFLOWS / "ci.yml").read_text()
+
+    assert "cancel-in-progress: true" in workflow
+    assert "startsWith(github.event.head_commit.message, 'Merge pull request ')" in workflow
+    assert "paths-ignore:" in workflow
     assert "pull_request:" in workflow
-    assert "pull_request_target" not in workflow
+    assert "push:" in workflow
+    assert "qodo-ai/pr-agent" not in workflow
+    assert "OPENAI_KEY" not in workflow
