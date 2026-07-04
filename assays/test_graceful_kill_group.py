@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -124,23 +125,23 @@ def test_cancelled_error_path_uses_group_kill():
         except (asyncio.CancelledError, Exception):
             pass
 
-    with (
+    patches = [
         patch.object(translocase, "_graceful_kill", graceful_kill),
         patch.object(translocase, "_graceful_kill_group", group_kill),
         patch.object(translocase, "_tee_stream", hang_tee),
         patch.object(translocase, "_heartbeat_stall_check", hang_heartbeat),
         patch.object(
-            translocase, "asyncio.create_subprocess_exec", return_value=mock_proc
+            translocase.asyncio, "create_subprocess_exec", return_value=mock_proc
         ),
-        patch.object(translocase, "_subprocess.run", side_effect=mock_run),
+        patch.object(translocase._subprocess, "run", side_effect=mock_run),
         patch.object(translocase, "load_health", return_value={}),
         patch.object(translocase, "select_provider", return_value="zhipu"),
         patch.object(translocase, "save_health"),
         patch.object(translocase, "update_health"),
         patch.object(translocase, "parse_rate_limit_window", return_value=None),
-        patch.object(translocase, "activity.info", return_value=mock_info),
-        patch.object(translocase, "activity.heartbeat"),
-        patch.object(translocase, "activity.is_cancelled", return_value=False),
+        patch.object(translocase.activity, "info", return_value=mock_info),
+        patch.object(translocase.activity, "heartbeat"),
+        patch.object(translocase.activity, "is_cancelled", return_value=False),
         patch.object(translocase, "create_task_trace", return_value=None),
         patch.object(translocase, "finalize_trace"),
         patch.object(translocase, "_create_worktree", return_value="/tmp/worktree"),
@@ -159,7 +160,10 @@ def test_cancelled_error_path_uses_group_kill():
         ),
         patch.object(translocase, "_main_checkout_state", return_value=None),
         patch.object(translocase, "_active_count", {}),
-    ):
+    ]
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         _run(scenario())
 
     group_kill.assert_awaited()
