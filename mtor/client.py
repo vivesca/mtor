@@ -32,9 +32,39 @@ def _get_client():
         return None, str(exc)
 
 
+def _pending_activity_records(desc: Any) -> list[Any]:
+    """Pending activities from a describe result, preferring the raw proto.
+
+    temporalio's WorkflowExecutionDescription does not expose pending_activities
+    directly — only raw_description carries them — so reading
+    desc.pending_activities silently yields nothing and every running workflow
+    classifies as queued.
+    """
+    raw = getattr(desc, "raw_description", None)
+    if raw is not None:
+        try:
+            records = list(getattr(raw, "pending_activities", None) or [])
+        except TypeError:
+            records = []
+        if records:
+            return records
+    try:
+        return list(getattr(desc, "pending_activities", None) or [])
+    except TypeError:
+        return []
+
+
 def _pending_activity_timestamp(activity: Any, field: str) -> datetime | None:
-    """Read a datetime field off a pending-activity record, tolerating absent or non-datetime values."""
+    """Read a timestamp field off a pending-activity record.
+
+    Tolerates absent fields, non-datetime values, and protobuf Timestamps —
+    including unset proto Timestamps, which read as epoch zero and mean "no data".
+    """
     value = getattr(activity, field, None)
+    if value is not None and hasattr(value, "ToDatetime"):
+        if not getattr(value, "seconds", 0) and not getattr(value, "nanos", 0):
+            return None
+        value = value.ToDatetime()
     if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
@@ -63,7 +93,7 @@ async def workflow_execution_state(
     current_time = now or datetime.now(UTC)
     handle = client.get_workflow_handle(workflow_id)
     desc = await handle.describe()
-    pending_activities = getattr(desc, "pending_activities", None) or []
+    pending_activities = _pending_activity_records(desc)
 
     latest_heartbeat = None
     latest_started = None
