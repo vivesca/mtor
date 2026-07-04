@@ -15,5 +15,5 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --dev
-      - run: uv run pytest assays/ -q
       - run: uv run ruff check mtor/ assays/
+      - run: uv run pytest assays/ -q
