@@ -252,6 +252,15 @@ def _operator_state(status_val: str, result_payload: dict[str, Any]) -> str:
     return status_val.lower()
 
 
+def _pr_result_fields(task_result: dict) -> dict:
+    """Extract create_pr outcome fields from a task result, if present."""
+    fields = {}
+    for key in ("branch_name", "pr_url", "pr_number", "pr_created", "pr_error"):
+        if key in task_result:
+            fields[key] = task_result[key]
+    return fields
+
+
 def _status_next_actions(workflow_id: str, operator_state: str) -> list[dict[str, str]]:
     """Choose status actions that make sense for the current operator state."""
     actions = [_action(f"mtor logs {workflow_id}", "Fetch last 30 lines of output")]
@@ -1098,6 +1107,7 @@ def status(workflow_id: str, short: bool = False) -> None:
                     if cached_log_path:
                         result_payload["cached_log_path"] = cached_log_path
                 result_payload["merged"] = task_result.get("merged")
+                result_payload.update(_pr_result_fields(task_result))
                 result_payload["verdict"] = review.get("verdict")
                 completion_evidence = review.get("completion_evidence")
                 if completion_evidence:

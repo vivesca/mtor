@@ -730,6 +730,7 @@ def _create_pr_impl(
         error       – error message on failure (empty on success)
         skipped     – True if branch has no new commits (no PR needed)
     """
+    repo_root = str(Path(repo_root).expanduser())
     pr_title = title or branch_name
     pr_body = body or f"Automated PR from ribosome branch `{branch_name}`."
 
