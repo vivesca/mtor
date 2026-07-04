@@ -813,6 +813,189 @@ def _create_pr_impl(
     }
 
 
+def _reap_landed_branches(
+    repo_root: str,
+    active_branches: frozenset[str] = frozenset(),
+    min_age_seconds: int = 1800,
+) -> dict:
+    """Remove merged ``ribosome-*`` branches and their worktrees after landing.
+
+    Best-effort: never raises. Returns a summary dict with keys ``reaped``,
+    ``remote_deleted``, ``skipped_active``, ``errors`` (each a list[str]).
+
+    Skips branches that are not yet merged into ``main`` (recoverable work),
+    branches currently being operated on (``active_branches``), and worktree
+    directories younger than ``min_age_seconds`` (a freshly-created branch
+    points at main's old tip — its mtime, not commit time, is the freshness
+    signal).
+    """
+    summary: dict[str, list[str]] = {
+        "reaped": [],
+        "remote_deleted": [],
+        "skipped_active": [],
+        "errors": [],
+    }
+    try:
+        if not repo_root:
+            return summary
+        main_check = _run_worker_command(
+            ["git", "rev-parse", "--verify", "--quiet", "main"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if main_check.returncode != 0:
+            return summary
+        with contextlib.suppress(Exception):
+            _run_worker_command(
+                ["git", "worktree", "prune"],
+                cwd=repo_root,
+                capture_output=True,
+                timeout=10,
+            )
+        refs_r = _run_worker_command(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/ribosome-*",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if refs_r.returncode != 0:
+            return summary
+        candidates = [ln.strip() for ln in refs_r.stdout.splitlines() if ln.strip()]
+
+        worktree_base = os.path.join(repo_root, ".worktrees")
+        effector_path = os.path.join(
+            str(Path.home()), "germline", "effectors", "ribosome-worktree"
+        )
+
+        for branch in candidates:
+            try:
+                if branch in active_branches:
+                    summary["skipped_active"].append(branch)
+                    continue
+
+                merged = _run_worker_command(
+                    ["git", "merge-base", "--is-ancestor", branch, "main"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    timeout=10,
+                )
+                if merged.returncode != 0:
+                    continue
+
+                wt_path = os.path.join(worktree_base, branch)
+                if os.path.exists(wt_path):
+                    try:
+                        age_seconds = _time.time() - os.path.getmtime(wt_path)
+                    except OSError:
+                        age_seconds = float("inf")
+                    if age_seconds < min_age_seconds:
+                        continue
+                    cleaned = False
+                    if os.path.exists(effector_path):
+                        eff_env = {
+                            **_minimal_git_env(),
+                            "RIBOSOME_WORKTREE_ROOT": repo_root + "/.worktrees",
+                        }
+                        eff = _run_worker_command(
+                            [
+                                effector_path,
+                                "cleanup",
+                                repo_root,
+                                wt_path,
+                                branch,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            env=eff_env,
+                        )
+                        cleaned = (
+                            eff.returncode == 0 and not os.path.exists(wt_path)
+                        )
+                    if not cleaned:
+                        with contextlib.suppress(Exception):
+                            _run_worker_command(
+                                [
+                                    "git",
+                                    "worktree",
+                                    "remove",
+                                    "--force",
+                                    wt_path,
+                                ],
+                                cwd=repo_root,
+                                capture_output=True,
+                                timeout=10,
+                            )
+
+                del_r = _run_worker_command(
+                    ["git", "branch", "-D", branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if del_r.returncode != 0:
+                    continue
+                summary["reaped"].append(branch)
+                print(
+                    f"[reap] removed landed branch {branch}", file=sys.stderr
+                )
+
+                try:
+                    ls = _run_worker_command(
+                        ["git", "ls-remote", "--heads", "origin", branch],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if ls.returncode != 0:
+                        continue
+                    tokens = ls.stdout.split()
+                    remote_sha = tokens[0] if tokens else ""
+                    if not remote_sha:
+                        continue
+                    anc = _run_worker_command(
+                        [
+                            "git",
+                            "merge-base",
+                            "--is-ancestor",
+                            remote_sha,
+                            "main",
+                        ],
+                        cwd=repo_root,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    if anc.returncode != 0:
+                        continue
+                    push = _run_worker_command(
+                        ["git", "push", "origin", "--delete", branch],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if push.returncode == 0:
+                        summary["remote_deleted"].append(branch)
+                except Exception as exc:
+                    summary["errors"].append(f"{branch}: remote delete: {exc}")
+            except Exception as exc:
+                summary["errors"].append(f"{branch}: {exc}")
+                continue
+    except Exception as exc:
+        summary["errors"].append(f"fatal: {exc}")
+    return summary
+
+
 def _gc_worktrees(repo_root: str) -> None:
     """Remove orphaned ribosome worktrees older than 2 hours."""
     worktree_base = os.path.join(repo_root, ".worktrees")
