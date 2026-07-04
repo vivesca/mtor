@@ -35,7 +35,7 @@ mtor/cli.py    mtor/worker/workflow.py      mtor/worker/translocase.py   ~/germl
 - **Verify before claiming done:** run tests, import modules, read back files.
 - **Spec status flow** — `ready` → `dispatched` → `done`/`failed`. `update_spec_status()` handles transitions.
 - **Worktrees** — translocase creates per-task worktrees from main. Commits land on `ribosome-*` branches, pushed to origin for review. Never commit to main directly.
-- **PROVIDER_LIMITS** in translocase.py — max concurrent per provider. Currently `{"zhipu": 2}`.
+- **PROVIDER_LIMITS** in `mtor/worker/provider.py` — max concurrent per provider. Currently `{"zhipu": 3}`.
 
 ## Code patterns
 
