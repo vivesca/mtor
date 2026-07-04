@@ -1327,6 +1327,59 @@ def _inject_spec_constraints(
     return "\n".join(parts)
 
 
+def spec_gate_path_warnings(spec_path: Path) -> list[str]:
+    """Warn the spec author when a gate-scanned path is outside the scope list.
+
+    The chaperone verdict gate extracts every path-shaped token from the
+    dispatch prompt and flags ``target_file_missing`` when a mentioned file is
+    absent from the diff. A spec body that mentions a path it will never touch
+    (for example a do-not-modify instruction) therefore causes a phantom
+    verdict rejection AFTER the work is done. This preflight surfaces those
+    mentions BEFORE dispatch — warn only, never block.
+    """
+    try:
+        text = spec_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    body = re.sub(r"\A---\n.*?\n---\n*", "", text, count=1, flags=re.DOTALL)
+    prompt = _inject_spec_constraints(body, spec_path=spec_path)
+
+    from mtor.rptor import parse_spec
+
+    try:
+        scope = [str(s) for s in parse_spec(spec_path).get("scope", [])]
+    except (OSError, ValueError):
+        return []
+    if not scope:
+        return []
+
+    from mtor.worker.chaperone_review import (
+        _normalize_task_path,
+        _task_file_paths,
+    )
+
+    warnings: list[str] = []
+    for path in sorted(_task_file_paths(prompt)):
+        norm = _normalize_task_path(path)
+        if not norm:
+            continue
+        in_scope = any(
+            norm == s
+            or norm.startswith(s.rstrip("/") + "/")
+            or s == norm
+            or s.endswith("/" + norm)
+            for s in scope
+        )
+        if not in_scope:
+            warnings.append(
+                f"spec mentions '{norm}' outside scope — if it will not appear "
+                "in the diff, the verdict gate flags target_file_missing; "
+                "write the literal as a string concatenation in the spec body "
+                "(see memory mark mtor-gate-safe-spec-authoring)"
+            )
+    return warnings
+
+
 def validate_spec(spec_path: Path, repo: Path) -> list[str]:
     """Validate a spec file for dispatch readiness.
 
@@ -1366,6 +1419,9 @@ def validate_spec(spec_path: Path, repo: Path) -> list[str]:
             test_path = repo / tf
             if not test_path.exists():
                 errors.append(f"Test file not found: {tf}")
+
+    for warning in spec_gate_path_warnings(spec_path):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
     return errors
 
