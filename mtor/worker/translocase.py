@@ -37,7 +37,11 @@ from mtor.worker.provider import (
     select_provider,
     update_health,
 )
-from mtor.worker.stall_trace import create_task_trace, finalize_trace, record_stall_event
+from mtor.worker.stall_trace import (
+    create_task_trace,
+    finalize_trace,
+    record_stall_event,
+)
 from mtor.worker.chaperone_review import chaperone
 from mtor.worker.git_ops import (
     _auto_commit,
@@ -268,6 +272,59 @@ def _signal_group(pid: int, sig: int) -> bool:
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+
+
+def _reap_orphaned_worktree_processes(repo_root: str) -> dict:
+    """Kill opencode/timeout process groups whose cwd is a deleted worktree.
+
+    _graceful_kill only sweeps the process group on the timeout and
+    cancellation branches of translate() — a task that exits normally never
+    signals its group, so an opencode grandchild left in the wrapper's
+    original pgid (start_new_session=True makes proc.pid the pgid) survives
+    after _cleanup_worktree deletes the worktree dir. Its /proc/<pid>/cwd
+    then resolves as "<path> (deleted)", which this sweep detects.
+    """
+    result: dict = {"scanned": 0, "killed_pgids": [], "errors": []}
+    worktrees_root = os.path.join(repo_root, ".worktrees")
+    try:
+        ps = _subprocess.run(
+            ["ps", "-eo", "pid,pgid,comm"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        result["errors"].append(str(exc))
+        return result
+    seen_pgids: set = set()
+    for line in ps.stdout.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, pgid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        comm = parts[2]
+        if "opencode" not in comm and "timeout" not in comm:
+            continue
+        result["scanned"] += 1
+        try:
+            cwd_link = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if worktrees_root not in cwd_link:
+            continue
+        if "(deleted)" not in cwd_link and os.path.isdir(cwd_link):
+            continue
+        if pgid in seen_pgids:
+            continue
+        seen_pgids.add(pgid)
+        if _signal_group(pgid, _signal.SIGKILL):
+            result["killed_pgids"].append(pgid)
+        else:
+            result["errors"].append(f"killpg failed for pgid={pgid}")
+    return result
 
 
 async def _graceful_kill(
@@ -514,7 +571,17 @@ async def _heartbeat_stall_check(
                             tick=tick,
                             reason="no_output_timeout",
                         )
-                        record_stall_event(workflow_id, "no_output_timeout", "kill", {"tick": tick, "no_output_ticks": no_output_ticks, "provider": provider}, trace=trace)
+                        record_stall_event(
+                            workflow_id,
+                            "no_output_timeout",
+                            "kill",
+                            {
+                                "tick": tick,
+                                "no_output_ticks": no_output_ticks,
+                                "provider": provider,
+                            },
+                            trace=trace,
+                        )
                 print(
                     f"[stall-detect] scout/research no-output timeout at tick {tick} "
                     f"({no_output_ticks} no-output ticks, ~{no_output_ticks * 30 // 60}min), "
@@ -555,7 +622,17 @@ async def _heartbeat_stall_check(
                             tick=tick,
                             reason="empty_diff_timeout",
                         )
-                        record_stall_event(workflow_id, "empty_diff_timeout", "kill", {"tick": tick, "empty_ticks": empty_ticks, "provider": provider}, trace=trace)
+                        record_stall_event(
+                            workflow_id,
+                            "empty_diff_timeout",
+                            "kill",
+                            {
+                                "tick": tick,
+                                "empty_ticks": empty_ticks,
+                                "provider": provider,
+                            },
+                            trace=trace,
+                        )
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
@@ -612,7 +689,17 @@ async def _heartbeat_stall_check(
                         tick=tick,
                         reason=f"{stall_type}_diff",
                     )
-                    record_stall_event(workflow_id, f"{stall_type}_diff", "kill" if warnings_sent >= 2 else "warn", {"tick": tick, "warnings_sent": warnings_sent + 1, "provider": provider}, trace=trace)
+                    record_stall_event(
+                        workflow_id,
+                        f"{stall_type}_diff",
+                        "kill" if warnings_sent >= 2 else "warn",
+                        {
+                            "tick": tick,
+                            "warnings_sent": warnings_sent + 1,
+                            "provider": provider,
+                        },
+                        trace=trace,
+                    )
             warnings_sent += 1
             print(
                 f"[stall-detect] {stall_type} at tick {tick} "
@@ -1004,6 +1091,8 @@ async def translate(
             _active_count[resolved_provider] = max(
                 0, _active_count.get(resolved_provider, 0) - 1
             )
+            with contextlib.suppress(Exception):
+                _reap_orphaned_worktree_processes(repo_root)
 
         rc = proc.returncode or 0
         if main_state is not None:
@@ -1502,6 +1591,9 @@ async def main() -> None:
         graceful_shutdown_timeout=timedelta(seconds=drain_seconds),
     )
     _gc_worktrees(str(Path.home() / "germline"))
+    for _reap_repo in (Path.home() / "germline", Path.home() / "code" / "mtor"):
+        with contextlib.suppress(Exception):
+            _reap_orphaned_worktree_processes(str(_reap_repo))
 
     # systemd stop (rictor deploy restart) sends SIGTERM. Without a handler
     # the process dies mid-activity and in-flight ribosome subprocesses are
