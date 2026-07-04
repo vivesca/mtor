@@ -343,17 +343,21 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
     if operator_state == "running":
         execution_state = payload.get("execution_state", {})
         pending_activities = payload.get("pending_activities") or []
-        no_activity_evidence = not pending_activities and (
-            payload.get("active_logs")
-            or execution_state.get("execution_state") == "queued"
-        )
-        if no_activity_evidence:
-            return "workflow is stale: running in Temporal with no activity currently executing"
+        source = execution_state.get("source", "")
+        if execution_state.get("execution_state") == "executing":
+            if source == "log-cache":
+                return (
+                    "workflow appears active from recent worker logs (log-cache);"
+                    " Temporal reported no pending-activity heartbeat"
+                )
+            return "workflow is currently executing"
         if execution_state.get("heartbeat_stale"):
             return "running workflow has a stale activity heartbeat"
-        if execution_state.get("execution_state") == "queued":
-            return "workflow is running in Temporal but no fresh activity heartbeat is visible"
-        return "workflow is currently executing"
+        if not pending_activities and not payload.get("active_logs"):
+            return "workflow is stale: running in Temporal with no activity currently executing"
+        return (
+            "workflow is running in Temporal but no fresh activity heartbeat is visible"
+        )
     if operator_state == "approved":
         return "workflow completed and review approved the artifact"
     if operator_state == "failed_review":
@@ -368,6 +372,22 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
             return f"workflow was {operator_state} ({kill_reason})"
         return f"workflow was {operator_state}"
     return "workflow state requires review"
+
+
+def _execution_state_with_fallback(
+    execution_state: dict[str, Any], active_logs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Trust live pending-activity evidence; otherwise classify from log recency."""
+    if execution_state.get("source") == "pending_activities":
+        return execution_state
+    fallback = dict(execution_state)
+    fallback["source"] = "log-cache"
+    if active_logs:
+        fallback["execution_state"] = "executing"
+        fallback["active_log_count"] = len(active_logs)
+    else:
+        fallback.setdefault("execution_state", "queued")
+    return fallback
 
 
 def _trace_next_action(workflow_id: str, operator_state: str) -> dict[str, str]:
@@ -1236,12 +1256,18 @@ def trace(workflow_id: str) -> None:
             if status_name == "RUNNING":
                 with contextlib.suppress(Exception):
                     execution_state = await workflow_execution_state(
-                        client, workflow_id
+                        client, workflow_id, desc=desc
                     )
             return desc, wf_result, result_error, execution_state
 
         desc, wf_result, result_error, execution_state = asyncio.run(_trace())
         status_val = desc.status.name if desc.status else "UNKNOWN"
+        active_logs: list[dict[str, Any]] = []
+        if status_val == "RUNNING":
+            active_logs = _active_log_entries(workflow_id)
+            execution_state = _execution_state_with_fallback(
+                execution_state, active_logs
+            )
         task_result = (
             _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
         )
@@ -1302,10 +1328,8 @@ def trace(workflow_id: str) -> None:
             if review.get("verdict") not in _APPROVED_VERDICTS:
                 result_payload["failure_reason"] = _build_failure_reason(task_result)
 
-        if status_val == "RUNNING":
-            active_logs = _active_log_entries(workflow_id)
-            if active_logs:
-                result_payload["active_logs"] = active_logs
+        if active_logs:
+            result_payload["active_logs"] = active_logs
 
         # Reuse status verdict overrides so trace matches the visible operator surface.
         vo = get_verdict_overrides()

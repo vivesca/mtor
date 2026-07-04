@@ -79,6 +79,7 @@ async def workflow_execution_state(
     now: datetime | None = None,
     heartbeat_fresh_seconds: int = 150,
     heartbeat_stale_seconds: int = 900,
+    desc: Any | None = None,
 ) -> dict[str, Any]:
     """Classify a running workflow as queued or executing from live Temporal evidence.
 
@@ -91,15 +92,18 @@ async def workflow_execution_state(
     recorded yet and last_heartbeat_time still shows the dead attempt.
     """
     current_time = now or datetime.now(UTC)
-    handle = client.get_workflow_handle(workflow_id)
-    desc = await handle.describe()
+    if desc is None:
+        handle = client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
     pending_activities = _pending_activity_records(desc)
 
     latest_heartbeat = None
     latest_started = None
     for activity in pending_activities:
         heartbeat_time = _pending_activity_timestamp(activity, "last_heartbeat_time")
-        if heartbeat_time and (latest_heartbeat is None or heartbeat_time > latest_heartbeat):
+        if heartbeat_time and (
+            latest_heartbeat is None or heartbeat_time > latest_heartbeat
+        ):
             latest_heartbeat = heartbeat_time
         started_time = _pending_activity_timestamp(activity, "last_started_time")
         if started_time and (latest_started is None or started_time > latest_started):
@@ -109,9 +113,11 @@ async def workflow_execution_state(
         return {"execution_state": "queued"}
 
     ages = []
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"source": "pending_activities"}
     if latest_heartbeat is not None:
-        heartbeat_age_seconds = max(0.0, (current_time - latest_heartbeat).total_seconds())
+        heartbeat_age_seconds = max(
+            0.0, (current_time - latest_heartbeat).total_seconds()
+        )
         ages.append(heartbeat_age_seconds)
         result["last_heartbeat_iso"] = latest_heartbeat.isoformat()
         result["heartbeat_age_seconds"] = round(heartbeat_age_seconds, 1)
