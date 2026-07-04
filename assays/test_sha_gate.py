@@ -126,10 +126,14 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
-                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
-                MagicMock(returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"),  # worker HEAD contains pushed
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
+                ),  # worker HEAD contains pushed
                 MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha()
@@ -153,7 +157,9 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA (pushed)
                 MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (differs)
-                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
                 # Worker overshot to ccc999 (a newer origin/main commit) that
@@ -187,7 +193,9 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD (behind)
                 MagicMock(returncode=0, stdout="ccc\n"),  # worker HEAD (ahead, differs)
-                MagicMock(returncode=0, stdout=""),       # contains-local probe: CONTAINED (rc 0)
+                MagicMock(
+                    returncode=0, stdout=""
+                ),  # contains-local probe: CONTAINED (rc 0)
             ]
             result = _check_worker_sha()
         assert result is True
@@ -246,7 +254,9 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
-                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=1, stderr="remote rejected"),
             ]
             with pytest.raises(RuntimeError, match="push failed"):
@@ -264,10 +274,14 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
-                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push ok
                 MagicMock(returncode=0, stdout=""),  # merge ok
-                MagicMock(returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"),  # worker HEAD contains pushed
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"
+                ),  # worker HEAD contains pushed
                 MagicMock(returncode=1, stderr="systemctl failed"),  # restart fail
             ]
             with pytest.raises(RuntimeError, match="restart failed"):
@@ -293,11 +307,15 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD
                 MagicMock(returncode=0, stdout="bbb\n"),  # worker HEAD (differs)
-                MagicMock(returncode=1, stdout=""),       # contains-local probe: NOT contained → deploy
-                MagicMock(returncode=0, stdout=""),       # push ok
-                MagicMock(returncode=0, stdout=""),       # merge ok
-                MagicMock(returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"),  # worker HEAD post-merge (contains)
-                MagicMock(returncode=0, stdout=""),       # restart ok
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
+                MagicMock(returncode=0, stdout=""),  # push ok
+                MagicMock(returncode=0, stdout=""),  # merge ok
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"
+                ),  # worker HEAD post-merge (contains)
+                MagicMock(returncode=0, stdout=""),  # restart ok
             ]
             _check_worker_sha()
 
@@ -340,7 +358,9 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
                 MagicMock(returncode=0, stdout="bbb\n"),
-                MagicMock(returncode=1, stdout=""),  # contains-local probe: NOT contained → deploy
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
                 MagicMock(returncode=0, stdout=""),  # push ok
                 MagicMock(returncode=1, stderr="merge conflict"),  # merge fail
             ]
@@ -362,14 +382,22 @@ class TestCheckWorkerSha:
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local SHA (pushed)
                 MagicMock(returncode=0, stdout="bbb\n"),  # remote SHA (differs)
-                MagicMock(returncode=1, stdout=""),       # contains-local probe: NOT contained → deploy
-                MagicMock(returncode=0, stdout=""),       # push ok
-                MagicMock(returncode=0, stdout=""),       # merge attempt 1 (no-op, exits 0)
-                MagicMock(returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"),  # worker HEAD lacks pushed SHA
-                MagicMock(returncode=0, stdout=""),       # merge attempt 2
-                MagicMock(returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"),  # worker HEAD lacks pushed SHA
-                MagicMock(returncode=0, stdout=""),       # merge attempt 3
-                MagicMock(returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"),  # worker HEAD lacks pushed SHA
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
+                MagicMock(returncode=0, stdout=""),  # push ok
+                MagicMock(returncode=0, stdout=""),  # merge attempt 1 (no-op, exits 0)
+                MagicMock(
+                    returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"
+                ),  # worker HEAD lacks pushed SHA
+                MagicMock(returncode=0, stdout=""),  # merge attempt 2
+                MagicMock(
+                    returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"
+                ),  # worker HEAD lacks pushed SHA
+                MagicMock(returncode=0, stdout=""),  # merge attempt 3
+                MagicMock(
+                    returncode=0, stdout="HEAD:bbb\nCONTAINS:0\n"
+                ),  # worker HEAD lacks pushed SHA
             ]
             with pytest.raises(RuntimeError, match="does not contain pushed SHA"):
                 _check_worker_sha()
@@ -609,6 +637,7 @@ class TestWorkerCheckout:
         with (
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+            patch("mtor.dispatch._ci_push_lock_held", return_value=False),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="abc123\n"),
@@ -636,6 +665,7 @@ class TestWorkerCheckout:
         with (
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+            patch("mtor.dispatch._ci_push_lock_held", return_value=False),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="abc123\n"),
@@ -662,6 +692,7 @@ class TestWorkerCheckout:
         with (
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch._worker_checkout_state", return_value=unhealthy),
+            patch("mtor.dispatch._ci_push_lock_held", return_value=False),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="abc123\n"),
@@ -743,6 +774,75 @@ class TestWorkerCheckout:
         assert "germline" in expanded
         assert plan["local_sha"] == "deadbeef"
         assert plan["in_sync"] is True
+
+
+def _detached_checkout():
+    """Checkout state as seen mid ci-push suite run: detached HEAD."""
+    return {
+        "ok": False,
+        "branch": "HEAD",
+        "origin": "https://github.com/vivesca/germline.git",
+        "dirty": False,
+        "status": "",
+        "detail": "worker checkout unhealthy: branch is 'HEAD', expected 'main'",
+    }
+
+
+class TestCiPushLockWait:
+    """Preflight must wait out an in-flight ci-push suite run, not hard-fail.
+
+    2026-07-04: two pulse-review dispatches failed with "branch is 'HEAD'"
+    purely because a ci-push suite run held /tmp/vivesca-ci-push.lock and had
+    the worker checkout detached; the operator had to poll by hand.
+    """
+
+    def test_dispatch_during_suite_run_waits_then_succeeds(self):
+        """Unhealthy + lock held, then lock released + healthy → no raise."""
+        from mtor.dispatch import _check_worker_checkout
+
+        with (
+            patch(
+                "mtor.dispatch._worker_checkout_state",
+                side_effect=[_detached_checkout(), _healthy_checkout()],
+            ),
+            patch("mtor.dispatch._ci_push_lock_held", side_effect=[True, False]),
+            patch("mtor.dispatch.time.sleep") as mock_sleep,
+        ):
+            _check_worker_checkout()
+        assert mock_sleep.called
+
+    def test_unhealthy_without_lock_fails_immediately(self):
+        """No ci-push run in flight → the hard fail is immediate, no waiting."""
+        from mtor.dispatch import _check_worker_checkout
+
+        with (
+            patch(
+                "mtor.dispatch._worker_checkout_state",
+                return_value=_detached_checkout(),
+            ),
+            patch("mtor.dispatch._ci_push_lock_held", return_value=False),
+            patch("mtor.dispatch.time.sleep") as mock_sleep,
+        ):
+            with pytest.raises(RuntimeError, match="worker checkout unhealthy"):
+                _check_worker_checkout()
+        assert not mock_sleep.called
+
+    def test_still_unhealthy_after_wait_raises_with_ci_push_hint(self):
+        """Lock never clears and checkout stays broken → clear actionable error."""
+        from mtor.dispatch import _check_worker_checkout
+
+        with (
+            patch(
+                "mtor.dispatch._worker_checkout_state",
+                return_value=_detached_checkout(),
+            ),
+            patch("mtor.dispatch._ci_push_lock_held", return_value=True),
+            patch("mtor.dispatch.CI_PUSH_WAIT_S", 1),
+            patch("mtor.dispatch.CI_PUSH_POLL_S", 0),
+            patch("mtor.dispatch.time.sleep"),
+        ):
+            with pytest.raises(RuntimeError, match="ci-push suite run"):
+                _check_worker_checkout()
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -225,6 +226,15 @@ _TARGET_REPO_OK: dict = {
     "detail": "",
 }
 
+# ci-push suite runs on the worker serialize under this flock. A legacy run
+# holds ~/germline detached/dirty for its ~15-minute duration; a dispatch
+# preflight that lands in that window would hard-fail even though it succeeds
+# minutes later. When the checkout looks unhealthy AND the lock is held, wait
+# (bounded) for the run to finish and re-check instead of failing outright.
+CI_PUSH_LOCK_PATH = "/tmp/vivesca-ci-push.lock"
+CI_PUSH_WAIT_S = int(os.environ.get("MTOR_CI_PUSH_WAIT_S", "900"))
+CI_PUSH_POLL_S = 15
+
 
 def _worker_checkout_state() -> dict:
     """Inspect worker ~/germline checkout hygiene via a single SSH call.
@@ -293,11 +303,57 @@ def _worker_checkout_state() -> dict:
     }
 
 
+def _ci_push_lock_held() -> bool:
+    """True when a ci-push suite run holds the runner flock on the worker.
+
+    `flock -n <lock> true` exits 1 when another process holds the lock and 0
+    when it acquires (creating the file if absent). Any other exit (ssh
+    unreachable, flock missing) is treated as not-held so the caller falls
+    through to the normal unhealthy-checkout error instead of waiting on a
+    signal it cannot read.
+    """
+    probe = subprocess.run(
+        ["ssh", WORKER_HOST, f"flock -n {shlex.quote(CI_PUSH_LOCK_PATH)} true"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return probe.returncode == 1
+
+
 def _check_worker_checkout() -> None:
-    """Raise RuntimeError if worker ~/germline checkout is unhealthy."""
+    """Raise RuntimeError if worker ~/germline checkout is unhealthy.
+
+    A ci-push suite run holding the runner flock can transiently detach or
+    dirty the checkout (branch 'HEAD', dirty mad2 baseline). Hard-failing there
+    forced operators to poll by hand (2026-07-04, pulse-review dispatches) —
+    instead, wait out the lock (bounded) and re-check once before failing.
+    """
     state = _worker_checkout_state()
-    if not state["ok"]:
-        raise RuntimeError(state["detail"])
+    if state["ok"]:
+        return
+    if CI_PUSH_WAIT_S > 0 and _ci_push_lock_held():
+        print(
+            "worker checkout busy: ci-push suite run in flight "
+            f"(holds {CI_PUSH_LOCK_PATH} on {WORKER_HOST}); "
+            f"waiting up to {CI_PUSH_WAIT_S}s for it to finish",
+            file=sys.stderr,
+        )
+        deadline = time.monotonic() + CI_PUSH_WAIT_S
+        while time.monotonic() < deadline:
+            time.sleep(CI_PUSH_POLL_S)
+            if not _ci_push_lock_held():
+                break
+        state = _worker_checkout_state()
+        if state["ok"]:
+            return
+        raise RuntimeError(
+            state["detail"]
+            + " (waited for an in-flight ci-push suite run; the checkout is "
+            "still unhealthy — if it is stuck detached, run on the worker: "
+            "git checkout -B main origin/main)"
+        )
+    raise RuntimeError(state["detail"])
 
 
 def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
