@@ -184,6 +184,32 @@ def _detect_repo(task: str, default: str) -> str:
     return default
 
 
+def _format_landing_banner(
+    repo_root: str,
+    work_dir: str,
+    branch_name: str,
+    worktree_path: str | None,
+    mode: str,
+    pre_sha: str | None,
+) -> str:
+    """Return a one-line operator banner describing where a dispatch will land.
+
+    Pure formatting so it can be unit-tested without a live Temporal/git
+    environment. Never raises on a missing field -- scout runs and missing
+    base SHAs degrade to literal markers rather than blowing up dispatch.
+    """
+    read_only = worktree_path is None or mode == "scout"
+    if read_only:
+        landing = "main (read-only scout)"
+    else:
+        landing = branch_name or "main (read-only scout)"
+    base = "unknown" if not pre_sha else pre_sha[:12]
+    return (
+        f"[translocase] landing target: {repo_root} @ {landing} "
+        f"(base {base}) [work_dir={work_dir}]"
+    )
+
+
 def _main_moved_off(work_dir: str, base_sha: str) -> bool:
     """True if the local ``main`` ref has advanced off the recorded base_sha.
 
