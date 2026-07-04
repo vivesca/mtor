@@ -230,6 +230,7 @@ class TranslationWorkflow:
                         }
                     ],
                     start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=_RETRY_POLICY,
                 )
                 result = {
                     **result,
