@@ -629,6 +629,21 @@ async def _heartbeat_stall_check(
                 return
 
 
+def _derive_output_tid(task_id_match, workflow_id: str) -> str:
+    """Derive the id used in the ribosome-outputs filename.
+
+    Priority: explicit `[t-XXXX]` task marker (stable across retries, used
+    for the cache-hit check) > workflow_id (unique per Temporal workflow,
+    so concurrent same-second completions never collide) > wall-clock+pid
+    as a last resort when neither is available.
+    """
+    if task_id_match:
+        return task_id_match.group(1)
+    if workflow_id:
+        return _re.sub(r"[^0-9a-zA-Z_-]", "_", workflow_id)
+    return f"{_time.strftime('%H%M%S')}-{os.getpid()}"
+
+
 @activity.defn
 async def translate(
     task: str,
@@ -1364,7 +1379,7 @@ async def translate(
             cost_info += line + "\n"
 
     task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
-    tid_str = task_id_match.group(1) if task_id_match else _time.strftime("%H%M%S")
+    tid_str = _derive_output_tid(task_id_match, workflow_id)
     out_path = ""
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
