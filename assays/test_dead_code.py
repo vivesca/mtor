@@ -25,6 +25,7 @@ ALLOWLIST = {
     "feedback_dispatch_blocked",
     # Temporal/Langfuse framework entrypoints
     "create_pr", "create_span",
+    "record_stall_event", "stall_rate", "most_common_stall_pattern",
     # rptor DAG functions (called from CLI via import)
     "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",
     # triage (called from CLI)

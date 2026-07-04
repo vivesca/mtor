@@ -106,3 +106,50 @@ def create_span(trace, name: str, **metadata) -> None:
     except Exception:
         pass
 
+
+def record_stall_event(
+    workflow_id: str,
+    pattern: str,
+    action_taken: str,
+    details: dict,
+    trace=None,
+) -> None:
+    """Record a stall event as a Langfuse span for observability.
+
+    Attaches to ``trace`` when given; otherwise creates a standalone
+    trace. Silent no-op if Langfuse is unavailable.
+    """
+    try:
+        if trace is None:
+            lf = get_langfuse()
+            if lf is None:
+                return
+            trace = lf.trace(name=f"stall-{workflow_id}")
+        trace.span(
+            name="stall-detected",
+            metadata={
+                "workflow_id": workflow_id,
+                "pattern": pattern,
+                "action": action_taken,
+                **details,
+            },
+        )
+    except Exception:
+        pass  # graceful no-op
+
+
+def stall_rate(window_hours: int = 24) -> float:
+    """Fraction of recent workflows that hit stalls.
+
+    Placeholder until Langfuse trace-history queries land: returns 0.0.
+    """
+    return 0.0
+
+
+def most_common_stall_pattern(window_hours: int = 24) -> str | None:
+    """Dominant stall pattern name from recent traces.
+
+    Placeholder until Langfuse trace-history queries land: returns None.
+    """
+    return None
+

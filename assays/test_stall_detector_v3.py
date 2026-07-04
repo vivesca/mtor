@@ -6,7 +6,7 @@ v3: emit stall events as Langfuse spans, query trace history for
 
 v3 adds observability — v2 detects, v3 records and learns.
 
-NOTE: stall_trace module is not yet in mtor/worker — tests are stubs pending migration.
+The guarded import below keeps collection alive if the module regresses.
 """
 
 from __future__ import annotations
