@@ -313,7 +313,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if skip:
         return True
 
-    worker_repo_dir = _worker_addressable_repo_path(repo) or "/home/vivesca/germline"
+    worker_repo_dir = _worker_addressable_repo_path(repo) or WORKER_GERMLINE_DIR
 
     local_cmd = ["git"]
     if repo:
@@ -342,7 +342,13 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if remote.returncode != 0:
         raise RuntimeError(f"worker git HEAD lookup failed: {remote.stderr.strip()}")
 
-    _check_worker_checkout()
+    # The germline hygiene gate applies only when the dispatch actually
+    # targets germline. Repo dispatches are covered by the stricter
+    # repo-aware _worker_target_repo_state gate, and coupling them to
+    # germline blocks on unrelated germline CI — ci-mad2 legitimately pins
+    # a clean detached HEAD at origin/main under flock (2026-07-04).
+    if worker_repo_dir == WORKER_GERMLINE_DIR:
+        _check_worker_checkout()
 
     if local.stdout.strip() == remote.stdout.strip():
         return True

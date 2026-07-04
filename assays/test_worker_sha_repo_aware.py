@@ -108,3 +108,44 @@ class TestWorkerShaRepoAware:
                 f"unaddressable repo did not fall back to germline: {cmd!r}"
             )
             assert "cd ''" not in cmd, f"worker probe used an empty cd target: {cmd!r}"
+
+
+class TestGermlineGateScoping:
+    """The germline checkout gate fires only for germline-targeted dispatches."""
+
+    def test_repo_dispatch_skips_germline_checkout_gate(self):
+        """repo=~/code/mtor must not block on germline checkout hygiene —
+        a clean detached germline (ci-mad2 CI) is irrelevant to repo targets."""
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout") as gate,
+        ):
+            mock_sp.run.side_effect = _in_sync_side_effect()
+            result = _check_worker_sha(repo="~/code/mtor")
+
+        assert result is True
+        gate.assert_not_called()
+
+    def test_germline_default_still_runs_checkout_gate(self):
+        """repo=None falls back to germline and keeps the hygiene gate."""
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout") as gate,
+        ):
+            mock_sp.run.side_effect = _in_sync_side_effect()
+            result = _check_worker_sha(repo=None)
+
+        assert result is True
+        gate.assert_called_once()
+
+    def test_germline_repo_path_still_runs_checkout_gate(self):
+        """repo=~/germline targets germline explicitly and keeps the gate."""
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch._check_worker_checkout") as gate,
+        ):
+            mock_sp.run.side_effect = _in_sync_side_effect()
+            result = _check_worker_sha(repo="~/germline")
+
+        assert result is True
+        gate.assert_called_once()
