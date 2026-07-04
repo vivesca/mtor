@@ -365,7 +365,9 @@ def _check_opencode_config_file(
 
 def _check_worker_opencode_config() -> dict:
     """Validate OpenCode config on the worker host without exposing secrets."""
-    if WORKER_HOST == "localhost":
+    from mtor.infra import _is_local_host
+
+    if _is_local_host(WORKER_HOST):
         return _check_opencode_config_file(source="worker")
     try:
         result = subprocess.run(
