@@ -40,7 +40,12 @@ from mtor import (
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
-from mtor.client import _get_client, workflow_execution_state
+from mtor.client import (
+    _get_client,
+    _pending_activity_records,
+    _pending_activity_timestamp,
+    workflow_execution_state,
+)
 from mtor.dedup import check_duplicate as _check_dedup
 from mtor.dedup import record_dispatch as _record_dispatch
 from mtor.dispatch import _dispatch_prompt
@@ -282,8 +287,8 @@ def _failure_text(value: Any) -> str:
 def _pending_activity_details(desc: Any) -> list[dict[str, Any]]:
     """Extract compact pending activity details from Temporal describe output."""
     details: list[dict[str, Any]] = []
-    for activity in getattr(desc, "pending_activities", None) or []:
-        heartbeat_time = getattr(activity, "last_heartbeat_time", None)
+    for activity in _pending_activity_records(desc):
+        heartbeat_time = _pending_activity_timestamp(activity, "last_heartbeat_time")
         activity_type = getattr(activity, "activity_type", None)
         if not isinstance(activity_type, str):
             activity_type = getattr(activity_type, "name", None) or str(activity_type or "")
