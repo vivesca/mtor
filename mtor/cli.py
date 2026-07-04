@@ -1476,6 +1476,7 @@ def _compact_dossier_payload(
             "output_path": output_path,
         },
         "dossier_present": bool(dossier),
+        **_pr_result_fields(task_result),
     }
 
 
