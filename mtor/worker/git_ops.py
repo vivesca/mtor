@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl as _fcntl
+import json as _json
 import os
 import re as _re
 import subprocess as _subprocess
@@ -19,6 +20,7 @@ _AUTO_COMMIT_DENYLIST = (
     "loci/ribosome-outputs/",
     "loci/ribosome-runs.jsonl",
 )
+_CHECKPOINT_DIR = Path.home() / ".local" / "share" / "vivesca" / "ribosome-checkpoints"
 
 _GIT_ENV_ALLOWLIST = {
     "HOME",
@@ -74,6 +76,7 @@ def _status_paths_for_auto_commit(status_output: str) -> list[str]:
             paths.append(normalized)
     return paths
 
+
 def _cleanup_worktree(work_dir: str) -> None:
     """Best-effort cleanup for failed ribosome worktree runs."""
     root = Path(work_dir)
@@ -88,7 +91,11 @@ def _cleanup_worktree(work_dir: str) -> None:
         state_path = git_dir / state_name
         if not state_path.exists():
             continue
-        command = ["git", "rebase", "--abort"] if "rebase" in state_name else ["git", "merge", "--abort"]
+        command = (
+            ["git", "rebase", "--abort"]
+            if "rebase" in state_name
+            else ["git", "merge", "--abort"]
+        )
         with contextlib.suppress(Exception):
             _run_worker_command(command, capture_output=True, cwd=work_dir, timeout=10)
         break
@@ -120,7 +127,9 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     except (OSError, _subprocess.SubprocessError):
         branch_name = ""
     if branch_name in {"main", "master"}:
-        print("[auto-commit] WARNING refusing to commit on main/master", file=sys.stderr)
+        print(
+            "[auto-commit] WARNING refusing to commit on main/master", file=sys.stderr
+        )
         return False
 
     run = _run_worker_command
@@ -166,6 +175,168 @@ def _auto_commit(repo_dir: str, workflow_id: str | None = None) -> bool:
     except Exception as exc:
         print(f"[auto-commit] failed for {wf_label}: {exc}", file=sys.stderr)
         return False
+
+
+def _checkpoint_worktree(
+    work_dir: str,
+    workflow_id: str,
+    *,
+    task: str = "",
+    provider: str = "",
+    exit_code: int | None = None,
+) -> str | None:
+    """Stash and record dirty work before a worktree is reset or removed.
+
+    The ribosome wrapper's own checkpoint only runs on clean nonzero exits —
+    when the wrapper dies by signal (SIGKILL, OOM, collateral pkill) this is
+    the only salvage path before _cleanup_worktree or a force-remove destroys
+    the tree (2026-07-04: exit_code=-9 lost three uncommitted test files).
+    Never raises; returns the stash sha (or patch path) on success, None when
+    there was nothing to save.
+    """
+    try:
+        root = Path(work_dir)
+        if not work_dir or not root.exists():
+            return None
+        # A killed git process can leave a stale index.lock that would block
+        # everything below. Worktree .git is a file — resolve the real dir.
+        gd = _run_worker_command(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if gd.returncode == 0 and gd.stdout.strip():
+            git_dir = Path(gd.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = root / git_dir
+            with contextlib.suppress(OSError):
+                (git_dir / "index.lock").unlink(missing_ok=True)
+
+        status = _run_worker_command(
+            ["git", "status", "--porcelain"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if status.returncode != 0 or not status.stdout.strip():
+            return None
+        paths = _status_paths_for_auto_commit(status.stdout)
+        if not paths:
+            return None
+
+        wf_label = _re.sub(r"[^A-Za-z0-9._-]", "_", workflow_id or "unknown")
+        # Stage explicit paths so untracked files are captured by the stash.
+        with contextlib.suppress(Exception):
+            _run_worker_command(["git", "add", "--", *paths], cwd=work_dir, timeout=30)
+
+        stash_ref = ""
+        stash = _run_worker_command(
+            ["git", "stash", "create", f"ribosome checkpoint {wf_label}"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if stash.returncode == 0:
+            stash_ref = stash.stdout.strip()
+        if stash_ref:
+            # Anchor the dangling stash commit in the shared object store so
+            # gc cannot reap it after the worktree is removed.
+            with contextlib.suppress(Exception):
+                _run_worker_command(
+                    [
+                        "git",
+                        "update-ref",
+                        f"refs/ribosome-checkpoints/{wf_label}",
+                        stash_ref,
+                    ],
+                    cwd=work_dir,
+                    timeout=10,
+                )
+
+        _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        # Belt and braces: a plain patch survives even without the object store.
+        patch_file = ""
+        patch = _run_worker_command(
+            ["git", "diff", "HEAD"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if patch.returncode == 0 and patch.stdout.strip():
+            patch_path = _CHECKPOINT_DIR / f"{wf_label}.patch"
+            patch_path.write_text(patch.stdout)
+            patch_file = str(patch_path)
+
+        if not stash_ref and not patch_file:
+            return None
+
+        stat = _run_worker_command(
+            ["git", "diff", "--stat", "HEAD"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        stat_tail = (
+            stat.stdout.strip().splitlines()[-1]
+            if stat.returncode == 0 and stat.stdout.strip()
+            else ""
+        )
+        entry = {
+            "workflow_id": workflow_id or "unknown",
+            "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "task": task[:100],
+            "provider": provider,
+            "exit_code": exit_code,
+            "stash_ref": stash_ref,
+            "diff_stat": stat_tail,
+            "patch_file": patch_file,
+            "source": "translocase",
+        }
+        (_CHECKPOINT_DIR / f"{wf_label}.json").write_text(_json.dumps(entry) + "\n")
+        print(
+            f"[checkpoint] saved uncommitted work for {wf_label}: "
+            f"stash={stash_ref[:12] if stash_ref else 'none'} patch={patch_file or 'none'}",
+            file=sys.stderr,
+        )
+        return stash_ref or patch_file
+    except Exception as exc:
+        print(f"[checkpoint] failed for {workflow_id}: {exc}", file=sys.stderr)
+        return None
+
+
+def _main_checkout_state(repo_root: str) -> dict:
+    """Snapshot HEAD and dirty paths of the main checkout for confinement checks."""
+    state: dict = {"head": "", "dirty_paths": []}
+    try:
+        head = _run_worker_command(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if head.returncode == 0:
+            state["head"] = head.stdout.strip()
+        status = _run_worker_command(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if status.returncode == 0:
+            state["dirty_paths"] = [
+                line[3:].strip() for line in status.stdout.splitlines() if len(line) > 3
+            ]
+    except Exception:
+        pass
+    return state
 
 
 def _detect_repo(task: str, default: str) -> str:
@@ -222,7 +393,10 @@ def _main_moved_off(work_dir: str, base_sha: str) -> bool:
     try:
         r = _run_worker_command(
             ["git", "rev-parse", "--verify", "--quiet", "main"],
-            capture_output=True, text=True, timeout=5, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=work_dir,
         )
     except Exception:
         return False
@@ -247,7 +421,13 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
     See ``finding_chaperone_false_positive_parallel_commit_base_drift``.
     """
     work_dir = cwd or str(Path.home() / "germline")
-    empty_result = {"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""}
+    empty_result = {
+        "stat": "",
+        "numstat": "",
+        "commits": [],
+        "commit_count": 0,
+        "patch": "",
+    }
     try:
         diff_range = "main..HEAD"
         fallback = False
@@ -260,13 +440,21 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
 
         stat = _run_worker_command(
             ["git", "diff", "--stat", diff_range],
-            capture_output=True, text=True, timeout=10, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=work_dir,
         )
         commits_r = _run_worker_command(
             ["git", "log", "--oneline", diff_range],
-            capture_output=True, text=True, timeout=10, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=work_dir,
         )
-        commit_lines = [ln.strip() for ln in commits_r.stdout.strip().splitlines() if ln.strip()]
+        commit_lines = [
+            ln.strip() for ln in commits_r.stdout.strip().splitlines() if ln.strip()
+        ]
 
         # Fallback: main..HEAD is empty but base_sha was recorded before execution
         # (main never diverged — e.g. main ref missing — but HEAD still has work).
@@ -274,13 +462,23 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
             fb_range = f"{base_sha}..HEAD"
             fb_stat = _run_worker_command(
                 ["git", "diff", "--stat", fb_range],
-                capture_output=True, text=True, timeout=10, cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=work_dir,
             )
             fb_commits = _run_worker_command(
                 ["git", "log", "--oneline", fb_range],
-                capture_output=True, text=True, timeout=10, cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=work_dir,
             )
-            fb_lines = [ln.strip() for ln in fb_commits.stdout.strip().splitlines() if ln.strip()]
+            fb_lines = [
+                ln.strip()
+                for ln in fb_commits.stdout.strip().splitlines()
+                if ln.strip()
+            ]
             if fb_lines or fb_stat.stdout.strip():
                 diff_range = fb_range
                 stat = fb_stat
@@ -290,11 +488,17 @@ def _git_snapshot(cwd: str | None = None, *, base_sha: str | None = None) -> dic
 
         numstat = _run_worker_command(
             ["git", "diff", "--numstat", diff_range],
-            capture_output=True, text=True, timeout=10, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=work_dir,
         )
         patch_r = _run_worker_command(
             ["git", "diff", diff_range],
-            capture_output=True, text=True, timeout=10, cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=work_dir,
         )
         result = {
             "stat": stat.stdout[:2000],
@@ -330,7 +534,10 @@ def _git_pull_ff_only(repo_root: str) -> None:
                 cwd=repo_root,
             )
             if fetch.returncode != 0:
-                print(f"WARNING: git fetch origin main failed: {fetch.stderr.strip()}", file=sys.stderr)
+                print(
+                    f"WARNING: git fetch origin main failed: {fetch.stderr.strip()}",
+                    file=sys.stderr,
+                )
             return
         result = _run_worker_command(
             ["git", "pull", "--ff-only"],
@@ -340,7 +547,10 @@ def _git_pull_ff_only(repo_root: str) -> None:
             cwd=repo_root,
         )
         if result.returncode != 0:
-            print(f"WARNING: git pull --ff-only failed: {result.stderr.strip()}", file=sys.stderr)
+            print(
+                f"WARNING: git pull --ff-only failed: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
     except _subprocess.TimeoutExpired:
         print("WARNING: git pull --ff-only timed out", file=sys.stderr)
     except Exception as exc:
@@ -446,7 +656,10 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
             cwd=repo_root,
         )
         if push.returncode == 0:
-            print(f"[merge] pushed branch {branch_name} to origin for review", file=sys.stderr)
+            print(
+                f"[merge] pushed branch {branch_name} to origin for review",
+                file=sys.stderr,
+            )
             # Don't delete branch — CC will merge and clean up
             return True
 
@@ -497,13 +710,16 @@ def _detect_prior_commits(
             timeout=10,
             cwd=repo_root,
         )
-        return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+        return [
+            line.strip() for line in result.stdout.strip().splitlines() if line.strip()
+        ]
     except Exception:
         return []
 
 
-
-def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, body: str | None = None) -> dict:
+def _create_pr_impl(
+    repo_root: str, branch_name: str, title: str | None = None, body: str | None = None
+) -> dict:
     """Push branch to remote and create a GitHub PR.
 
     Returns dict with:
@@ -554,11 +770,17 @@ def _create_pr_impl(repo_root: str, branch_name: str, title: str | None = None, 
 
     # Create PR via gh CLI
     pr_cmd = [
-        "gh", "pr", "create",
-        "--head", branch_name,
-        "--base", "main",
-        "--title", pr_title,
-        "--body", pr_body,
+        "gh",
+        "pr",
+        "create",
+        "--head",
+        branch_name,
+        "--base",
+        "main",
+        "--title",
+        pr_title,
+        "--body",
+        pr_body,
     ]
     pr_result = _run_worker_command(
         pr_cmd,
@@ -607,6 +829,9 @@ def _gc_worktrees(repo_root: str) -> None:
         except OSError:
             continue
         print(f"[gc] removing orphaned worktree: {entry}", file=sys.stderr)
+        # An orphaned worktree can hold the only copy of work whose harness
+        # died by signal — salvage before the force-remove destroys it.
+        _checkpoint_worktree(wt_path, entry, task="gc: orphaned worktree")
         with contextlib.suppress(Exception):
             _run_worker_command(
                 ["git", "worktree", "remove", "--force", wt_path],
