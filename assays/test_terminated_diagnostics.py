@@ -234,11 +234,15 @@ def test_running_trace_with_no_pending_activity_is_stale():
     payload = {
         "operator_state": "running",
         "pending_activities": [],
-        "execution_state": {"execution_state": "queued"},
+        "execution_state": {
+            "execution_state": "executing",
+            "source": "log-cache",
+            "active_log_count": 1,
+        },
         "active_logs": [{"filename": "20260602-workflow-abc.txt"}],
     }
 
     out = cli._trace_diagnosis(payload)
 
-    assert "stale" in out.lower()
-    assert "no activity" in out.lower()
+    assert "log-cache" in out.lower()
+    assert "no pending-activity heartbeat" in out.lower()
