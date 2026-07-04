@@ -813,6 +813,37 @@ def _create_pr_impl(
     }
 
 
+def _worktree_has_live_process(wt_path: str, proc_root: Path = Path("/proc")) -> bool:
+    """True if any process on this host has its cwd inside *wt_path*.
+
+    Checked via /proc/*/cwd on the Linux ganglion host. Falls back to
+    ``lsof +D`` when *proc_root* does not exist (e.g. local dev/test on
+    macOS, or when a caller injects a fake path in tests).
+    """
+    real_wt = os.path.realpath(wt_path)
+    if proc_root.is_dir():
+        for pid_dir in proc_root.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                cwd = os.readlink(pid_dir / "cwd")
+            except OSError:
+                continue
+            if cwd == real_wt or cwd.startswith(real_wt + os.sep):
+                return True
+        return False
+    try:
+        result = _run_worker_command(
+            ["lsof", "+D", real_wt],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
 def _gc_worktrees(repo_root: str) -> None:
     """Remove orphaned ribosome worktrees older than 2 hours."""
     worktree_base = os.path.join(repo_root, ".worktrees")
@@ -827,6 +858,12 @@ def _gc_worktrees(repo_root: str) -> None:
             if age_seconds < 7200:
                 continue
         except OSError:
+            continue
+        if _worktree_has_live_process(wt_path):
+            print(
+                f"[gc] skipping worktree with live process: {entry}",
+                file=sys.stderr,
+            )
             continue
         print(f"[gc] removing orphaned worktree: {entry}", file=sys.stderr)
         # An orphaned worktree can hold the only copy of work whose harness
