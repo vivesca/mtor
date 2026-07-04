@@ -138,6 +138,23 @@ def _normalize_task_path(path: str) -> str:
     return path
 
 
+_NEGATION_SPAN = _re.compile(
+    r"(?:do\s+not|don'?t|never|avoid|must\s+not|should\s+not|without)\s+"
+    r"(?:touch(?:ing)?|modif(?:y|ying)|edit(?:ing)?|chang(?:e|ing)|updat(?:e|ing)|"
+    r"creat(?:e|ing)|delet(?:e|ing)|remov(?:e|ing)|rewrit(?:e|ing)|alter(?:ing)?)"
+    r"(?:[^.\n;]|\.(?!\s|$))*",
+    _re.IGNORECASE,
+)
+
+
+def _negated_task_paths(task: str) -> set[str]:
+    """Paths mentioned only as prohibitions ("do not touch X") in the task."""
+    negated: set[str] = set()
+    for span in _NEGATION_SPAN.findall(task):
+        negated |= _task_file_paths(span)
+    return negated
+
+
 def _detected_test_commands(output: str) -> list[str]:
     commands: list[str] = []
     for match in _TEST_COMMAND.findall(output):
@@ -397,12 +414,17 @@ async def chaperone(result: dict) -> dict:
     # Extract ALL file paths mentioned in the task and check if they appear in the diff.
     # Catches "task mentions dispatch.py but diff only touches cli.py" mismatches.
     task_files = _task_file_paths(task)
+    negated_task_paths = {
+        _normalize_task_path(path) for path in _negated_task_paths(task)
+    }
     missing_requested_paths: list[str] = []
     if task_files and exit_code == 0 and post_stat_text:
         diff_files = set(changed_paths)
 
         for task_file in task_files:
             norm = _normalize_task_path(task_file)
+            if norm in negated_task_paths:
+                continue
             if (
                 norm
                 # Path-segment match, not unbounded substring: requested
