@@ -73,7 +73,12 @@ from mtor.triage import (
 )
 from mtor.tree import tree
 from mtor.spec import DEFAULT_SPEC_DIR, scaffold_spec, update_spec_status, validate_spec
-from mtor.infra import check_health as _check_health, clean as _clean, deploy as _deploy
+from mtor.infra import (
+    check_health as _check_health,
+    clean as _clean,
+    deploy as _deploy,
+    restart_worker,
+)
 from mtor.watch import (
     freeze as _create_freeze,
     is_frozen as _is_frozen,
@@ -3044,17 +3049,13 @@ def deploy() -> None:
 
     # Step 2: restart worker — only after confirming it is on the pushed SHA.
     print("[deploy] restarting mtor-worker...", file=sys.stderr)
-    restart = subprocess.run(
-        ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if restart.returncode != 0:
+    try:
+        restart_worker()
+    except RuntimeError as exc:
         sys.exit(
             _err(
                 "mtor deploy",
-                f"Worker restart failed: {restart.stderr.strip()[:200]}",
+                str(exc),
                 "RESTART_FAILED",
                 f"SSH to {WORKER_HOST} and check: systemctl --user status mtor-worker",
                 exit_code=1,

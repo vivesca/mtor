@@ -16,7 +16,12 @@ import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.api.enums.v1 import TimeoutType
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import (
+    CancelledError as TemporalCancelledError,
+    TimeoutError as TemporalTimeoutError,
+)
 
 with workflow.unsafe.imports_passed_through():
     from mtor.worker.translocase import (
@@ -35,8 +40,52 @@ _RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(minutes=5),
 )
 
+# Retry policy v2 — drain-aware. With the worker now draining on SIGTERM, an
+# attempt killed by a worker restart re-raises and is retried on the restarted
+# worker, and each retry runs in a fresh worktree with prior-commit detection,
+# so retries are cheaper and safer than when maximum_attempts=2 was chosen.
+_RETRY_POLICY_V2_MUTATING = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=5),
+)
+_RETRY_POLICY_V2_READONLY = RetryPolicy(
+    maximum_attempts=4,
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=5),
+)
+
 # Review has no retries — it's local and fast
 _REVIEW_RETRY = RetryPolicy(maximum_attempts=1)
+
+
+def _translate_retry_policy(dispatch_mode: str, use_v2: bool) -> RetryPolicy:
+    """Pick the translate retry policy. Read-only modes are safely retriable."""
+    if not use_v2:
+        return _RETRY_POLICY
+    if dispatch_mode in ("scout", "research"):
+        return _RETRY_POLICY_V2_READONLY
+    return _RETRY_POLICY_V2_MUTATING
+
+
+def _failure_cause_flag(cause: BaseException | None) -> str:
+    """Classify an activity failure cause for triage. Empty string if unknown."""
+    if isinstance(cause, TemporalTimeoutError):
+        _t = getattr(cause, "type", None)
+        try:
+            _t_name = (
+                TimeoutType.Name(_t).removeprefix("TIMEOUT_TYPE_").lower()
+                if _t is not None
+                else "unknown"
+            )
+        except ValueError:
+            _t_name = "unknown"
+        return "cause_timeout_" + _t_name
+    if isinstance(cause, TemporalCancelledError):
+        return "cause_cancelled"
+    return ""
 
 
 def _summarize_workflow_result(result: dict) -> dict:
@@ -94,6 +143,7 @@ class TranslationWorkflow:
 
         # #3: Version guard — new code paths gated behind patched()
         use_review_v2 = workflow.patched("review-v2-slim-payload")
+        use_retry_v2 = workflow.patched("translate-retry-v2")
 
         # Crashed-worker detection: translocase heartbeats every 30s and the
         # SDK throttles heartbeat RPCs to at most every 60s, so 3m is safe.
@@ -110,7 +160,7 @@ class TranslationWorkflow:
                 args=[task, provider, dispatch_mode, repo, harness],
                 start_to_close_timeout=timedelta(hours=2),
                 heartbeat_timeout=heartbeat_timeout,
-                retry_policy=_RETRY_POLICY,
+                retry_policy=_translate_retry_policy(dispatch_mode, use_retry_v2),
             )
             # SRP defer: if activity returned deferred, wait for approval signal
             if result.get("deferred"):
@@ -161,9 +211,11 @@ class TranslationWorkflow:
                 "stdout": "",
                 "stderr": str(exc)[:2000],
             }
+            cause_flag = _failure_cause_flag(getattr(exc, "cause", None))
+            flags = ["activity_failed"] + ([cause_flag] if cause_flag else [])
             review = {
                 "approved": False,
-                "flags": ["activity_failed"],
+                "flags": flags,
                 "verdict": "rejected",
             }
 

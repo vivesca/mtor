@@ -6,6 +6,7 @@ import os
 import socket
 import subprocess
 import shlex
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -560,6 +561,54 @@ class DeployResult:
         return {"steps": self.steps, "healthy": self.healthy, "error": self.error}
 
 
+def restart_worker(host: str | None = None) -> None:
+    """Restart mtor-worker on *host*, tolerating the SIGTERM drain window.
+
+    `systemctl --user restart mtor-worker` can block for up to ~10 minutes when
+    a ribosome task is in flight, because the worker now drains on SIGTERM
+    (graceful_shutdown_timeout 540s + systemd stop timeout 630s). The previous
+    call sites used timeout=15, which raised subprocess.TimeoutExpired mid-drain
+    and crashed the caller even though the restart itself completed.
+    """
+    host = host or WORKER_HOST
+
+    # Busy pre-check: a positive count explains why the restart will block.
+    try:
+        probe = subprocess.run(
+            ["ssh", host, "pgrep -cf 'ribosome --provider'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        count = 0
+        if probe.returncode == 0:
+            count = int(probe.stdout.strip() or "0")
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        count = 0
+    if count > 0:
+        print(
+            f"[restart] {count} ribosome task(s) in flight; "
+            "worker drains up to 540s before restarting",
+            file=sys.stderr,
+        )
+
+    # 700s covers the 630s systemd stop timeout plus margin.
+    try:
+        result = subprocess.run(
+            ["ssh", host, "systemctl --user restart mtor-worker"],
+            capture_output=True,
+            text=True,
+            timeout=700,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "worker restart timed out after 700s (drain window exceeded); "
+            "check: systemctl --user status mtor-worker"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"worker restart failed: {result.stderr.strip()[:200]}")
+
+
 def deploy(
     *,
     worker_host: str | None = None,
@@ -642,26 +691,15 @@ def deploy(
     # stop (up to TimeoutStopSec while the worker drains), so the timeout
     # must exceed the drain window.
     try:
-        restart = subprocess.run(
-            ["ssh", host, "systemctl --user restart mtor-worker"],
-            capture_output=True,
-            text=True,
-            timeout=drain_timeout + 90,
-        )
-    except subprocess.TimeoutExpired:
+        restart_worker(host)
+    except RuntimeError as exc:
         steps.append({"step": "restart", "ok": False})
         return DeployResult(
             steps=steps,
             healthy=False,
-            error="Worker restart timed out",
+            error=str(exc),
         )
-    steps.append({"step": "restart", "ok": restart.returncode == 0})
-    if restart.returncode != 0:
-        return DeployResult(
-            steps=steps,
-            healthy=False,
-            error=f"Worker restart failed: {restart.stderr.strip()[:200]}",
-        )
+    steps.append({"step": "restart", "ok": True})
 
     # Step 6: let restart settle, then remove late orphan roots twice before health.
     time.sleep(3)
