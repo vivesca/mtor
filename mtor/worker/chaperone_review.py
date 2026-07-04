@@ -127,7 +127,7 @@ def _changed_paths_from_stat(stat_text: str) -> list[str]:
 
 def _task_file_paths(task: str) -> set[str]:
     """Extract likely file paths mentioned in task text."""
-    paths = set(_re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)", task))
+    paths = set(_re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)(?!\w|\.\w)", task))
     return {path for path in paths if not path.startswith("http") and len(path) > 4}
 
 
