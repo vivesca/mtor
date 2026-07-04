@@ -37,7 +37,7 @@ from mtor.worker.provider import (
     select_provider,
     update_health,
 )
-from mtor.worker.stall_trace import create_task_trace, finalize_trace
+from mtor.worker.stall_trace import create_task_trace, finalize_trace, record_stall_event
 from mtor.worker.chaperone_review import chaperone
 from mtor.worker.git_ops import (
     _auto_commit,
@@ -416,6 +416,7 @@ async def _heartbeat_stall_check(
     stdout_counter: list[int] | None = None,
     stderr_counter: list[int] | None = None,
     workflow_id: str = "",
+    trace=None,
 ) -> None:
     """Dual-signal stall detection: git diff hash + stdout byte growth.
 
@@ -513,6 +514,7 @@ async def _heartbeat_stall_check(
                             tick=tick,
                             reason="no_output_timeout",
                         )
+                        record_stall_event(workflow_id, "no_output_timeout", "kill", {"tick": tick, "no_output_ticks": no_output_ticks, "provider": provider}, trace=trace)
                 print(
                     f"[stall-detect] scout/research no-output timeout at tick {tick} "
                     f"({no_output_ticks} no-output ticks, ~{no_output_ticks * 30 // 60}min), "
@@ -553,6 +555,7 @@ async def _heartbeat_stall_check(
                             tick=tick,
                             reason="empty_diff_timeout",
                         )
+                        record_stall_event(workflow_id, "empty_diff_timeout", "kill", {"tick": tick, "empty_ticks": empty_ticks, "provider": provider}, trace=trace)
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
@@ -609,6 +612,7 @@ async def _heartbeat_stall_check(
                         tick=tick,
                         reason=f"{stall_type}_diff",
                     )
+                    record_stall_event(workflow_id, f"{stall_type}_diff", "kill" if warnings_sent >= 2 else "warn", {"tick": tick, "warnings_sent": warnings_sent + 1, "provider": provider}, trace=trace)
             warnings_sent += 1
             print(
                 f"[stall-detect] {stall_type} at tick {tick} "
@@ -914,6 +918,7 @@ async def translate(
                 stdout_counter=stdout_counter,
                 stderr_counter=stderr_counter,
                 workflow_id=workflow_id,
+                trace=_trace,
             )
         )
         try:
