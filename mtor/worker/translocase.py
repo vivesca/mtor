@@ -41,6 +41,7 @@ from mtor.worker.stall_trace import create_task_trace, finalize_trace
 from mtor.worker.chaperone_review import chaperone
 from mtor.worker.git_ops import (
     _auto_commit,
+    _checkpoint_worktree,
     _cleanup_worktree,
     _create_pr_impl,
     _create_worktree,
@@ -50,6 +51,7 @@ from mtor.worker.git_ops import (
     _gc_worktrees,
     _git_pull_ff_only,
     _git_snapshot,
+    _main_checkout_state,
 )
 
 TASK_QUEUE = "translation-queue"
@@ -778,6 +780,13 @@ async def translate(
             file=sys.stderr,
         )
     pre_diff = await asyncio.to_thread(_git_snapshot, work_dir)
+    # Confinement guard: in worktree mode the main checkout must stay
+    # untouched — record its state so post-run mutation is detectable
+    # (2026-07-04: a ghost opencode kept editing the main checkout).
+    main_state = None
+    if worktree_path:
+        main_state = await asyncio.to_thread(_main_checkout_state, repo_root)
+    main_checkout_mutated = False
 
     # SRP: detect [supervised] marker in task string
     is_supervised = "[supervised]" in task
@@ -977,12 +986,44 @@ async def translate(
             )
 
         rc = proc.returncode or 0
+        if main_state is not None:
+            post_state = await asyncio.to_thread(_main_checkout_state, repo_root)
+            head_moved = (
+                bool(main_state["head"]) and post_state["head"] != main_state["head"]
+            )
+            new_dirt = sorted(
+                set(post_state["dirty_paths"]) - set(main_state["dirty_paths"])
+            )
+            if head_moved or new_dirt:
+                main_checkout_mutated = True
+                _log_event(
+                    workflow_id,
+                    "main_checkout_mutated",
+                    head_before=main_state["head"],
+                    head_after=post_state["head"],
+                    new_dirty_paths=new_dirt[:20],
+                )
+                print(
+                    f"[guard] main checkout {repo_root} mutated during {workflow_id}: "
+                    f"head_moved={head_moved} new_dirty={new_dirt[:5]}",
+                    file=sys.stderr,
+                )
         auto_committed = False
         # Preserve recoverable edits BEFORE failed-run cleanup resets the worktree.
         # Read-only modes (scout/research) are protected by _mode_allows_auto_commit.
         if work_dir and _mode_allows_auto_commit(mode):
             auto_committed = _auto_commit(str(work_dir), wf_id)
         if rc != 0 and worktree_path and not auto_committed:
+            # Salvage before _cleanup_worktree resets the tree. On signal
+            # deaths (rc < 0: SIGKILL, OOM, collateral pkill) the wrapper's
+            # own stash-checkpoint never ran — this is the only salvage path.
+            _checkpoint_worktree(
+                str(worktree_path),
+                workflow_id or wf_id,
+                task=task,
+                provider=resolved_provider,
+                exit_code=rc,
+            )
             _cleanup_worktree(str(worktree_path))
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
@@ -1225,6 +1266,7 @@ async def translate(
                     "mode": mode,
                     "verdict": "early_exit_clean",
                     "post_head": _post_head,
+                    "main_checkout_mutated": main_checkout_mutated,
                 }
                 if _verifier_cmd:
                     _r["verification"] = {
@@ -1343,6 +1385,7 @@ async def translate(
         "branch_name": branch_name if worktree_path else "",
         "merged": merged,
         "mode": mode,
+        "main_checkout_mutated": main_checkout_mutated,
     }
     finalize_trace(_trace, _r)
     return _r
