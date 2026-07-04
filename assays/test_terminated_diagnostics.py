@@ -6,6 +6,7 @@ returns "No diagnostic information available". These tests assert the new
 `_terminated_diagnostics()` helper surfaces the ribosome stderr tail and a
 detected kill-reason marker from the log file on disk.
 """
+
 from __future__ import annotations
 
 import io
@@ -89,8 +90,10 @@ def test_terminated_diagnosis_string_includes_kill_reason():
 
 def test_reap_worker_processes_success_uses_targeted_ssh():
     payload = {
-        "terminated_pids": [123],
-        "killed_pids": [],
+        "recorded_pids": [123],
+        "matched_pids": [123, 124],
+        "terminated_pgids": [123],
+        "killed_pgids": [],
         "remaining_pids": [],
     }
     completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
@@ -101,8 +104,11 @@ def test_reap_worker_processes_success_uses_targeted_ssh():
     assert out == {
         "attempted": True,
         "ok": True,
-        "terminated_pids": [123],
-        "killed_pids": [],
+        "verified": True,
+        "recorded_pids": [123],
+        "matched_pids": [123, 124],
+        "terminated_pgids": [123],
+        "killed_pgids": [],
         "remaining_pids": [],
     }
     cmd = run.call_args.args[0]
@@ -121,16 +127,65 @@ def test_reap_worker_processes_failure_returns_error():
 
     assert out["attempted"] is True
     assert out["ok"] is False
-    assert out["terminated_pids"] == []
+    assert out["verified"] is False
+    assert out["matched_pids"] == []
     assert "connection refused" in out["error"]
+
+
+def test_reap_worker_processes_reports_ghosts_as_not_ok():
+    """Survivors in the rescan mean the ghost is still alive — never report ok."""
+    payload = {
+        "recorded_pids": [123],
+        "matched_pids": [123, 124],
+        "terminated_pgids": [123],
+        "killed_pgids": [123],
+        "remaining_pids": [124],
+    }
+    completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    with patch("mtor.cli.subprocess.run", return_value=completed):
+        out = cli._reap_worker_processes("workflow-abc")
+
+    assert out["ok"] is False
+    assert out["verified"] is True
+    assert out["remaining_pids"] == [124]
+
+
+def test_reap_script_kills_process_groups_from_recorded_pids():
+    """The remote script resolves pgids from the worker's subprocess_started
+    log and kills whole groups — the `timeout NNN opencode run` ghost pair
+    carries neither the workflow id nor 'claude' in its args."""
+    assert "subprocess_started" in cli._REAP_SCRIPT
+    assert "killpg" in cli._REAP_SCRIPT
+    assert "opencode" in cli._REAP_SCRIPT
+    assert "pgid" in cli._REAP_SCRIPT
+
+
+def test_reap_script_runs_and_reports_empty_for_unknown_workflow():
+    """The embedded script is valid python and reports empty results for a
+    workflow with no recorded pids and no matching processes."""
+    import subprocess as _sp
+
+    result = _sp.run(
+        [sys.executable, "-c", cli._REAP_SCRIPT, "no-such-workflow-1f0e2d3c"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout.strip())
+    assert parsed["matched_pids"] == []
+    assert parsed["remaining_pids"] == []
 
 
 def test_status_terminated_surfaces_diagnostics_fallback(tmp_path: Path):
     wf_id = "ribosome-terminated-1"
-    _write_log(tmp_path, wf_id, "ribosome: working...\n[wall-limit] aborting at 28m cap\n")
+    _write_log(
+        tmp_path, wf_id, "ribosome: working...\n[wall-limit] aborting at 28m cap\n"
+    )
     client = _terminated_client()
-    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
-        cli, "_get_client", return_value=(client, None)
+    with (
+        patch.object(cli, "OUTPUTS_DIR", str(tmp_path)),
+        patch.object(cli, "_get_client", return_value=(client, None)),
     ):
         out = _run_status(wf_id)
     data = json.loads(out)
@@ -151,8 +206,9 @@ def test_status_terminated_short_includes_kill_reason_without_tail(tmp_path: Pat
         "ribosome: working...\n" + "noise line\n" * 50 + "[oom] killed\n",
     )
     client = _terminated_client()
-    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
-        cli, "_get_client", return_value=(client, None)
+    with (
+        patch.object(cli, "OUTPUTS_DIR", str(tmp_path)),
+        patch.object(cli, "_get_client", return_value=(client, None)),
     ):
         out = _run_status(wf_id, short=True)
     assert "oom" in out.lower()
@@ -163,8 +219,9 @@ def test_status_terminated_short_includes_kill_reason_without_tail(tmp_path: Pat
 
 def test_status_terminated_no_log_keeps_default_reason(tmp_path: Path):
     client = _terminated_client()
-    with patch.object(cli, "OUTPUTS_DIR", str(tmp_path)), patch.object(
-        cli, "_get_client", return_value=(client, None)
+    with (
+        patch.object(cli, "OUTPUTS_DIR", str(tmp_path)),
+        patch.object(cli, "_get_client", return_value=(client, None)),
     ):
         out = _run_status("ribosome-no-log-xyz")
     result = json.loads(out)["result"]

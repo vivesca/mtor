@@ -151,7 +151,7 @@ def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> floa
     if suggested_seconds is not None and suggested_seconds > 0:
         wait = min(suggested_seconds, _THROTTLE_MAX_SECONDS)
     else:
-        wait = min(_THROTTLE_BASE_SECONDS * (2 ** attempt), _THROTTLE_MAX_SECONDS)
+        wait = min(_THROTTLE_BASE_SECONDS * (2**attempt), _THROTTLE_MAX_SECONDS)
 
     jitter = wait * _THROTTLE_JITTER_FRACTION * (_random.random() * 2 - 1)
     return max(1.0, wait + jitter)
@@ -159,7 +159,9 @@ def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> floa
 
 def _is_coaching_bloat_error(rc: int, stderr: str) -> bool:
     """Return True when ribosome failed before launch due to coaching size."""
-    return rc == 1 and "coaching file" in stderr.lower() and "limit 10kb" in stderr.lower()
+    return (
+        rc == 1 and "coaching file" in stderr.lower() and "limit 10kb" in stderr.lower()
+    )
 
 
 def _select_attempt_provider(
@@ -257,32 +259,51 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
             proc.kill()
 
 
+def _signal_group(pid: int, sig: int) -> bool:
+    """Signal the process group led by *pid*; True if the signal was sent."""
+    try:
+        os.killpg(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
 async def _graceful_kill(
     proc: asyncio.subprocess.Process,
     timeout: float = 5.0,
 ) -> None:
-    """Send SIGTERM then escalate to SIGKILL if the process doesn't exit."""
+    """Send SIGTERM then escalate to SIGKILL if the process doesn't exit.
+
+    Signals the whole process group — the subprocess is spawned with
+    start_new_session=True, so proc.pid is the pgid. Signalling only the
+    wrapper leaves its `timeout ... opencode run` children alive as ghosts
+    that keep editing the checkout after cancel (2026-07-04 incident).
+    Falls back to single-process terminate/kill when killpg fails.
+    """
     if proc.returncode is not None:
         return
-    proc.terminate()
+    if not _signal_group(proc.pid, _signal.SIGTERM):
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        if not _signal_group(proc.pid, _signal.SIGKILL):
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=2.0)
-
-
-
-
-
+    # The wrapper can exit on SIGTERM while detached children survive in the
+    # group — sweep the group once more after the leader is gone.
+    _signal_group(proc.pid, _signal.SIGKILL)
 
 
 _HEARTBEAT_INTERVAL = 30.0
 
 
-
-_ACTIVITY_TIMEOUT = timedelta(hours=2)  # generous circuit breaker; stall detection fires first
+_ACTIVITY_TIMEOUT = timedelta(
+    hours=2
+)  # generous circuit breaker; stall detection fires first
 
 # Capability gate: keywords indicating out-of-scope or dangerous operations.
 _CAPABILITY_BLOCKLIST: tuple[str, ...] = (
@@ -321,11 +342,9 @@ def _blocked_capability_keyword(task: str) -> str:
     return ""
 
 
-
-
 def _extract_test_paths(task: str) -> list[str]:
     """Extract test file paths from task YAML frontmatter ``tests:`` field."""
-    fm = _re.search(r'^---\s*\n(.*?)\n---', task, _re.DOTALL)
+    fm = _re.search(r"^---\s*\n(.*?)\n---", task, _re.DOTALL)
     if not fm:
         return []
     in_tests = False
@@ -334,7 +353,7 @@ def _extract_test_paths(task: str) -> list[str]:
         s = line.strip()
         if s.startswith("tests:"):
             in_tests = True
-            rest = s[len("tests:"):].strip()
+            rest = s[len("tests:") :].strip()
             if rest:
                 raw = rest.strip("[]")
                 tokens = raw.split(",") if "," in raw else raw.split()
@@ -351,18 +370,6 @@ def _extract_test_paths(task: str) -> list[str]:
             elif not s or not line[0:1].isspace():
                 in_tests = False
     return paths
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def _tee_stream(
@@ -390,8 +397,13 @@ async def _tee_stream(
 
 
 async def _heartbeat_stall_check(
-    proc, work_dir: str, provider: str, task: str, *,
-    skip_stall: bool = False, stdout_counter: list[int] | None = None,
+    proc,
+    work_dir: str,
+    provider: str,
+    task: str,
+    *,
+    skip_stall: bool = False,
+    stdout_counter: list[int] | None = None,
     stderr_counter: list[int] | None = None,
     workflow_id: str = "",
 ) -> None:
@@ -408,7 +420,9 @@ async def _heartbeat_stall_check(
     """
     import hashlib
 
-    stall_frozen_threshold = 20  # consecutive identical hashes (~5 min) — complex tasks need thinking time
+    stall_frozen_threshold = (
+        20  # consecutive identical hashes (~5 min) — complex tasks need thinking time
+    )
     stall_oscillation_threshold = 12  # alternating between 2 hashes
     recent_hashes: list[str] = []
     recent_stdout_bytes: list[int] = []
@@ -483,7 +497,12 @@ async def _heartbeat_stall_check(
             if no_output_ticks >= scout_no_output_kill:
                 if workflow_id:
                     with contextlib.suppress(Exception):
-                        _log_event(workflow_id, "stall_detected", tick=tick, reason="no_output_timeout")
+                        _log_event(
+                            workflow_id,
+                            "stall_detected",
+                            tick=tick,
+                            reason="no_output_timeout",
+                        )
                 print(
                     f"[stall-detect] scout/research no-output timeout at tick {tick} "
                     f"({no_output_ticks} no-output ticks, ~{no_output_ticks * 30 // 60}min), "
@@ -518,7 +537,12 @@ async def _heartbeat_stall_check(
             if empty_ticks >= 30:
                 if workflow_id:
                     with contextlib.suppress(Exception):
-                        _log_event(workflow_id, "stall_detected", tick=tick, reason="empty_diff_timeout")
+                        _log_event(
+                            workflow_id,
+                            "stall_detected",
+                            tick=tick,
+                            reason="empty_diff_timeout",
+                        )
                 print(
                     f"[stall-detect] empty diff + stagnant stdout timeout at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min), "
@@ -569,7 +593,12 @@ async def _heartbeat_stall_check(
             stall_type = "frozen" if is_frozen else "oscillating"
             if workflow_id:
                 with contextlib.suppress(Exception):
-                    _log_event(workflow_id, "stall_detected", tick=tick, reason=f"{stall_type}_diff")
+                    _log_event(
+                        workflow_id,
+                        "stall_detected",
+                        tick=tick,
+                        reason=f"{stall_type}_diff",
+                    )
             warnings_sent += 1
             print(
                 f"[stall-detect] {stall_type} at tick {tick} "
@@ -587,7 +616,13 @@ async def _heartbeat_stall_check(
 
 
 @activity.defn
-async def translate(task: str, provider: str, mode: str = "build", repo: str | None = None, harness: str = "") -> dict:
+async def translate(
+    task: str,
+    provider: str,
+    mode: str = "build",
+    repo: str | None = None,
+    harness: str = "",
+) -> dict:
     """Execute a single ribosome task as a subprocess."""
     workflow_id = ""
     with contextlib.suppress(RuntimeError):
@@ -605,7 +640,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         or "0"
     )
     if _proc_count > 8:
-        raise ApplicationError(f"Concurrency gate: {_proc_count} ribosome processes", non_retryable=False)
+        raise ApplicationError(
+            f"Concurrency gate: {_proc_count} ribosome processes", non_retryable=False
+        )
     # Capability gate: reject tasks containing blocked keywords
     blocked_keyword = _blocked_capability_keyword(task)
     if blocked_keyword:
@@ -694,7 +731,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         work_dir = repo_root
     else:
         try:
-            worktree_path = await asyncio.to_thread(_create_worktree, repo_root, branch_name)
+            worktree_path = await asyncio.to_thread(
+                _create_worktree, repo_root, branch_name
+            )
             work_dir = worktree_path
         except Exception as exc:
             raise RuntimeError(
@@ -722,7 +761,11 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     # Record HEAD before ribosome runs — used as fallback range if main..HEAD is empty
     try:
         pre_sha_r = _subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, cwd=work_dir
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=work_dir,
         )
         pre_sha = pre_sha_r.stdout.strip() if pre_sha_r.returncode == 0 else None
     except Exception:
@@ -756,7 +799,12 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
         _attempted.add(resolved_provider)
         _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
-        _log_event(workflow_id, "provider_selected", provider=resolved_provider, attempt=len(_attempted))
+        _log_event(
+            workflow_id,
+            "provider_selected",
+            provider=resolved_provider,
+            attempt=len(_attempted),
+        )
         print(
             f"[translocase] selected: {resolved_provider} "
             f"(health: {health.get(resolved_provider, {}).get('state', 'closed')})",
@@ -794,7 +842,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             # exhaustion) or an activity cancel here would otherwise leak the
             # reserved slot permanently, eventually pinning the provider over
             # its concurrency cap until the worker restarts. Release it here.
-            _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
+            _active_count[resolved_provider] = max(
+                0, _active_count.get(resolved_provider, 0) - 1
+            )
             raise
         _log_event(workflow_id, "subprocess_started", pid=proc.pid)
 
@@ -811,11 +861,20 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 LOG_DIR.mkdir(parents=True, exist_ok=True)
                 log_fh = open(LOG_DIR / f"{wf_id}.log", "ab")
                 _hdr = (
-                    "\n" + "=" * 60 + "\n"
-                    + "[" + _time.strftime("%Y-%m-%dT%H:%M:%S") + "] "
-                    + "provider=" + resolved_provider + "\n"
-                    + "task=" + task[:120] + "\n"
-                    + "=" * 60 + "\n"
+                    "\n"
+                    + "=" * 60
+                    + "\n"
+                    + "["
+                    + _time.strftime("%Y-%m-%dT%H:%M:%S")
+                    + "] "
+                    + "provider="
+                    + resolved_provider
+                    + "\n"
+                    + "task="
+                    + task[:120]
+                    + "\n"
+                    + "=" * 60
+                    + "\n"
                 )
                 log_fh.write(_hdr.encode())
                 log_fh.flush()
@@ -830,7 +889,10 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         _skip_stall = mode in ("scout", "research")
         hb_task = asyncio.create_task(
             _heartbeat_stall_check(
-                proc, work_dir, provider, task,
+                proc,
+                work_dir,
+                provider,
+                task,
                 skip_stall=_skip_stall,
                 stdout_counter=stdout_counter,
                 stderr_counter=stderr_counter,
@@ -851,7 +913,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 await _graceful_kill(proc)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
-                        asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                        asyncio.gather(
+                            stdout_task, stderr_task, return_exceptions=True
+                        ),
                         timeout=5,
                     )
                 _r = {
@@ -875,7 +939,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 await _graceful_kill(proc)
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                        asyncio.gather(
+                            stdout_task, stderr_task, return_exceptions=True
+                        ),
                         timeout=5,
                     )
                     if isinstance(stdout_bytes, BaseException):
@@ -906,7 +972,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             if log_fh:
                 with contextlib.suppress(OSError):
                     log_fh.close()
-            _active_count[resolved_provider] = max(0, _active_count.get(resolved_provider, 0) - 1)
+            _active_count[resolved_provider] = max(
+                0, _active_count.get(resolved_provider, 0) - 1
+            )
 
         rc = proc.returncode or 0
         auto_committed = False
@@ -1052,7 +1120,10 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         try:
             _head_r = _subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5, cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=work_dir,
             )
             _post_head = _head_r.stdout.strip() if _head_r.returncode == 0 else None
         except Exception:
@@ -1082,23 +1153,30 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             _verifier_tail = ""
             if _test_paths and _test_r is not None:
                 _verifier_cmd = "uv run pytest -x " + " ".join(_test_paths)
-                _vout = (_test_r.stdout or "")
-                _verr = (_test_r.stderr or "")
+                _vout = _test_r.stdout or ""
+                _verr = _test_r.stderr or ""
                 _verifier_tail = (
-                    f"{_vout}\n{_verr}".strip()[-1200:] if _verr.strip() else _vout.strip()[-1200:]
+                    f"{_vout}\n{_verr}".strip()[-1200:]
+                    if _verr.strip()
+                    else _vout.strip()[-1200:]
                 )
 
             if _tests_pass:
                 # Capture diff evidence BEFORE removing the worktree so
                 # chaperone receives real commit_count instead of rejecting
                 # with no_commit_on_success.
-                _post_diff = await asyncio.to_thread(_git_snapshot, work_dir, base_sha=pre_sha)
+                _post_diff = await asyncio.to_thread(
+                    _git_snapshot, work_dir, base_sha=pre_sha
+                )
                 _ee_commit_count = _post_diff.get("commit_count", 0)
                 if _ee_commit_count == 0 and _post_head != pre_sha:
                     try:
                         _cnt_r = _subprocess.run(
                             ["git", "rev-list", "--count", f"{pre_sha}..HEAD"],
-                            capture_output=True, text=True, timeout=5, cwd=work_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=work_dir,
                         )
                         if _cnt_r.returncode == 0:
                             _real = int(_cnt_r.stdout.strip())
@@ -1112,18 +1190,20 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
                 if worktree_path:
                     _subprocess.run(
                         ["git", "push", "origin", f"{branch_name}:{branch_name}"],
-                        check=False, timeout=60, cwd=repo_root,
+                        check=False,
+                        timeout=60,
+                        cwd=repo_root,
                     )
                     with contextlib.suppress(Exception):
                         _subprocess.run(
                             ["git", "worktree", "remove", "--force", worktree_path],
-                            capture_output=True, timeout=10, cwd=repo_root,
+                            capture_output=True,
+                            timeout=10,
+                            cwd=repo_root,
                         )
                 _ee_stdout = stdout[:1000]
                 if _verifier_cmd:
-                    _ee_stdout = (
-                        f"{_ee_stdout}\n\n[auto-verify] {_verifier_cmd}\n{_verifier_tail}"
-                    )
+                    _ee_stdout = f"{_ee_stdout}\n\n[auto-verify] {_verifier_cmd}\n{_verifier_tail}"
                 _r = {
                     "success": True,
                     "exit_code": 0,
@@ -1166,16 +1246,24 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
         try:
             head_r = _subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5, cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=work_dir,
             )
             current_sha = head_r.stdout.strip() if head_r.returncode == 0 else None
             if current_sha and current_sha != pre_sha:
                 # Count actual commits between pre_sha and HEAD
                 count_r = _subprocess.run(
                     ["git", "rev-list", "--count", f"{pre_sha}..HEAD"],
-                    capture_output=True, text=True, timeout=5, cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=work_dir,
                 )
-                real_count = int(count_r.stdout.strip()) if count_r.returncode == 0 else 1
+                real_count = (
+                    int(count_r.stdout.strip()) if count_r.returncode == 0 else 1
+                )
                 post_diff["commit_count"] = real_count
                 post_diff["head_moved_fallback"] = True
                 commit_count = real_count
@@ -1208,7 +1296,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
 
     cost_info = ""
     for line in stdout.splitlines()[-10:]:
-        if any(k in line.lower() for k in ["token", "cost", "usage", "input:", "output:"]):
+        if any(
+            k in line.lower() for k in ["token", "cost", "usage", "input:", "output:"]
+        ):
             cost_info += line + "\n"
 
     task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
@@ -1226,7 +1316,9 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
             out_text += f"\nBranch preserved for re-dispatch: {branch_name}\n"
         # Preserve full patch when rejected or incomplete so work is recoverable
         if rc != 0 or not merged:
-            out_text += f"\n\n--- full patch (recoverable) ---\n{post_diff.get('patch', '')}\n"
+            out_text += (
+                f"\n\n--- full patch (recoverable) ---\n{post_diff.get('patch', '')}\n"
+            )
         out_file.write_text(out_text)
         out_path = str(out_file)
     except OSError:
@@ -1254,13 +1346,6 @@ async def translate(task: str, provider: str, mode: str = "build", repo: str | N
     }
     finalize_trace(_trace, _r)
     return _r
-
-
-
-
-
-
-
 
 
 @activity.defn
@@ -1321,10 +1406,6 @@ async def watch_cycle(repo_path: str, plan_dir: str) -> dict:
 # decay toward zero — each one either gets promoted here or retired.
 
 
-
-
-
-
 async def main() -> None:
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
@@ -1336,10 +1417,14 @@ async def main() -> None:
     host = os.getenv("TEMPORAL_HOST", "ganglion:7233")
     client = await Client.connect(host)
     # Only count providers that have API keys configured
-    max_concurrent = sum(
-        limit for provider, limit in PROVIDER_LIMITS.items()
-        if os.environ.get(f"{provider.upper()}_API_KEY")
-    ) or 2  # default to 2 if no keys detected (op injects them later)
+    max_concurrent = (
+        sum(
+            limit
+            for provider, limit in PROVIDER_LIMITS.items()
+            if os.environ.get(f"{provider.upper()}_API_KEY")
+        )
+        or 2
+    )  # default to 2 if no keys detected (op injects them later)
 
     worker = Worker(
         client=client,
@@ -1349,7 +1434,9 @@ async def main() -> None:
         max_concurrent_activities=max_concurrent,
     )
     _gc_worktrees(str(Path.home() / "germline"))
-    print(f"Translocase started on queue '{TASK_QUEUE}' (max_concurrent={max_concurrent})")
+    print(
+        f"Translocase started on queue '{TASK_QUEUE}' (max_concurrent={max_concurrent})"
+    )
     await worker.run()
 
 

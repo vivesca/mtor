@@ -130,7 +130,11 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
                 timeout=15,
             )
             if find_result.returncode == 0:
-                wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+                wf_suffix = (
+                    workflow_id.rsplit("-", 1)[-1]
+                    if "-" in workflow_id
+                    else workflow_id
+                )
                 for line in find_result.stdout.strip().splitlines():
                     candidate = line.strip()
                     fname = candidate.rsplit("/", 1)[-1]
@@ -178,7 +182,11 @@ def _terminated_diagnostics(workflow_id: str) -> dict[str, Any]:
     if outputs.is_dir():
         suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
         matches = sorted(
-            (p for p in outputs.glob("*.txt") if workflow_id in p.name or suffix in p.name),
+            (
+                p
+                for p in outputs.glob("*.txt")
+                if workflow_id in p.name or suffix in p.name
+            ),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -191,12 +199,25 @@ def _terminated_diagnostics(workflow_id: str) -> dict[str, Any]:
     except OSError:
         return {"kill_reason": None, "stderr_tail": "", "log_path": ""}
     low = content.lower()
-    kill_reason = next((m for m in ("wall-limit", "oom", "out of memory", "sigkill", "killed") if m in low), None)
+    kill_reason = next(
+        (
+            m
+            for m in ("wall-limit", "oom", "out of memory", "sigkill", "killed")
+            if m in low
+        ),
+        None,
+    )
     tail = "\n".join(content.splitlines()[-LOG_TAIL_LINES:])
     return {"kill_reason": kill_reason, "stderr_tail": tail, "log_path": log_path}
 
 
-_APPROVED_VERDICTS = {"accepted", "approved", "approved_with_flags", "false_positive", "early_exit_clean"}
+_APPROVED_VERDICTS = {
+    "accepted",
+    "approved",
+    "approved_with_flags",
+    "false_positive",
+    "early_exit_clean",
+}
 
 
 def _operator_state(status_val: str, result_payload: dict[str, Any]) -> str:
@@ -231,16 +252,23 @@ def _status_next_actions(workflow_id: str, operator_state: str) -> list[dict[str
     if operator_state == "running":
         actions.append(_action(f"mtor cancel {workflow_id}", "Cancel this workflow"))
     elif operator_state in {"approved", "completed_unreviewed"}:
-        actions.extend([
-            _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
-            _action(f"mtor archive {workflow_id}", "Archive after review"),
-        ])
+        actions.extend(
+            [
+                _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
+                _action(f"mtor archive {workflow_id}", "Archive after review"),
+            ]
+        )
     elif operator_state in {"failed_review", "incomplete", "failed_process"}:
-        actions.extend([
-            _action(f"mtor verdict {workflow_id} --set false_positive", "Override if review was wrong"),
-            _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
-            _action(f"mtor archive {workflow_id}", "Archive after triage"),
-        ])
+        actions.extend(
+            [
+                _action(
+                    f"mtor verdict {workflow_id} --set false_positive",
+                    "Override if review was wrong",
+                ),
+                _action(f"mtor review {workflow_id}", "Mark this workflow as reviewed"),
+                _action(f"mtor archive {workflow_id}", "Archive after triage"),
+            ]
+        )
     else:
         actions.append(_action(f"mtor archive {workflow_id}", "Archive after triage"))
     return actions
@@ -285,16 +313,22 @@ def _pending_activity_details(desc: Any) -> list[dict[str, Any]]:
         heartbeat_time = getattr(activity, "last_heartbeat_time", None)
         activity_type = getattr(activity, "activity_type", None)
         if not isinstance(activity_type, str):
-            activity_type = getattr(activity_type, "name", None) or str(activity_type or "")
+            activity_type = getattr(activity_type, "name", None) or str(
+                activity_type or ""
+            )
         last_failure = _failure_text(getattr(activity, "last_failure", None))
-        details.append({
-            "activity_id": getattr(activity, "activity_id", "") or "",
-            "activity_type": activity_type,
-            "state": str(getattr(activity, "state", "") or ""),
-            "attempt": getattr(activity, "attempt", None),
-            "last_heartbeat_time": heartbeat_time.isoformat() if heartbeat_time else None,
-            "last_failure": last_failure[:500] if last_failure else "",
-        })
+        details.append(
+            {
+                "activity_id": getattr(activity, "activity_id", "") or "",
+                "activity_type": activity_type,
+                "state": str(getattr(activity, "state", "") or ""),
+                "attempt": getattr(activity, "attempt", None),
+                "last_heartbeat_time": heartbeat_time.isoformat()
+                if heartbeat_time
+                else None,
+                "last_failure": last_failure[:500] if last_failure else "",
+            }
+        )
     return details
 
 
@@ -304,7 +338,8 @@ def _trace_diagnosis(payload: dict[str, Any]) -> str:
         execution_state = payload.get("execution_state", {})
         pending_activities = payload.get("pending_activities") or []
         no_activity_evidence = not pending_activities and (
-            payload.get("active_logs") or execution_state.get("execution_state") == "queued"
+            payload.get("active_logs")
+            or execution_state.get("execution_state") == "queued"
         )
         if no_activity_evidence:
             return "workflow is stale: running in Temporal with no activity currently executing"
@@ -333,9 +368,13 @@ def _trace_next_action(workflow_id: str, operator_state: str) -> dict[str, str]:
     if operator_state == "running":
         return _action("mtor logs --active", "Inspect active worker logs")
     if operator_state == "approved":
-        return _action(f"mtor review {workflow_id}", "Mark approved workflow as reviewed")
+        return _action(
+            f"mtor review {workflow_id}", "Mark approved workflow as reviewed"
+        )
     if operator_state in {"failed_review", "incomplete", "failed_process"}:
-        return _action(f"mtor logs {workflow_id}", "Inspect output before retry or override")
+        return _action(
+            f"mtor logs {workflow_id}", "Inspect output before retry or override"
+        )
     if operator_state in {"terminated", "canceled", "failed_workflow"}:
         return _action(f"mtor logs {workflow_id}", "Inspect any preserved output")
     return _action(f"mtor status {workflow_id}", "Re-check workflow status")
@@ -391,7 +430,9 @@ def _cached_lifecycle_jsonl_path(workflow_id: str) -> str:
     return ""
 
 
-_SENSITIVE_FIELDS = frozenset({"task", "prompt", "stdout", "stderr", "output", "tail", "diff"})
+_SENSITIVE_FIELDS = frozenset(
+    {"task", "prompt", "stdout", "stderr", "output", "tail", "diff"}
+)
 _LIFECYCLE_MAX_EVENTS = 8
 
 
@@ -431,7 +472,9 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
                 f"\n[scout] timed out after {timeout}s — workflow {workflow_id} still running",
                 file=sys.stderr,
             )
-            print(f"[scout] follow up manually: mtor logs {workflow_id}", file=sys.stderr)
+            print(
+                f"[scout] follow up manually: mtor logs {workflow_id}", file=sys.stderr
+            )
             return 124
 
         try:
@@ -484,22 +527,30 @@ def _read_release_version(pyproject_path: Path, init_path: Path) -> str:
     import re as _re
 
     pyproject_text = pyproject_path.read_text(encoding="utf-8")
-    pyproject_match = _re.search(r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE)
+    pyproject_match = _re.search(
+        r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE
+    )
     if pyproject_match:
         return pyproject_match.group(1)
 
     init_text = init_path.read_text(encoding="utf-8")
-    init_match = _re.search(r'^VERSION = "(\d+\.\d+\.\d+)"$', init_text, flags=_re.MULTILINE)
+    init_match = _re.search(
+        r'^VERSION = "(\d+\.\d+\.\d+)"$', init_text, flags=_re.MULTILINE
+    )
     if init_match:
         return init_match.group(1)
     raise ValueError("Cannot parse version from pyproject.toml or mtor/__init__.py")
 
 
-def _write_release_version(pyproject_path: Path, init_path: Path, new_version: str) -> None:
+def _write_release_version(
+    pyproject_path: Path, init_path: Path, new_version: str
+) -> None:
     import re as _re
 
     pyproject_text = pyproject_path.read_text(encoding="utf-8")
-    if _re.search(r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE):
+    if _re.search(
+        r'^version = "(\d+\.\d+\.\d+)"$', pyproject_text, flags=_re.MULTILINE
+    ):
         pyproject_text = _re.sub(
             r'^version = "\d+\.\d+\.\d+"$',
             f'version = "{new_version}"',
@@ -528,6 +579,7 @@ def _write_release_version(pyproject_path: Path, init_path: Path, new_version: s
         flags=_re.MULTILINE,
     )
     init_path.write_text(init_text, encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Cyclopts CLI
@@ -570,9 +622,13 @@ def default_handler(
         _frontmatter_errors = validate_spec(spec)
         if _frontmatter_errors:
             cmd = f"mtor --spec {spec}"
-            msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _frontmatter_errors)
+            msg = "Spec validation failed:\n" + "\n".join(
+                f"  - {e}" for e in _frontmatter_errors
+            )
             sys.exit(
-                _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+                _err(
+                    cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1
+                )
             )
 
         spec_contents = spec.read_text(encoding="utf-8").strip()
@@ -591,13 +647,38 @@ def default_handler(
             _ok("mtor", tree.to_dict(), version=VERSION)
         return
 
-    subcommand_names = frozenset({
-        "riboseq", "list", "status", "logs", "cancel", "terminate",
-        "schema", "scout", "research", "scan", "doctor", "tsc", "rptor",
-        "approve", "deny", "reactivate", "rapa", "derapa", "deptor",
-        "dedeptor", "auto", "verdict", "review", "archive", "autophagy",
-        "init", "ragulator", "rictor",
-    })
+    subcommand_names = frozenset(
+        {
+            "riboseq",
+            "list",
+            "status",
+            "logs",
+            "cancel",
+            "terminate",
+            "schema",
+            "scout",
+            "research",
+            "scan",
+            "doctor",
+            "tsc",
+            "rptor",
+            "approve",
+            "deny",
+            "reactivate",
+            "rapa",
+            "derapa",
+            "deptor",
+            "dedeptor",
+            "auto",
+            "verdict",
+            "review",
+            "archive",
+            "autophagy",
+            "init",
+            "ragulator",
+            "rictor",
+        }
+    )
     stripped_prompt = prompt.strip()
     if len(stripped_prompt) < 10 or stripped_prompt.lower() in subcommand_names:
         cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"
@@ -681,14 +762,24 @@ def default_handler(
         if spec is not None:
             from mtor.dispatch import validate_spec as _validate_spec
             from mtor.rptor import parse_spec as _parse_spec
+
             _spec_data = _parse_spec(spec)
             _repo = Path(_spec_data.get("repo", ".")).expanduser()
             _spec_errors = _validate_spec(spec, _repo)
             if _spec_errors:
                 cmd = f"mtor --spec {spec}"
-                msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in _spec_errors)
+                msg = "Spec validation failed:\n" + "\n".join(
+                    f"  - {e}" for e in _spec_errors
+                )
                 sys.exit(
-                    _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+                    _err(
+                        cmd,
+                        msg,
+                        "SPEC_INVALID",
+                        "Fix the spec and retry.",
+                        [],
+                        exit_code=1,
+                    )
                 )
 
         # Dedup check — block identical dispatches within 5-minute window.
@@ -733,7 +824,8 @@ def default_handler(
 @app.command(name=["riboseq", "list"])
 def list_cmd(
     *,
-    status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"] | None = None,
+    status: Literal["RUNNING", "COMPLETED", "FAILED", "CANCELED", "TERMINATED"]
+    | None = None,
     count: int = 50,
     since: Annotated[int | None, Parameter(name=["-s", "--since"])] = None,
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
@@ -744,7 +836,9 @@ def list_cmd(
     archived: Annotated[bool, Parameter(name=["--archived"])] = False,
 ) -> None:
     """List recent workflows. --since N shows last N hours only. --archived prints archived IDs from triage.json."""
-    cmd = "mtor riboseq" + (f" --status {status}" if status else "") + f" --count {count}"
+    cmd = (
+        "mtor riboseq" + (f" --status {status}" if status else "") + f" --count {count}"
+    )
 
     if archived:
         triage = load_triage()
@@ -812,7 +906,9 @@ def list_cmd(
                 if status_name != "RUNNING":
                     continue
                 with contextlib.suppress(Exception):
-                    states[execution.id] = await workflow_execution_state(client, execution.id)
+                    states[execution.id] = await workflow_execution_state(
+                        client, execution.id
+                    )
             return states
 
         execution_states = asyncio.run(_execution_states()) if executions else {}
@@ -897,16 +993,20 @@ def list_cmd(
             if wf_id in execution_states:
                 workflow_result.update(execution_states[wf_id])
             workflows.append(workflow_result)
-            next_actions.append(_action(f"mtor status {wf_id}", f"Get full status for {wf_id}"))
+            next_actions.append(
+                _action(f"mtor status {wf_id}", f"Get full status for {wf_id}")
+            )
 
         # Count pending (unreviewed completed) for envelope
         if not pending:
             for ex in executions:
                 wf_id = ex.id
                 status_val = ex.status.name if ex.status else "UNKNOWN"
-                if (status_val == "COMPLETED"
-                        and wf_id not in reviewed_set
-                        and wf_id not in archived_set):
+                if (
+                    status_val == "COMPLETED"
+                    and wf_id not in reviewed_set
+                    and wf_id not in archived_set
+                ):
                     pending_count += 1
 
         result: dict[str, Any] = {
@@ -984,7 +1084,9 @@ def status(workflow_id: str, short: bool = False) -> None:
                 result_payload["exit_code"] = task_result.get("exit_code")
                 result_payload["provider"] = task_result.get("provider")
                 result_payload["task_preview"] = task_result.get("task", "")[:120]
-                result_payload["output_path"] = review.get("output_path", "") or task_result.get("output_path", "")
+                result_payload["output_path"] = review.get(
+                    "output_path", ""
+                ) or task_result.get("output_path", "")
                 if not result_payload["output_path"]:
                     cached_log_path = _cached_log_path(workflow_id)
                     if cached_log_path:
@@ -997,7 +1099,9 @@ def status(workflow_id: str, short: bool = False) -> None:
                 if review.get("dossier_path"):
                     result_payload["dossier_path"] = review.get("dossier_path")
                 if review.get("completion_dossier"):
-                    result_payload["completion_dossier"] = review.get("completion_dossier")
+                    result_payload["completion_dossier"] = review.get(
+                        "completion_dossier"
+                    )
 
         # Apply local verdict override (false-positive corrections)
         vo = get_verdict_overrides()
@@ -1017,20 +1121,29 @@ def status(workflow_id: str, short: bool = False) -> None:
                 task_result = _extract_first_result(wf_result)
                 if task_result:
                     failure_reason = _build_failure_reason(task_result)
-                    have_task_reason = failure_reason != "No diagnostic information available"
+                    have_task_reason = (
+                        failure_reason != "No diagnostic information available"
+                    )
 
             # TERMINATED workflows usually leave no task result. Fall back to the
             # on-disk ribosome log for a detected kill reason + stderr tail.
             if status_val == "TERMINATED" and not have_task_reason:
                 diag = _terminated_diagnostics(workflow_id)
-                if diag.get("kill_reason") or diag.get("stderr_tail") or diag.get("log_path"):
+                if (
+                    diag.get("kill_reason")
+                    or diag.get("stderr_tail")
+                    or diag.get("log_path")
+                ):
                     result_payload["terminated_diagnostics"] = diag
                     if diag.get("kill_reason"):
                         result_payload["kill_reason"] = diag["kill_reason"]
                     if diag.get("log_path"):
                         result_payload["log_path"] = diag["log_path"]
                     derived = _trace_diagnosis(
-                        {"operator_state": "terminated", "kill_reason": diag.get("kill_reason")}
+                        {
+                            "operator_state": "terminated",
+                            "kill_reason": diag.get("kill_reason"),
+                        }
                     )
                     failure_reason = derived
 
@@ -1047,7 +1160,9 @@ def status(workflow_id: str, short: bool = False) -> None:
             failure_field = result_payload.get("failure_reason", "—")
             if isinstance(failure_field, str) and len(failure_field) > 80:
                 failure_field = failure_field[:77] + "..."
-            print(f"{status_field} | {success_field} | {verdict_field} | {failure_field}")
+            print(
+                f"{status_field} | {success_field} | {verdict_field} | {failure_field}"
+            )
             return
 
         _ok(
@@ -1099,6 +1214,7 @@ def trace(workflow_id: str) -> None:
         )
 
     try:
+
         async def _trace():
             handle = client.get_workflow_handle(workflow_id)
             desc = await handle.describe()
@@ -1113,18 +1229,24 @@ def trace(workflow_id: str) -> None:
             execution_state = {}
             if status_name == "RUNNING":
                 with contextlib.suppress(Exception):
-                    execution_state = await workflow_execution_state(client, workflow_id)
+                    execution_state = await workflow_execution_state(
+                        client, workflow_id
+                    )
             return desc, wf_result, result_error, execution_state
 
         desc, wf_result, result_error, execution_state = asyncio.run(_trace())
         status_val = desc.status.name if desc.status else "UNKNOWN"
-        task_result = _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        task_result = (
+            _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        )
         review = task_result.get("review", {}) if task_result else {}
 
         output_path = ""
         cached_log_path = _cached_log_path(workflow_id)
         if task_result:
-            output_path = review.get("output_path", "") or task_result.get("output_path", "")
+            output_path = review.get("output_path", "") or task_result.get(
+                "output_path", ""
+            )
 
         lifecycle_jsonl_path = _cached_lifecycle_jsonl_path(workflow_id)
         lifecycle_events: list[dict[str, Any]] = []
@@ -1194,9 +1316,14 @@ def trace(workflow_id: str) -> None:
         primary_action = _trace_next_action(workflow_id, operator_state)
         result_payload["next_action"] = primary_action
 
-        next_actions = [primary_action, _action(f"mtor status {workflow_id}", "Return lightweight status")]
+        next_actions = [
+            primary_action,
+            _action(f"mtor status {workflow_id}", "Return lightweight status"),
+        ]
         if primary_action["command"] != f"mtor logs {workflow_id}":
-            next_actions.append(_action(f"mtor logs {workflow_id}", "Fetch preserved output"))
+            next_actions.append(
+                _action(f"mtor logs {workflow_id}", "Fetch preserved output")
+            )
 
         _ok(cmd, result_payload, next_actions, version=VERSION)
     except Exception as exc:
@@ -1240,10 +1367,18 @@ def _compact_dossier_payload(
     task_result = task_result if isinstance(task_result, dict) else {}
     review = review if isinstance(review, dict) else {}
 
-    artifact = dossier.get("artifact") if isinstance(dossier.get("artifact"), dict) else {}
+    artifact = (
+        dossier.get("artifact") if isinstance(dossier.get("artifact"), dict) else {}
+    )
     d_review = dossier.get("review") if isinstance(dossier.get("review"), dict) else {}
-    operator = dossier.get("operator") if isinstance(dossier.get("operator"), dict) else {}
-    verification = dossier.get("verification") if isinstance(dossier.get("verification"), dict) else {}
+    operator = (
+        dossier.get("operator") if isinstance(dossier.get("operator"), dict) else {}
+    )
+    verification = (
+        dossier.get("verification")
+        if isinstance(dossier.get("verification"), dict)
+        else {}
+    )
 
     verdict = d_review.get("verdict") or review.get("verdict")
     approved = d_review.get("approved")
@@ -1341,9 +1476,13 @@ def dossier(workflow_id: str) -> None:
 
         desc, wf_result = asyncio.run(_dossier())
         status_val = desc.status.name if desc.status else "UNKNOWN"
-        task_result = _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        task_result = (
+            _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
+        )
         review = task_result.get("review", {}) if task_result else {}
-        dossier_obj = review.get("completion_dossier") if isinstance(review, dict) else None
+        dossier_obj = (
+            review.get("completion_dossier") if isinstance(review, dict) else None
+        )
 
         result_payload = _compact_dossier_payload(
             workflow_id, status_val, task_result, review, dossier_obj
@@ -1413,7 +1552,15 @@ def wait(
     cmd = f"mtor wait {workflow_id}"
 
     if interval < 2 or interval > 60:
-        sys.exit(_err(cmd, f"interval must be 2-60s, got {interval}", "INVALID_INTERVAL", "Try --interval 5", []))
+        sys.exit(
+            _err(
+                cmd,
+                f"interval must be 2-60s, got {interval}",
+                "INVALID_INTERVAL",
+                "Try --interval 5",
+                [],
+            )
+        )
 
     client, err = _get_client()
     if err:
@@ -1433,6 +1580,7 @@ def wait(
     start_wall = time.time()
 
     try:
+
         async def _wait_loop():
             nonlocal polls
             handle = client.get_workflow_handle(workflow_id)
@@ -1477,15 +1625,19 @@ def wait(
             result_payload["verdict"] = vo[workflow_id]
 
         if timed_out:
-            sys.exit(_err(
-                cmd,
-                f"Wait exceeded {timeout}s — workflow still {final_status}",
-                "WAIT_TIMEOUT",
-                f"Workflow may still be running. Check with: mtor status {workflow_id}",
-                [_action(f"mtor status {workflow_id}", "Re-check status"),
-                 _action(f"mtor logs {workflow_id}", "Inspect output")],
-                exit_code=5,
-            ))
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Wait exceeded {timeout}s — workflow still {final_status}",
+                    "WAIT_TIMEOUT",
+                    f"Workflow may still be running. Check with: mtor status {workflow_id}",
+                    [
+                        _action(f"mtor status {workflow_id}", "Re-check status"),
+                        _action(f"mtor logs {workflow_id}", "Inspect output"),
+                    ],
+                    exit_code=5,
+                )
+            )
 
         _ok(
             cmd,
@@ -1496,16 +1648,25 @@ def wait(
     except Exception as exc:
         exc_str = str(exc)
         if "not found" in exc_str.lower():
-            sys.exit(_err(
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Workflow {workflow_id} not found",
+                    "WORKFLOW_NOT_FOUND",
+                    "Verify ID with: mtor riboseq",
+                    [_action("mtor riboseq", "List recent workflows")],
+                    exit_code=4,
+                )
+            )
+        sys.exit(
+            _err(
                 cmd,
-                f"Workflow {workflow_id} not found",
-                "WORKFLOW_NOT_FOUND",
-                "Verify ID with: mtor riboseq",
-                [_action("mtor riboseq", "List recent workflows")],
-                exit_code=4,
-            ))
-        sys.exit(_err(cmd, exc_str, "WAIT_ERROR", "Check Temporal health: mtor tsc",
-                      [_action("mtor tsc", "Run health check")]))
+                exc_str,
+                "WAIT_ERROR",
+                "Check Temporal health: mtor tsc",
+                [_action("mtor tsc", "Run health check")],
+            )
+        )
 
 
 def _active_logs() -> None:
@@ -1521,7 +1682,9 @@ def _active_log_entries(
     strict: bool = False,
 ) -> list[dict[str, Any]]:
     """Return active worker log entries, optionally filtered to a workflow ID."""
-    find_cmd = r"find ~/code/mtor/logs -name '*.log' -mmin -5 -printf '%T@ %p\n' | sort -rn"
+    find_cmd = (
+        r"find ~/code/mtor/logs -name '*.log' -mmin -5 -printf '%T@ %p\n' | sort -rn"
+    )
     cmd = "mtor logs --active"
     try:
         result = subprocess.run(
@@ -1533,16 +1696,38 @@ def _active_log_entries(
         if result.returncode != 0:
             if strict:
                 sys.exit(
-                    _err(cmd, result.stderr.strip() or "SSH find failed", "SSH_ERROR", f"Verify worker host: ssh {WORKER_HOST}", [])
+                    _err(
+                        cmd,
+                        result.stderr.strip() or "SSH find failed",
+                        "SSH_ERROR",
+                        f"Verify worker host: ssh {WORKER_HOST}",
+                        [],
+                    )
                 )
             return []
     except subprocess.TimeoutExpired:
         if strict:
-            sys.exit(_err(cmd, f"SSH to {WORKER_HOST} timed out", "SSH_TIMEOUT", f"Check connectivity: ping {WORKER_HOST}", []))
+            sys.exit(
+                _err(
+                    cmd,
+                    f"SSH to {WORKER_HOST} timed out",
+                    "SSH_TIMEOUT",
+                    f"Check connectivity: ping {WORKER_HOST}",
+                    [],
+                )
+            )
         return []
     except FileNotFoundError:
         if strict:
-            sys.exit(_err(cmd, "ssh binary not found", "SSH_NOT_FOUND", "Install openssh-client", []))
+            sys.exit(
+                _err(
+                    cmd,
+                    "ssh binary not found",
+                    "SSH_NOT_FOUND",
+                    "Install openssh-client",
+                    [],
+                )
+            )
         return []
 
     entries: list[dict[str, Any]] = []
@@ -1561,7 +1746,9 @@ def _active_log_entries(
                 text=True,
                 timeout=10,
             )
-            last_lines = tail.stdout.strip().splitlines() if tail.returncode == 0 else []
+            last_lines = (
+                tail.stdout.strip().splitlines() if tail.returncode == 0 else []
+            )
         except (subprocess.TimeoutExpired, OSError):
             last_lines = []
         entries.append({"filename": fname, "path": log_path, "last_lines": last_lines})
@@ -1582,7 +1769,15 @@ def logs(
         return
 
     if lines < 1 or lines > 1000:
-        sys.exit(_err("mtor logs", f"lines must be 1-1000, got {lines}", "INVALID_LINES", "Try --lines 30", []))
+        sys.exit(
+            _err(
+                "mtor logs",
+                f"lines must be 1-1000, got {lines}",
+                "INVALID_LINES",
+                "Try --lines 30",
+                [],
+            )
+        )
 
     if workflow_id is None:
         sys.exit(
@@ -1625,7 +1820,9 @@ def logs(
     # Rejected workflows often have no review.output_path but do have
     # ~/code/mtor/logs/<workflow_id>.log from the worker tee.
     if not log_path:
-        wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+        wf_suffix = (
+            workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+        )
         # Try local directory first
         for base_dir, patterns in (
             (Path(OUTPUTS_DIR), ("*.txt",)),
@@ -1636,7 +1833,9 @@ def logs(
             candidates = []
             for pattern in patterns:
                 candidates.extend(base_dir.glob(pattern))
-            for candidate in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[:40]:
+            for candidate in sorted(
+                candidates, key=lambda p: p.stat().st_mtime, reverse=True
+            )[:40]:
                 if workflow_id in candidate.name or wf_suffix in candidate.name:
                     log_path = str(candidate)
                     break
@@ -1675,7 +1874,12 @@ def logs(
                 f"No log file found for workflow {workflow_id}",
                 "LOG_NOT_FOUND",
                 f"Trace workflow diagnostics with: mtor trace {workflow_id}",
-                [_action(f"mtor trace {workflow_id}", "Inspect Temporal and review evidence")],
+                [
+                    _action(
+                        f"mtor trace {workflow_id}",
+                        "Inspect Temporal and review evidence",
+                    )
+                ],
                 exit_code=4,
             )
         )
@@ -1734,14 +1938,22 @@ def logs(
         )
         if result.returncode != 0:
             stderr_msg = result.stderr.strip()
-            if "no such file" in stderr_msg.lower() or "not found" in stderr_msg.lower():
+            if (
+                "no such file" in stderr_msg.lower()
+                or "not found" in stderr_msg.lower()
+            ):
                 sys.exit(
                     _err(
                         cmd,
                         f"Log file not found on worker host: {log_path}",
                         "LOG_NOT_FOUND",
                         f"Trace workflow diagnostics with: mtor trace {workflow_id}",
-                        [_action(f"mtor trace {workflow_id}", "Inspect Temporal and review evidence")],
+                        [
+                            _action(
+                                f"mtor trace {workflow_id}",
+                                "Inspect Temporal and review evidence",
+                            )
+                        ],
                         exit_code=4,
                     )
                 )
@@ -1844,17 +2056,7 @@ def batch_cancel(
     )
 
 
-def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
-    """Terminate worker-side ribosome/Claude processes for one workflow ID."""
-    empty = {
-        "terminated_pids": [],
-        "killed_pids": [],
-        "remaining_pids": [],
-    }
-    if not workflow_id.strip():
-        return {"attempted": False, "ok": False, **empty, "error": "workflow_id is empty"}
-
-    script = r"""
+_REAP_SCRIPT = r"""
 import json
 import os
 import signal
@@ -1864,67 +2066,139 @@ import time
 
 workflow_id = sys.argv[1]
 own_pids = {os.getpid(), os.getppid()}
-proc = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True, check=False)
-pids = []
-for line in proc.stdout.splitlines()[1:]:
-    parts = line.split(None, 1)
-    if len(parts) < 2:
-        continue
-    pid_s, args = parts
-    try:
-        pid = int(pid_s)
-    except ValueError:
-        continue
-    if pid in own_pids or workflow_id not in args:
-        continue
-    low = args.lower()
-    if "effectors/ribosome" not in low and "claude" not in low:
-        continue
-    pids.append(pid)
+NAME_HINTS = ("effectors/ribosome", "opencode", "claude")
+
+
+def scan():
+    proc = subprocess.run(
+        ["ps", "-eo", "pid,pgid,args"], capture_output=True, text=True, check=False
+    )
+    rows = []
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, pgid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if pid in own_pids:
+            continue
+        rows.append((pid, pgid, parts[2]))
+    return rows
+
+
+# The worker logs every spawned wrapper pid (subprocess_started events); with
+# start_new_session=True that pid is also the process-group id. This finds
+# ghost children (e.g. `timeout NNN opencode run ...`) whose command line
+# carries neither the workflow id nor a recognizable harness name.
+recorded_pids = []
+log_path = os.path.expanduser("~/code/mtor/logs/" + workflow_id + ".jsonl")
+try:
+    with open(log_path) as fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("type") == "subprocess_started" and isinstance(entry.get("pid"), int):
+                recorded_pids.append(entry["pid"])
+except OSError:
+    pass
+
+rows = scan()
+by_pgid = {}
+for pid, pgid, args in rows:
+    by_pgid.setdefault(pgid, []).append(args)
+
+target_pgids = set()
+# A recorded group counts only while a surviving member still looks like part
+# of a ribosome run, so a recycled pgid is never killed.
+for rec in recorded_pids:
+    members = by_pgid.get(rec, [])
+    if any(h in args.lower() for args in members for h in NAME_HINTS):
+        target_pgids.add(rec)
+# Name-based fallback: processes that mention the workflow id directly.
+for pid, pgid, args in rows:
+    if workflow_id in args and any(h in args.lower() for h in NAME_HINTS):
+        target_pgids.add(pgid)
+
+matched = sorted(pid for pid, pgid, _args in rows if pgid in target_pgids)
 
 terminated = []
+for pgid in sorted(target_pgids):
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        terminated.append(pgid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+time.sleep(0.5)
 killed = []
-for pid in pids:
+for pgid in terminated:
     try:
-        os.kill(pid, signal.SIGTERM)
-        terminated.append(pid)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-time.sleep(0.3)
-for pid in terminated:
-    try:
-        os.kill(pid, 0)
+        os.killpg(pgid, 0)
     except (ProcessLookupError, PermissionError, OSError):
         continue
     try:
-        os.kill(pid, signal.SIGKILL)
-        killed.append(pid)
+        os.killpg(pgid, signal.SIGKILL)
+        killed.append(pgid)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
-time.sleep(0.1)
-remaining = []
-for pid in terminated:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
-        continue
-    remaining.append(pid)
+time.sleep(0.2)
+remaining = sorted(
+    pid
+    for pid, pgid, args in scan()
+    if pgid in target_pgids
+    or (workflow_id in args and any(h in args.lower() for h in NAME_HINTS))
+)
 
 print(json.dumps({
-    "terminated_pids": terminated,
-    "killed_pids": killed,
+    "recorded_pids": recorded_pids,
+    "matched_pids": matched,
+    "terminated_pgids": terminated,
+    "killed_pgids": killed,
     "remaining_pids": remaining,
 }))
 """
+
+
+def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
+    """Kill the workflow's worker-side process groups and verify they died.
+
+    The previous implementation matched single pids by command-line substring
+    only, so a `timeout NNN opencode run ...` pair — whose args contain
+    neither the workflow id nor "claude" — survived cancel, kept implementing
+    into the main checkout, and the empty match list read as a vacuous
+    "cleanup ok" (2026-07-04). This version resolves the recorded wrapper
+    pgids from the worker's subprocess_started log, kills whole process
+    groups, and rescans before reporting ok.
+    """
+    empty = {
+        "recorded_pids": [],
+        "matched_pids": [],
+        "terminated_pgids": [],
+        "killed_pgids": [],
+        "remaining_pids": [],
+    }
+    if not workflow_id.strip():
+        return {
+            "attempted": False,
+            "ok": False,
+            "verified": False,
+            **empty,
+            "error": "workflow_id is empty",
+        }
     try:
-        remote_cmd = f"python3 -c {shlex.quote(script)} {shlex.quote(workflow_id)}"
+        remote_cmd = (
+            f"python3 -c {shlex.quote(_REAP_SCRIPT)} {shlex.quote(workflow_id)}"
+        )
         result = subprocess.run(
             ["ssh", WORKER_HOST, remote_cmd],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
         )
         if result.returncode == 0 and result.stdout.strip():
             parsed = json.loads(result.stdout.strip())
@@ -1932,20 +2206,37 @@ print(json.dumps({
             return {
                 "attempted": True,
                 "ok": len(remaining) == 0,
-                "terminated_pids": parsed.get("terminated_pids", []),
-                "killed_pids": parsed.get("killed_pids", []),
+                "verified": True,
+                "recorded_pids": parsed.get("recorded_pids", []),
+                "matched_pids": parsed.get("matched_pids", []),
+                "terminated_pgids": parsed.get("terminated_pgids", []),
+                "killed_pgids": parsed.get("killed_pgids", []),
                 "remaining_pids": remaining,
             }
         return {
             "attempted": True,
             "ok": False,
+            "verified": False,
             **empty,
             "error": result.stderr.strip() or f"SSH exit {result.returncode}",
         }
     except subprocess.TimeoutExpired:
-        return {"attempted": True, "ok": False, **empty, "error": "SSH timed out"}
+        return {
+            "attempted": True,
+            "ok": False,
+            "verified": False,
+            **empty,
+            "error": "SSH timed out",
+        }
     except Exception as exc:
-        return {"attempted": True, "ok": False, **empty, "error": str(exc)}
+        return {
+            "attempted": True,
+            "ok": False,
+            "verified": False,
+            **empty,
+            "error": str(exc),
+        }
+
 
 def _terminate_workflow(workflow_id: str, cmd: str) -> None:
     """Shared terminate logic for both cancel and terminate commands."""
@@ -1972,7 +2263,11 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
         process_cleanup = _reap_worker_processes(workflow_id)
         _ok(
             cmd,
-            {"workflow_id": workflow_id, "terminated": True, "process_cleanup": process_cleanup},
+            {
+                "workflow_id": workflow_id,
+                "terminated": True,
+                "process_cleanup": process_cleanup,
+            },
             [
                 _action(f"mtor status {workflow_id}", "Verify termination status"),
             ],
@@ -1980,7 +2275,9 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
         )
     except Exception as exc:
         exc_str = str(exc)
-        if any(phrase in exc_str.lower() for phrase in ["not found", "workflow_not_found"]):
+        if any(
+            phrase in exc_str.lower() for phrase in ["not found", "workflow_not_found"]
+        ):
             sys.exit(
                 _err(
                     cmd,
@@ -1994,7 +2291,13 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
         # Already terminated/cancelled — idempotent success
         if any(
             phrase in exc_str.lower()
-            for phrase in ["already", "terminated", "cancelled", "canceled", "completed"]
+            for phrase in [
+                "already",
+                "terminated",
+                "cancelled",
+                "canceled",
+                "completed",
+            ]
         ):
             process_cleanup = _reap_worker_processes(workflow_id)
             _ok(
@@ -2066,15 +2369,26 @@ def scan() -> None:
     next_actions = [
         _action("mtor scan", "Re-run scan after fixes"),
     ]
-    _ok("mtor scan", {"findings": findings, "count": len(findings)}, next_actions, version=VERSION)
+    _ok(
+        "mtor scan",
+        {"findings": findings, "count": len(findings)},
+        next_actions,
+        version=VERSION,
+    )
 
 
 @app.command
 def audit(
     *,
-    runs: Annotated[Path, Parameter(name=["--runs"])] = Path("~/germline/loci/ribosome-runs.jsonl"),
-    reviews: Annotated[Path, Parameter(name=["--reviews"])] = Path("~/germline/loci/ribosome-reviews.jsonl"),
-    logs_dir: Annotated[Path, Parameter(name=["--logs-dir"])] = Path("~/code/mtor/logs"),
+    runs: Annotated[Path, Parameter(name=["--runs"])] = Path(
+        "~/germline/loci/ribosome-runs.jsonl"
+    ),
+    reviews: Annotated[Path, Parameter(name=["--reviews"])] = Path(
+        "~/germline/loci/ribosome-reviews.jsonl"
+    ),
+    logs_dir: Annotated[Path, Parameter(name=["--logs-dir"])] = Path(
+        "~/code/mtor/logs"
+    ),
     limit: Annotated[int, Parameter(name=["--limit"])] = 10,
 ) -> None:
     """Summarize ribosome run/review ledgers without external services."""
@@ -2100,8 +2414,12 @@ def scout(
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
     workflow_id = _dispatch_prompt(
-        prompt, provider=provider, mode="scout",
-        skip_sha_check=skip_sha_check, wait=wait, timeout=timeout,
+        prompt,
+        provider=provider,
+        mode="scout",
+        skip_sha_check=skip_sha_check,
+        wait=wait,
+        timeout=timeout,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
@@ -2118,8 +2436,12 @@ def research(
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
     workflow_id = _dispatch_prompt(
-        prompt, provider=provider, mode="research",
-        skip_sha_check=skip_sha_check, wait=wait, timeout=timeout,
+        prompt,
+        provider=provider,
+        mode="research",
+        skip_sha_check=skip_sha_check,
+        wait=wait,
+        timeout=timeout,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
@@ -2153,8 +2475,12 @@ def receptor(
 
     frontmatter_errors = validate_spec(spec)
     if frontmatter_errors:
-        msg = "Spec validation failed:\n" + "\n".join(f"  - {e}" for e in frontmatter_errors)
-        sys.exit(_err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1))
+        msg = "Spec validation failed:\n" + "\n".join(
+            f"  - {e}" for e in frontmatter_errors
+        )
+        sys.exit(
+            _err(cmd, msg, "SPEC_INVALID", "Fix the spec and retry.", [], exit_code=1)
+        )
 
     from mtor.dispatch import validate_receptor_spec
     from mtor.dispatch import validate_spec as validate_dispatch_spec
@@ -2166,7 +2492,9 @@ def receptor(
     receptor_errors = validate_receptor_spec(spec)
     if dispatch_errors or receptor_errors:
         errors = dispatch_errors + receptor_errors
-        msg = "Receptor spec validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        msg = "Receptor spec validation failed:\n" + "\n".join(
+            f"  - {e}" for e in errors
+        )
         sys.exit(
             _err(
                 cmd,
@@ -2255,11 +2583,17 @@ def auto(
     """Self-improvement: scan mtor codebase for issues, dispatch a fix task."""
     findings = _run_checks()
     if not findings:
-        _ok("mtor auto", {"action": "none", "reason": "No issues found"}, version=VERSION)
+        _ok(
+            "mtor auto",
+            {"action": "none", "reason": "No issues found"},
+            version=VERSION,
+        )
         return
 
     # Build a prompt from the top findings
-    finding_lines = "\n".join(f"- {f['file']}:{f.get('line','')} {f['issue']}" for f in findings[:5])
+    finding_lines = "\n".join(
+        f"- {f['file']}:{f.get('line', '')} {f['issue']}" for f in findings[:5]
+    )
     auto_prompt = (
         f"Fix the following issues in ~/code/mtor:\n{finding_lines}\n\n"
         "Make assays/test_auto_fixes.py pass if you add new tests."
@@ -2300,7 +2634,11 @@ def approve(workflow_id: str) -> None:
             await handle.signal("approve_task", workflow_id)
 
         asyncio.run(_signal())
-        _ok("mtor approve", {"workflow_id": workflow_id, "decision": "approved"}, version=VERSION)
+        _ok(
+            "mtor approve",
+            {"workflow_id": workflow_id, "decision": "approved"},
+            version=VERSION,
+        )
     except Exception as exc:
         exc_str = str(exc)
         if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
@@ -2347,7 +2685,11 @@ def deny(workflow_id: str) -> None:
             await handle.signal("reject_task", workflow_id)
 
         asyncio.run(_signal())
-        _ok("mtor deny", {"workflow_id": workflow_id, "decision": "denied"}, version=VERSION)
+        _ok(
+            "mtor deny",
+            {"workflow_id": workflow_id, "decision": "denied"},
+            version=VERSION,
+        )
     except Exception as exc:
         exc_str = str(exc)
         if "not found" in exc_str.lower() or "workflow_not_found" in exc_str.lower():
@@ -2491,7 +2833,11 @@ def release(
         new_version = _bump_semver(current_version, bump)
         _write_release_version(pyproject_path, init_path, new_version)
     except ValueError as exc:
-        sys.exit(_err(cmd, str(exc), "VERSION_PARSE_ERROR", "Check release version metadata."))
+        sys.exit(
+            _err(
+                cmd, str(exc), "VERSION_PARSE_ERROR", "Check release version metadata."
+            )
+        )
 
     tag_name = f"v{new_version}"
     try:
@@ -2534,7 +2880,9 @@ def release(
 @app.command(show=False)
 def publish(
     *,
-    bump: Annotated[Literal["patch", "minor", "major"], Parameter(name=["-b", "--bump"])] = "patch",
+    bump: Annotated[
+        Literal["patch", "minor", "major"], Parameter(name=["-b", "--bump"])
+    ] = "patch",
 ) -> None:
     """Compatibility alias for the release workflow."""
     release(minor=bump == "minor", major=bump == "major")
@@ -2680,6 +3028,7 @@ def polysome() -> None:
     """Alias for stats command (polysome is multiple ribosomes = multiple stats)."""
     return stats()
 
+
 @app.command
 def stats() -> None:
     """Show dispatch statistics: today's verdicts, running count, weekly totals."""
@@ -2687,10 +3036,20 @@ def stats() -> None:
 
     client, err = _get_client()
     if err:
-        sys.exit(_err("mtor stats", f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor doctor", exit_code=3))
+        sys.exit(
+            _err(
+                "mtor stats",
+                f"Cannot connect: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "mtor doctor",
+                exit_code=3,
+            )
+        )
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
     async def _count(query: str) -> int:
         result = await client.count_workflows(query=query)
@@ -2730,14 +3089,18 @@ def checkpoints() -> None:
         remote_base = "$HOME/.local/share/vivesca/ribosome-checkpoints"
         ls_result = subprocess.run(
             ["ssh", WORKER_HOST, f"ls -1 {remote_base}/*.json 2>/dev/null"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if ls_result.returncode == 0 and ls_result.stdout.strip():
             for remote_path in ls_result.stdout.strip().splitlines():
                 fname = remote_path.rsplit("/", 1)[-1]
                 cat_result = subprocess.run(
                     ["ssh", WORKER_HOST, f"cat {remote_path}"],
-                    capture_output=True, text=True, timeout=15,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
                 )
                 if cat_result.returncode == 0:
                     files.append((fname, cat_result.stdout))
@@ -2792,7 +3155,8 @@ def review(
 
         executions = asyncio.run(_list_completed())
         ids_to_review = [
-            ex.id for ex in executions
+            ex.id
+            for ex in executions
             if ex.status and ex.status.name not in ("RUNNING",)
         ]
         result = review_ids(ids_to_review)
@@ -2837,7 +3201,15 @@ def verdict(
         # Bulk: find all rejected workflows and override
         client, err = _get_client()
         if err:
-            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Cannot connect: {err}",
+                    "TEMPORAL_UNREACHABLE",
+                    "mtor tsc",
+                    exit_code=3,
+                )
+            )
 
         async def _list_rejected():
             results = []
@@ -2858,7 +3230,12 @@ def verdict(
         existing = get_verdict_overrides()
         to_override = [wid for wid in rejected_ids if wid not in existing]
         if not to_override:
-            _ok(cmd + " --all-rejected", {"overridden": 0, "message": "No rejected workflows to override"}, [], version=VERSION)
+            _ok(
+                cmd + " --all-rejected",
+                {"overridden": 0, "message": "No rejected workflows to override"},
+                [],
+                version=VERSION,
+            )
             return
         result = override_verdict(to_override, new_verdict)
         _ok(
@@ -2870,7 +3247,14 @@ def verdict(
         return
 
     if workflow_id is None:
-        sys.exit(_err(cmd, "Missing workflow_id or --all-rejected", "MISSING_ARGS", "Provide a workflow ID or use --all-rejected"))
+        sys.exit(
+            _err(
+                cmd,
+                "Missing workflow_id or --all-rejected",
+                "MISSING_ARGS",
+                "Provide a workflow ID or use --all-rejected",
+            )
+        )
 
     result = override_verdict([workflow_id], new_verdict)
     _ok(
@@ -3103,7 +3487,9 @@ def init(
 @app.command(name="rptor")
 def rptor(
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
+        "~/epigenome/chromatin/loci/plans/"
+    ),
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
     audit: Annotated[bool, Parameter(name=["--audit"])] = False,
     strict: Annotated[bool, Parameter(name=["--strict"])] = False,
@@ -3123,7 +3509,12 @@ def rptor(
                     "Spec audit failed",
                     "SPEC_AUDIT_FAILED",
                     "Fix invalid statuses or add completion evidence, then retry.",
-                    [_action(f"mtor rptor --audit --dir {directory}", "Inspect audit issues")],
+                    [
+                        _action(
+                            f"mtor rptor --audit --dir {directory}",
+                            "Inspect audit issues",
+                        )
+                    ],
                     exit_code=1,
                 )
             )
@@ -3176,7 +3567,9 @@ def rptor(
 def rptor_done(
     name: str,
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
+        "~/epigenome/chromatin/loci/plans/"
+    ),
 ) -> None:
     """Mark a spec as done."""
     cmd = f"mtor rptor done {name}"
@@ -3237,7 +3630,10 @@ def ragulator(
         def _on_cycle(cycle):
             if cycle.fetched > 0:
                 status = "merged" if cycle.merged else f"error: {cycle.error}"
-                print(f"[watch] cycle {cycle.cycle}: fetched {cycle.fetched} commits, {status}", file=_sys.stderr)
+                print(
+                    f"[watch] cycle {cycle.cycle}: fetched {cycle.fetched} commits, {status}",
+                    file=_sys.stderr,
+                )
             else:
                 print(f"[watch] cycle {cycle.cycle}: up to date", file=_sys.stderr)
 
@@ -3248,7 +3644,12 @@ def ragulator(
             once=once,
             on_cycle=_on_cycle,
         )
-        _ok(cmd, stats.to_dict(), [_action("mtor riboseq", "Check synced workflows")], version=VERSION)
+        _ok(
+            cmd,
+            stats.to_dict(),
+            [_action("mtor riboseq", "Check synced workflows")],
+            version=VERSION,
+        )
         return
 
     # Start Temporal-native WatchWorkflow
@@ -3306,7 +3707,15 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
         # Try to find running watch workflows
         client, err = _get_client()
         if err:
-            sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
+            sys.exit(
+                _err(
+                    cmd,
+                    f"Cannot connect: {err}",
+                    "TEMPORAL_UNREACHABLE",
+                    "mtor tsc",
+                    exit_code=3,
+                )
+            )
 
         async def _find_and_stop():
             stopped = []
@@ -3318,7 +3727,9 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
                         stopped.append(ex.id)
                     except Exception:
                         with contextlib.suppress(Exception):
-                            await handle.terminate(reason="Stopped via mtor ragulator stop")
+                            await handle.terminate(
+                                reason="Stopped via mtor ragulator stop"
+                            )
                         stopped.append(ex.id)
             return stopped
 
@@ -3326,12 +3737,28 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
         if stopped:
             _ok(cmd, {"stopped": stopped, "count": len(stopped)}, version=VERSION)
         else:
-            _ok(cmd, {"stopped": [], "count": 0, "message": "No running watch workflows found"}, version=VERSION)
+            _ok(
+                cmd,
+                {
+                    "stopped": [],
+                    "count": 0,
+                    "message": "No running watch workflows found",
+                },
+                version=VERSION,
+            )
         return
 
     client, err = _get_client()
     if err:
-        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "mtor tsc",
+                exit_code=3,
+            )
+        )
 
     async def _stop():
         handle = client.get_workflow_handle(workflow_id)
@@ -3361,7 +3788,15 @@ def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
 
     client, err = _get_client()
     if err:
-        sys.exit(_err(cmd, f"Cannot connect: {err}", "TEMPORAL_UNREACHABLE", "mtor tsc", exit_code=3))
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "mtor tsc",
+                exit_code=3,
+            )
+        )
 
     async def _query():
         handle = client.get_workflow_handle(workflow_id)
@@ -3480,12 +3915,14 @@ def autophagy(
     )
 
 
-_NON_DISPATCHABLE_AUDIT_STATUSES = frozenset({
-    "already_satisfied",
-    "not_outstanding_ready",
-    "status_normalized_done",
-    "audited_present",
-})
+_NON_DISPATCHABLE_AUDIT_STATUSES = frozenset(
+    {
+        "already_satisfied",
+        "not_outstanding_ready",
+        "status_normalized_done",
+        "audited_present",
+    }
+)
 
 
 def _select_dispatch_candidates(
@@ -3511,30 +3948,36 @@ def _select_dispatch_candidates(
         if not spec.get("dispatchable"):
             status = spec.get("status", "ready")
             reason = "blocked" if status == "ready" else f"status:{status}"
-            skipped.append({
-                "name": spec["name"],
-                "path": spec["path"],
-                "reason": reason,
-            })
+            skipped.append(
+                {
+                    "name": spec["name"],
+                    "path": spec["path"],
+                    "reason": reason,
+                }
+            )
             continue
 
         audit_status = spec.get("audit_status", "")
         if audit_status in _NON_DISPATCHABLE_AUDIT_STATUSES:
-            skipped.append({
-                "name": spec["name"],
-                "path": spec["path"],
-                "reason": f"audit:{audit_status}",
-            })
+            skipped.append(
+                {
+                    "name": spec["name"],
+                    "path": spec["path"],
+                    "reason": f"audit:{audit_status}",
+                }
+            )
             continue
 
         spec_path = Path(spec["path"])
         spec_errors = _validate_spec(spec_path, repo)
         if spec_errors:
-            skipped.append({
-                "name": spec["name"],
-                "path": spec["path"],
-                "reason": "invalid:" + "; ".join(spec_errors),
-            })
+            skipped.append(
+                {
+                    "name": spec["name"],
+                    "path": spec["path"],
+                    "reason": "invalid:" + "; ".join(spec_errors),
+                }
+            )
             continue
 
         candidates.append(spec)
@@ -3545,7 +3988,9 @@ def _select_dispatch_candidates(
 @app.command(name="dispatch-all")
 def dispatch_all(
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
+        "~/epigenome/chromatin/loci/plans/"
+    ),
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
     dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
     limit: Annotated[int, Parameter(name=["--limit"])] = 0,
@@ -3561,7 +4006,11 @@ def dispatch_all(
     specs = scan_specs(directory)
 
     if not specs:
-        _ok(cmd, {"dispatched": [], "count": 0, "skipped": [], "directory": str(directory)}, version=VERSION)
+        _ok(
+            cmd,
+            {"dispatched": [], "count": 0, "skipped": [], "directory": str(directory)},
+            version=VERSION,
+        )
         return
 
     try:
@@ -3588,7 +4037,13 @@ def dispatch_all(
     if not candidates:
         _ok(
             cmd,
-            {"dispatched": [], "count": 0, "skipped": skipped, "message": "No dispatchable specs", "directory": str(directory)},
+            {
+                "dispatched": [],
+                "count": 0,
+                "skipped": skipped,
+                "message": "No dispatchable specs",
+                "directory": str(directory),
+            },
             version=VERSION,
         )
         return
@@ -3612,11 +4067,13 @@ def dispatch_all(
         )
 
         if dry_run:
-            dispatched.append({
-                "name": spec["name"],
-                "status": "would_dispatch",
-                "prompt_preview": prompt[:100],
-            })
+            dispatched.append(
+                {
+                    "name": spec["name"],
+                    "status": "would_dispatch",
+                    "prompt_preview": prompt[:100],
+                }
+            )
             continue
 
         # Capture stdout to prevent individual dispatch from printing
@@ -3629,19 +4086,23 @@ def dispatch_all(
                 provider=provider,
                 spec_path=spec_path,
             )
-            dispatched.append({
-                "name": spec["name"],
-                "workflow_id": workflow_id,
-                "status": "dispatched",
-            })
+            dispatched.append(
+                {
+                    "name": spec["name"],
+                    "workflow_id": workflow_id,
+                    "status": "dispatched",
+                }
+            )
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 1
             output = captured.getvalue()
             error_msg = output[:200] if output else f"exit_code={code}"
-            errors.append({
-                "name": spec["name"],
-                "error": error_msg,
-            })
+            errors.append(
+                {
+                    "name": spec["name"],
+                    "error": error_msg,
+                }
+            )
         finally:
             sys.stdout = old_stdout
 
@@ -3721,7 +4182,9 @@ def setup_search_attrs() -> None:
 def reconcile(
     *,
     dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path("~/epigenome/chromatin/loci/plans/"),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
+        "~/epigenome/chromatin/loci/plans/"
+    ),
 ) -> None:
     """Reconcile spec status with reality — fix stale frontmatter based on Temporal and git.
 
