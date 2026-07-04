@@ -19,9 +19,13 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from pathlib import Path
-
-    from mtor.worker.translocase import chaperone, create_pr, translate, watch_cycle, _log_event
+    from mtor.worker.translocase import (
+        chaperone,
+        create_pr,
+        translate,
+        watch_cycle,
+        _log_event,
+    )
 
 # Retry policy: 2 attempts max (translation tasks mutate files, not safely retriable)
 _RETRY_POLICY = RetryPolicy(
@@ -33,7 +37,6 @@ _RETRY_POLICY = RetryPolicy(
 
 # Review has no retries — it's local and fast
 _REVIEW_RETRY = RetryPolicy(maximum_attempts=1)
-
 
 
 def _summarize_workflow_result(result: dict) -> dict:
@@ -51,7 +54,18 @@ def _summarize_workflow_result(result: dict) -> dict:
         value = result.get(key, "")
         if value:
             summary[key] = str(value)[:500] if key == "stderr" else value
+    for key in (
+        "branch_name",
+        "merged",
+        "pr_url",
+        "pr_number",
+        "pr_created",
+        "pr_error",
+    ):
+        if key in result:
+            summary[key] = result[key]
     return summary
+
 
 @workflow.defn
 class TranslationWorkflow:
@@ -114,7 +128,11 @@ class TranslationWorkflow:
                     )
                     decision = self._approval_signals.get(task_id, "reject")
                     if decision == "approve":
-                        review = {**review, "verdict": "deferred_approved", "approved": True}
+                        review = {
+                            **review,
+                            "verdict": "deferred_approved",
+                            "approved": True,
+                        }
                     else:
                         review = {**review, "verdict": "deferred_rejected"}
                 except TimeoutError:
@@ -143,7 +161,11 @@ class TranslationWorkflow:
                 "stdout": "",
                 "stderr": str(exc)[:2000],
             }
-            review = {"approved": False, "flags": ["activity_failed"], "verdict": "rejected"}
+            review = {
+                "approved": False,
+                "flags": ["activity_failed"],
+                "verdict": "rejected",
+            }
 
         # #5: If flagged, log flags but proceed immediately.
         # approved_with_flags means chaperone approved with non-fatal flags —
@@ -173,7 +195,8 @@ class TranslationWorkflow:
             workflow.upsert_search_attributes(
                 [
                     SearchAttributePair(
-                        SearchAttributeKey.for_keyword("mtor_verdict"), review["verdict"]
+                        SearchAttributeKey.for_keyword("mtor_verdict"),
+                        review["verdict"],
                     ),
                 ]
             )
@@ -182,7 +205,11 @@ class TranslationWorkflow:
         # merge happens through GitHub review/CI or an explicit human action.
         if review.get("approved") and result.get("branch_name"):
             try:
-                title = task.strip().splitlines()[0][:80] if task.strip() else result["branch_name"]
+                title = (
+                    task.strip().splitlines()[0][:80]
+                    if task.strip()
+                    else result["branch_name"]
+                )
                 body = (
                     "Dispatched by mtor\n\n"
                     f"Workflow: {workflow.info().workflow_id}\n"
@@ -190,12 +217,18 @@ class TranslationWorkflow:
                 )
                 pr_result = await workflow.execute_activity(
                     create_pr,
-                    args=[{
-                        "repo_root": spec.get("repo", str(Path.home() / "germline")),
-                        "branch_name": result["branch_name"],
-                        "title": title,
-                        "body": body,
-                    }],
+                    args=[
+                        {
+                            # No Path.home() here: eagerly-evaluated dict.get default
+                            # throws inside Temporal's sandboxed workflow code even
+                            # when "repo" is set. create_pr (git_ops.py) expanduser()'s
+                            # this string before using it as a subprocess cwd.
+                            "repo_root": spec.get("repo") or "~/germline",
+                            "branch_name": result["branch_name"],
+                            "title": title,
+                            "body": body,
+                        }
+                    ],
                     start_to_close_timeout=timedelta(minutes=2),
                 )
                 result = {
@@ -236,10 +269,14 @@ class TranslationWorkflow:
         all_results: list[dict] = []
         stage_count = len(staged)
         for stage_idx, stage_specs in enumerate(staged):
-            stage_results = await asyncio.gather(*[self._execute_one(s) for s in stage_specs])
+            stage_results = await asyncio.gather(
+                *[self._execute_one(s) for s in stage_specs]
+            )
             all_results.extend(stage_results)
 
-            stage_failed = any(not r.get("review", {}).get("approved") for r in stage_results)
+            stage_failed = any(
+                not r.get("review", {}).get("approved") for r in stage_results
+            )
             if stage_failed and stage_idx < stage_count - 1:
                 for skipped_stage in staged[stage_idx + 1 :]:
                     for spec in skipped_stage:
@@ -262,9 +299,13 @@ class TranslationWorkflow:
         succeeded = sum(1 for r in all_results if r.get("success"))
         approved = sum(1 for r in all_results if r.get("review", {}).get("approved"))
         flagged = sum(
-            1 for r in all_results if r.get("review", {}).get("verdict") == "approved_with_flags"
+            1
+            for r in all_results
+            if r.get("review", {}).get("verdict") == "approved_with_flags"
         )
-        rejected = sum(1 for r in all_results if not r.get("review", {}).get("approved"))
+        rejected = sum(
+            1 for r in all_results if not r.get("review", {}).get("approved")
+        )
 
         return {
             "total": len(all_results),
@@ -298,7 +339,9 @@ class WatchWorkflow:
         """Signal to gracefully stop the watch loop."""
         self._stop_requested = True
 
-    async def _dispatch_spec(self, spec: dict, provider: str, cycle: int, task_queue: str) -> dict:
+    async def _dispatch_spec(
+        self, spec: dict, provider: str, cycle: int, task_queue: str
+    ) -> dict:
         """Dispatch a single spec as a child TranslationWorkflow."""
         name = spec.get("name", "unnamed")
         child_spec = {
@@ -377,9 +420,12 @@ class WatchWorkflow:
                 for batch_start in range(0, len(ready_specs), max_concurrent):
                     if self._stop_requested:
                         break
-                    batch = ready_specs[batch_start:batch_start + max_concurrent]
+                    batch = ready_specs[batch_start : batch_start + max_concurrent]
                     results = await asyncio.gather(
-                        *[self._dispatch_spec(s, provider, cycle, task_queue) for s in batch],
+                        *[
+                            self._dispatch_spec(s, provider, cycle, task_queue)
+                            for s in batch
+                        ],
                     )
                     total_dispatched += len(results)
             else:
@@ -392,11 +438,13 @@ class WatchWorkflow:
             cycles_in_run = cycle - run_start_cycle
             if cycles_in_run >= max_cycles:
                 workflow.continue_as_new(
-                    args=[{
-                        **params,
-                        "_start_cycle": cycle,
-                        "_continued": True,
-                    }],
+                    args=[
+                        {
+                            **params,
+                            "_start_cycle": cycle,
+                            "_continued": True,
+                        }
+                    ],
                 )
 
             # --- auto-stop after N empty cycles ---
