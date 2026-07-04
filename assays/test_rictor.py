@@ -48,6 +48,25 @@ SERVICE_SYSTEM_TEMPORAL_ACTIVE = (
     "__TEMPORAL_WORKER_SYSTEM__\n"
     "ActiveState=active\nSubState=running\nMainPID=456\n"
 )
+SERVICE_SYSTEM_MTOR_ACTIVE = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=123\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__MTOR_WORKER_SYSTEM__\n"
+    "ActiveState=active\nSubState=running\nMainPID=789\n"
+)
+SERVICE_SYSTEM_MTOR_ABSENT = (
+    "__MTOR_WORKER__\n"
+    "ActiveState=active\nSubState=running\nMainPID=123\n"
+    "__TEMPORAL_WORKER_USER__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__TEMPORAL_WORKER_SYSTEM__\n"
+    "ActiveState=inactive\nSubState=dead\nMainPID=0\n"
+    "__MTOR_WORKER_SYSTEM__\n"
+)
 WORKER_ROOT = "123 77 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
 
 
@@ -212,8 +231,12 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
-        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
+        process_check = next(
+            c for c in report.checks if c["name"] == "worker_process_singleton"
+        )
         assert service_check["ok"] is True
         assert process_check["ok"] is True
 
@@ -243,7 +266,9 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
         assert report.ok is False
         assert service_check["ok"] is False
         assert "mtor-worker.service" in str(service_check["detail"])
@@ -274,7 +299,9 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
         assert report.ok is False
         assert service_check["ok"] is False
         assert "temporal-worker.service" in str(service_check["detail"])
@@ -305,10 +332,78 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        service_check = next(c for c in report.checks if c["name"] == "worker_service_singleton")
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
         assert report.ok is False
         assert service_check["ok"] is False
         assert "temporal_system" in str(service_check["detail"])
+
+    def test_check_health_fails_when_system_scope_mtor_worker_active(self, tmp_path):
+        """Remote health fails when a duplicate mtor-worker runs in system scope."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_SYSTEM_MTOR_ACTIVE
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
+        assert report.ok is False
+        assert service_check["ok"] is False
+        assert "mtor_system" in str(service_check["detail"])
+
+    def test_check_health_passes_when_system_scope_mtor_worker_absent(self, tmp_path):
+        """Remote health passes when no system-scope mtor-worker is present."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            joined = " ".join(cmd)
+            if "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_SYSTEM_MTOR_ABSENT
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            elif cmd[:2] == ["git", "status"]:
+                result.stdout = ""
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
+
+        service_check = next(
+            c for c in report.checks if c["name"] == "worker_service_singleton"
+        )
+        assert service_check["ok"] is True
 
     def test_check_health_fails_on_duplicate_worker_roots(self, tmp_path):
         """Remote health fails when more than one mtor.worker root is active."""
@@ -340,7 +435,9 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        process_check = next(
+            c for c in report.checks if c["name"] == "worker_process_singleton"
+        )
         assert report.ok is False
         assert process_check["ok"] is False
         assert "found 2" in str(process_check["detail"])
@@ -363,9 +460,7 @@ class TestCheckHealth:
             elif "systemctl --user show mtor-worker.service" in joined:
                 result.stdout = SERVICE_OK
             elif "ps -eo" in joined:
-                result.stdout = (
-                    "123 1 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
-                )
+                result.stdout = "123 1 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
             else:
                 result.stdout = ""
             return result
@@ -373,7 +468,9 @@ class TestCheckHealth:
         with patch("mtor.infra.subprocess.run", side_effect=fake_run):
             report = check_health(worker_host="ganglion", repo_dir=str(tmp_path))
 
-        process_check = next(c for c in report.checks if c["name"] == "worker_process_singleton")
+        process_check = next(
+            c for c in report.checks if c["name"] == "worker_process_singleton"
+        )
         assert report.ok is False
         assert process_check["ok"] is False
         assert "orphaned" in str(process_check["detail"])
@@ -477,9 +574,11 @@ class TestDeploy:
             result.stderr = ""
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             from mtor.infra import HealthReport
 
             mock_ch.return_value = HealthReport(
@@ -572,9 +671,11 @@ class TestDeploy:
             result.stderr = ""
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             result = deploy(
                 worker_host="test-host",
@@ -583,7 +684,9 @@ class TestDeploy:
             )
 
         assert result.healthy is True
-        merge_cmd = next(cmd for cmd in calls if cmd[:2] == ["ssh", "test-host"] and "bash" in cmd)
+        merge_cmd = next(
+            cmd for cmd in calls if cmd[:2] == ["ssh", "test-host"] and "bash" in cmd
+        )
         assert "cd /home/vivesca/code/mtor" in merge_cmd[-1]
         assert "/Users/terry/code/mtor" not in merge_cmd[-1]
 
@@ -626,9 +729,11 @@ class TestDeploy:
             result.stderr = ""
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             deploy(
                 worker_host="test-host",
@@ -654,18 +759,25 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "list_orphans" in cmd[-1]
+            ):
                 result.stdout = "found=1\nterminated=1\nremaining=0\npids=321\n"
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
         assert result.healthy is True
-        cleanup_steps = [step for step in result.steps if step["step"] == "orphan_cleanup"]
+        cleanup_steps = [
+            step for step in result.steps if step["step"] == "orphan_cleanup"
+        ]
         assert len(cleanup_steps) == 2
         assert [step["attempt"] for step in cleanup_steps] == [1, 2]
         for cleanup_step in cleanup_steps:
@@ -674,7 +786,9 @@ class TestDeploy:
             assert cleanup_step["terminated"] == 1
             assert cleanup_step["remaining"] == 0
             assert cleanup_step["pids"] == ["321"]
-        assert any("kill -TERM $pids" in cmd[-1] for cmd in calls if "list_orphans" in cmd[-1])
+        assert any(
+            "kill -TERM $pids" in cmd[-1] for cmd in calls if "list_orphans" in cmd[-1]
+        )
 
     def test_deploy_runs_settle_cleanup_settle_cleanup_before_health(self):
         """deploy retires legacy worker, waits after restart, cleans twice, then checks health."""
@@ -687,12 +801,18 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "disable --now temporal-worker" in cmd[-1]
+            ):
                 events.append("retire")
                 result.stdout = "active=failed\nenabled=disabled\n"
             elif cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
                 events.append("restart")
-            elif cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+            elif (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "list_orphans" in cmd[-1]
+            ):
                 events.append("cleanup")
                 result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
             return result
@@ -704,9 +824,11 @@ class TestDeploy:
             events.append("health")
             return HealthReport(ok=True, checks=[])
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep", side_effect=fake_sleep), \
-             patch("mtor.infra.check_health", side_effect=fake_health):
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep", side_effect=fake_sleep),
+            patch("mtor.infra.check_health", side_effect=fake_health),
+        ):
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
         assert result.healthy is True
@@ -731,24 +853,36 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "disable --now temporal-worker" in cmd[-1]
+            ):
                 events.append("retire")
                 result.stdout = "active=failed\nenabled=disabled\n"
             elif cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
                 events.append("restart")
-            elif cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+            elif (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "list_orphans" in cmd[-1]
+            ):
                 result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
         assert result.healthy is True
         assert events == ["retire", "restart"]
-        retire_step = next(step for step in result.steps if step["step"] == "retire_legacy_temporal_worker")
+        retire_step = next(
+            step
+            for step in result.steps
+            if step["step"] == "retire_legacy_temporal_worker"
+        )
         assert retire_step["ok"] is True
         assert retire_step["active"] == "failed"
         assert retire_step["enabled"] == "disabled"
@@ -765,7 +899,10 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "disable --now temporal-worker" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "disable --now temporal-worker" in cmd[-1]
+            ):
                 result.returncode = 1
                 result.stdout = "active=active\nenabled=enabled\n"
             return result
@@ -775,7 +912,10 @@ class TestDeploy:
 
         assert result.healthy is False
         assert "Legacy temporal-worker retirement failed" in str(result.error)
-        assert not any(cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"] for cmd in calls)
+        assert not any(
+            cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]
+            for cmd in calls
+        )
 
     def test_deploy_orphan_cleanup_targets_only_ppid_one_roots(self):
         """cleanup command filters to orphaned op-run worker roots under PID 1."""
@@ -788,14 +928,19 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "list_orphans" in cmd[-1]
+            ):
                 cleanup_commands.append(cmd[-1])
                 result.stdout = "found=0\nterminated=0\nremaining=0\npids=\n"
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
@@ -815,18 +960,27 @@ class TestDeploy:
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
-            if cmd[:4] == ["ssh", "test-host", "bash", "-lc"] and "list_orphans" in cmd[-1]:
+            if (
+                cmd[:4] == ["ssh", "test-host", "bash", "-lc"]
+                and "list_orphans" in cmd[-1]
+            ):
                 result.stdout = "found=2\nterminated=1\nremaining=1\npids=321,322\n"
             return result
 
-        with patch("mtor.infra.subprocess.run", side_effect=fake_run), \
-             patch("mtor.infra.time.sleep"), \
-             patch("mtor.infra.check_health") as mock_ch:
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch("mtor.infra.check_health") as mock_ch,
+        ):
             mock_ch.return_value = HealthReport(ok=True, checks=[])
             result = deploy(worker_host="test-host", repo_dir="/fake/repo")
 
-        cleanup_step = next(step for step in result.steps if step["step"] == "orphan_cleanup")
-        health_step = next(step for step in result.steps if step["step"] == "health_check")
+        cleanup_step = next(
+            step for step in result.steps if step["step"] == "orphan_cleanup"
+        )
+        health_step = next(
+            step for step in result.steps if step["step"] == "health_check"
+        )
         assert result.healthy is False
         assert cleanup_step["ok"] is False
         assert cleanup_step["remaining"] == 1

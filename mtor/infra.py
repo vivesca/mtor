@@ -89,7 +89,10 @@ def _parse_worker_roots(output: str) -> tuple[bool, str]:
         pid, ppid, _args = roots[0]
         return True, f"one mtor.worker root pid={pid} ppid={ppid}"
     if orphaned:
-        return False, f"orphaned mtor.worker root(s) under PID 1: {orphaned}; roots={len(roots)}"
+        return (
+            False,
+            f"orphaned mtor.worker root(s) under PID 1: {orphaned}; roots={len(roots)}",
+        )
     return False, f"expected one mtor.worker root, found {len(roots)}"
 
 
@@ -243,7 +246,11 @@ def check_health(
                 timeout=10,
             )
             ssh_ok = result.returncode == 0
-            ssh_detail = f"SSH to {host} succeeded" if ssh_ok else f"SSH failed: {result.stderr.strip()[:100]}"
+            ssh_detail = (
+                f"SSH to {host} succeeded"
+                if ssh_ok
+                else f"SSH failed: {result.stderr.strip()[:100]}"
+            )
         except (subprocess.TimeoutExpired, OSError) as exc:
             ssh_detail = f"SSH to {host} failed: {exc}"
     if not ssh_ok and not host_is_local:
@@ -258,7 +265,9 @@ def check_health(
     elif host_is_local:
         repo_ok = Path(checked_repo).exists()
         repo_detail = (
-            f"Repo at {checked_repo} exists" if repo_ok else f"Repo not found: {checked_repo}"
+            f"Repo at {checked_repo} exists"
+            if repo_ok
+            else f"Repo not found: {checked_repo}"
         )
     else:
         result = subprocess.run(
@@ -290,7 +299,9 @@ def check_health(
                 cwd=repo,
             )
             if local_head.returncode != 0:
-                head_detail = f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
+                head_detail = (
+                    f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
+                )
             elif host_is_local:
                 short = local_head.stdout.strip()[:8]
                 head_ok = True
@@ -348,7 +359,11 @@ def check_health(
                 )
             if result.returncode == 0:
                 git_clean = result.stdout.strip() == ""
-                git_detail = "Working tree clean" if git_clean else f"Uncommitted changes: {result.stdout.strip()[:80]}"
+                git_detail = (
+                    "Working tree clean"
+                    if git_clean
+                    else f"Uncommitted changes: {result.stdout.strip()[:80]}"
+                )
             else:
                 git_detail = f"git status failed: {result.stderr.strip()[:80]}"
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -403,6 +418,9 @@ def check_health(
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
                     "printf '__TEMPORAL_WORKER_SYSTEM__\\n'; "
                     "systemctl show temporal-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
+                    "printf '__MTOR_WORKER_SYSTEM__\\n'; "
+                    "systemctl show mtor-worker.service "
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true",
                 ),
                 capture_output=True,
@@ -411,29 +429,39 @@ def check_health(
             )
             sections = _split_marked_sections(result.stdout)
             mtor_unit = _parse_systemctl_show(sections.get("mtor_worker", ""))
-            temporal_user_unit = _parse_systemctl_show(sections.get("temporal_worker_user", ""))
-            temporal_system_unit = _parse_systemctl_show(sections.get("temporal_worker_system", ""))
+            temporal_user_unit = _parse_systemctl_show(
+                sections.get("temporal_worker_user", "")
+            )
+            temporal_system_unit = _parse_systemctl_show(
+                sections.get("temporal_worker_system", "")
+            )
+            mtor_system_unit = _parse_systemctl_show(
+                sections.get("mtor_worker_system", "")
+            )
             mtor_active = (
                 mtor_unit.get("ActiveState") == "active"
                 and mtor_unit.get("SubState") == "running"
             )
             temporal_user_active = temporal_user_unit.get("ActiveState") == "active"
             temporal_system_active = temporal_system_unit.get("ActiveState") == "active"
+            mtor_system_active = mtor_system_unit.get("ActiveState") == "active"
             service_ok = (
                 result.returncode == 0
                 and mtor_active
                 and not temporal_user_active
                 and not temporal_system_active
+                and not mtor_system_active
             )
             service_detail = (
-                "mtor-worker.service active/running; temporal-worker.service inactive in user/system scope"
+                "mtor-worker.service active/running (user scope only); temporal-worker.service inactive in user/system scope"
                 if service_ok
                 else (
-                    "Expected mtor-worker.service active/running and "
+                    "Expected mtor-worker.service active/running (user scope only) and "
                     "legacy temporal-worker.service inactive in user/system scope "
                     f"(mtor={mtor_unit or 'absent'}, "
                     f"temporal_user={temporal_user_unit or 'absent'}, "
-                    f"temporal_system={temporal_system_unit or 'absent'})"
+                    f"temporal_system={temporal_system_unit or 'absent'}, "
+                    f"mtor_system={mtor_system_unit or 'absent'})"
                 )
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -456,8 +484,12 @@ def check_health(
             process_ok = False
             process_detail = f"Worker process check failed: {exc}"
 
-    checks.append({"name": "worker_service_singleton", "ok": service_ok, "detail": service_detail})
-    checks.append({"name": "worker_process_singleton", "ok": process_ok, "detail": process_detail})
+    checks.append(
+        {"name": "worker_service_singleton", "ok": service_ok, "detail": service_detail}
+    )
+    checks.append(
+        {"name": "worker_process_singleton", "ok": process_ok, "detail": process_detail}
+    )
     if not service_ok or not process_ok:
         all_ok = False
 
