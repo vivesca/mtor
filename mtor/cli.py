@@ -40,7 +40,12 @@ from mtor import (
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
-from mtor.client import _get_client, workflow_execution_state
+from mtor.client import (
+    _get_client,
+    _pending_activity_records,
+    _pending_activity_timestamp,
+    workflow_execution_state,
+)
 from mtor.dedup import check_duplicate as _check_dedup
 from mtor.dedup import record_dispatch as _record_dispatch
 from mtor.dispatch import _dispatch_prompt
@@ -49,6 +54,7 @@ from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.harness import PROVIDER_HARNESS_MAP
 from mtor.rptor import (
     CycleDetected,
+    autotriage,
     audit_specs,
     display_dag,
     resolve_dag,
@@ -309,8 +315,8 @@ def _failure_text(value: Any) -> str:
 def _pending_activity_details(desc: Any) -> list[dict[str, Any]]:
     """Extract compact pending activity details from Temporal describe output."""
     details: list[dict[str, Any]] = []
-    for activity in getattr(desc, "pending_activities", None) or []:
-        heartbeat_time = getattr(activity, "last_heartbeat_time", None)
+    for activity in _pending_activity_records(desc):
+        heartbeat_time = _pending_activity_timestamp(activity, "last_heartbeat_time")
         activity_type = getattr(activity, "activity_type", None)
         if not isinstance(activity_type, str):
             activity_type = getattr(activity_type, "name", None) or str(
@@ -3493,6 +3499,7 @@ def rptor(
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
     audit: Annotated[bool, Parameter(name=["--audit"])] = False,
     strict: Annotated[bool, Parameter(name=["--strict"])] = False,
+    autotriage_flag: Annotated[bool, Parameter(name=["--autotriage"])] = False,
 ) -> None:
     """Display spec DAG — status, dependencies, and dispatchability."""
     cmd = "mtor rptor"
@@ -3542,6 +3549,11 @@ def rptor(
                 exit_code=1,
             )
         )
+
+    if autotriage_flag:
+        result = autotriage(resolved, str(directory))
+        _ok(cmd, result, version=VERSION)
+        return
 
     dag = display_dag(resolved)
 
