@@ -522,3 +522,172 @@ def display_dag(specs: list[dict[str, Any]]) -> dict[str, Any]:
         "specs": buckets,
         "counts": counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Autotriage rubric
+# ---------------------------------------------------------------------------
+
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+_INTENT_FIT_KEYWORDS = frozenset({
+    "north star", "vision", "intent", "bug", "fix", "test", "assay",
+    "reliability", "autopoiesis",
+})
+_CLEAR_FIX_VERBS = frozenset({
+    "add", "fix", "update", "replace", "remove", "write", "implement",
+    "create", "validate", "refactor",
+})
+_VERIFIABLE_KEYWORDS = frozenset({
+    "test", "pytest", "verify", "smoke", "browser", "screenshot", "log",
+    "assay",
+})
+_BROAD_ROOTS = frozenset({
+    ".", "/", "~", "/Users/terry", "/Users/terry/germline",
+    "/Users/terry/code", str(Path.home()),
+    str(Path.home() / "germline"),
+    str(Path.home() / "code"),
+})
+
+
+def _assess_intent_fit(spec: dict[str, Any]) -> dict[str, Any]:
+    priority = spec.get("priority", "medium")
+    if priority in ("high", "medium"):
+        return {"ok": True, "reason": f"priority={priority}"}
+    body_lower = spec.get("body", "").lower()
+    for kw in _INTENT_FIT_KEYWORDS:
+        if kw in body_lower:
+            return {"ok": True, "reason": f"body mentions '{kw}'"}
+    return {"ok": False, "reason": "low priority without intent keywords in body"}
+
+
+def _assess_inferable(spec: dict[str, Any]) -> dict[str, Any]:
+    scope = spec.get("scope", [])
+    if scope:
+        return {"ok": True, "reason": f"scope has {len(scope)} entries"}
+    body = spec.get("body", "")
+    if re.search(r"(?:[\w./]+\.(?:py|js|ts|md|yaml|yml|toml))", body):
+        return {"ok": True, "reason": "body contains file-like paths"}
+    if re.search(r"\btest_\w+", body):
+        return {"ok": True, "reason": "body mentions exact test names"}
+    return {"ok": False, "reason": "empty scope and no file paths or test names in body"}
+
+
+def _assess_clear_fix(spec: dict[str, Any]) -> dict[str, Any]:
+    body_lower = spec.get("body", "").lower()
+    for verb in _CLEAR_FIX_VERBS:
+        if re.search(rf"\b{verb}\b", body_lower):
+            return {"ok": True, "reason": f"body contains action verb '{verb}'"}
+    return {"ok": False, "reason": "no concrete action verbs in body"}
+
+
+def _assess_verifiable(spec: dict[str, Any]) -> dict[str, Any]:
+    tests = spec.get("tests", {})
+    if isinstance(tests, dict) and tests.get("run"):
+        return {"ok": True, "reason": "tests.run is present"}
+    body_lower = spec.get("body", "").lower()
+    for kw in _VERIFIABLE_KEYWORDS:
+        if kw in body_lower:
+            return {"ok": True, "reason": f"body mentions '{kw}'"}
+    return {"ok": False, "reason": "no tests.run and no verification keywords in body"}
+
+
+def _assess_bounded_blast_radius(spec: dict[str, Any]) -> dict[str, Any]:
+    scope = spec.get("scope", [])
+    if not scope:
+        return {"ok": False, "reason": "scope is empty"}
+    if len(scope) > 5:
+        return {"ok": False, "reason": f"scope has {len(scope)} entries (max 5)"}
+    for entry in scope:
+        normalized = str(entry).rstrip("/")
+        if normalized in _BROAD_ROOTS:
+            return {"ok": False, "reason": f"broad scope: {entry}"}
+    return {"ok": True, "reason": f"{len(scope)} scoped path(s)"}
+
+
+_GATE_ASSESSORS = [
+    ("intent_fit", _assess_intent_fit),
+    ("inferable", _assess_inferable),
+    ("clear_fix", _assess_clear_fix),
+    ("verifiable", _assess_verifiable),
+    ("bounded_blast_radius", _assess_bounded_blast_radius),
+]
+
+
+def _assess_candidate(spec: dict[str, Any]) -> dict[str, Any]:
+    gates: dict[str, dict[str, Any]] = {}
+    for gate_name, assessor in _GATE_ASSESSORS:
+        gates[gate_name] = assessor(spec)
+    score = sum(1 for g in gates.values() if g["ok"])
+
+    tests = spec.get("tests", {})
+    proof = (
+        tests["run"]
+        if isinstance(tests, dict) and tests.get("run")
+        else "manual verification required"
+    )
+
+    scope = spec.get("scope", [])
+    if not scope:
+        blast = "unscoped"
+    else:
+        broad = [e for e in scope if str(e).rstrip("/") in _BROAD_ROOTS]
+        if broad:
+            blast = f"broad scope: {broad[0]}"
+        else:
+            blast = f"{len(scope)} scoped path(s)"
+
+    return {
+        "name": spec["name"],
+        "path": spec["path"],
+        "priority": spec.get("priority", "medium"),
+        "score": score,
+        "gates": gates,
+        "proof_required": proof,
+        "blast_radius": blast,
+    }
+
+
+def _defer_reason(spec: dict[str, Any]) -> str:
+    status = spec.get("status", "ready")
+    if status != "ready":
+        return f"status={status}"
+    if spec.get("depends_on"):
+        deps = spec.get("depends_on", [])
+        return f"waiting on depends_on: {', '.join(deps)}"
+    return "not dispatchable"
+
+
+def autotriage(resolved_specs: list[dict[str, Any]], directory: str) -> dict[str, Any]:
+    """Rank dispatchable specs by autonomy rubric, defer the rest.
+
+    Returns a porin-compatible dict with best_next, ready, defer, counts, directory.
+    """
+    dispatchable = [s for s in resolved_specs if s.get("dispatchable")]
+    non_dispatchable = [s for s in resolved_specs if not s.get("dispatchable")]
+
+    ready = [_assess_candidate(s) for s in dispatchable]
+    ready.sort(
+        key=lambda c: (
+            _PRIORITY_ORDER.get(c["priority"], 99),
+            -c["score"],
+            c["name"],
+        )
+    )
+
+    defer = [
+        {
+            "name": s["name"],
+            "path": s["path"],
+            "status": s.get("status", "ready"),
+            "reason": _defer_reason(s),
+        }
+        for s in non_dispatchable
+    ]
+
+    return {
+        "best_next": ready[0] if ready else None,
+        "ready": ready,
+        "defer": defer,
+        "counts": {"ready": len(ready), "defer": len(defer)},
+        "directory": directory,
+    }
