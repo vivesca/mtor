@@ -10,7 +10,7 @@ Run: cd ~/code/mtor && uv run pytest assays/test_graceful_kill.py -v
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.worker.translocase import _graceful_kill
 
@@ -20,14 +20,20 @@ def _run(coro):
 
 
 def test_terminate_exits_within_timeout():
-    """Process exits after terminate within the timeout -- no kill needed."""
+    """Process exits after terminate within the timeout -- no kill needed.
+
+    killpg is patched to fail so the single-process fallback path runs;
+    the group-kill path is covered by assays/test_cancel_graceful.py.
+    """
     proc = MagicMock(spec=asyncio.subprocess.Process)
     proc.returncode = None
+    proc.pid = 4242
     proc.wait = AsyncMock(return_value=0)
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
 
-    _run(_graceful_kill(proc, timeout=5.0))
+    with patch("mtor.worker.translocase.os.killpg", side_effect=ProcessLookupError):
+        _run(_graceful_kill(proc, timeout=5.0))
 
     proc.terminate.assert_called_once()
     proc.wait.assert_awaited()
@@ -38,13 +44,15 @@ def test_terminate_ignored_kill_called():
     """Process ignores terminate -- kill is called after timeout."""
     proc = MagicMock(spec=asyncio.subprocess.Process)
     proc.returncode = None
+    proc.pid = 4242
 
     # First wait() (inside wait_for) times out, second wait() succeeds.
     proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
 
-    _run(_graceful_kill(proc, timeout=0.1))
+    with patch("mtor.worker.translocase.os.killpg", side_effect=ProcessLookupError):
+        _run(_graceful_kill(proc, timeout=0.1))
 
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
