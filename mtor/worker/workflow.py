@@ -80,13 +80,21 @@ class TranslationWorkflow:
         # #3: Version guard — new code paths gated behind patched()
         use_review_v2 = workflow.patched("review-v2-slim-payload")
 
+        # Crashed-worker detection: translocase heartbeats every 30s and the
+        # SDK throttles heartbeat RPCs to at most every 60s, so 3m is safe.
+        # Gated behind patched() so in-flight replays keep the old 15m timeout.
+        if workflow.patched("translate-heartbeat-3m"):
+            heartbeat_timeout = timedelta(minutes=3)
+        else:
+            heartbeat_timeout = timedelta(minutes=15)
+
         try:
             # Raw subprocess mode (default)
             result = await workflow.execute_activity(
                 translate,
                 args=[task, provider, dispatch_mode, repo, harness],
                 start_to_close_timeout=timedelta(hours=2),
-                heartbeat_timeout=timedelta(minutes=15),
+                heartbeat_timeout=heartbeat_timeout,
                 retry_policy=_RETRY_POLICY,
             )
             # SRP defer: if activity returned deferred, wait for approval signal
