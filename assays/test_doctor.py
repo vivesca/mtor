@@ -489,9 +489,13 @@ def test_doctor_env_enables_opencode_runtime_probe():
         ) as runtime_probe,
         patch("mtor.doctor._get_provider_module", return_value=None),
         patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])),
+        patch(
+            "subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")
+        ),
         patch("sys.stderr.write"),
         patch("sys.stdout.write"),
     ):
+
         doctor()
 
     runtime_probe.assert_called_once_with()
