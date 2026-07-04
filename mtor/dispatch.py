@@ -25,6 +25,7 @@ from mtor import (
     WORKFLOW_TYPE,
 )
 from mtor.client import _get_client
+from mtor.infra import _count_active_ribosomes
 from mtor.dedup import (
     DEFAULT_STATE_PATH,
     DEFAULT_WINDOW_S,
@@ -535,6 +536,19 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
             "worker HEAD does not contain pushed SHA after "
             f"{merge_attempts} attempts: pushed {pushed_sha[:8] or '<none>'} "
             f"worker {worker_sha[:8] or '<none>'}"
+        )
+
+    # Drain guard: this restart kills in-flight ribosome subprocess trees
+    # (2026-07-04: auto-deploy collateral destroyed a running build twice).
+    # rictor deploy already waits for idle (367357a); this is the same
+    # protection for the auto-deploy lane. Positive evidence blocks; a
+    # failed probe (None) fails open, matching the deploy semantics.
+    active_ribosomes = _count_active_ribosomes(WORKER_HOST)
+    if active_ribosomes:
+        raise RuntimeError(
+            "auto-deploy blocked: worker restart would kill "
+            f"{active_ribosomes} in-flight ribosome process(es); "
+            "wait for them to finish or re-run with --skip-sha-check"
         )
 
     restart = subprocess.run(

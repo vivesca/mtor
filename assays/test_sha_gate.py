@@ -122,6 +122,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch.time") as mock_time,
             patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
@@ -153,6 +154,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch.time") as mock_time,
             patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA (pushed)
@@ -270,6 +272,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch.time"),
             patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -303,6 +306,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.subprocess") as mock_sp,
             patch("mtor.dispatch.time"),  # silence time.sleep(3) after restart
             patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD
@@ -876,3 +880,69 @@ class TestWorkerCheckoutState:
         assert state["origin"] == "https://github.com/vivesca/germline.git"
         assert state["dirty"] is False
         assert state["detail"] == ""
+
+
+class TestAutoDeployDrainGuard:
+    """The auto-deploy restart refuses to kill in-flight ribosome work."""
+
+    def test_auto_deploy_blocked_when_ribosomes_active(self):
+        """Active ribosome processes block the restart with a loud error."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=2),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
+                MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
+                MagicMock(returncode=1, stdout=""),  # contains-local: NOT contained
+                MagicMock(returncode=0, stdout=""),  # push
+                MagicMock(returncode=0, stdout=""),  # merge
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
+                ),  # worker HEAD contains pushed
+            ]
+            with pytest.raises(RuntimeError, match="auto-deploy blocked"):
+                _check_worker_sha()
+
+        # The guard fired before any restart could be attempted.
+        for call in mock_sp.run.call_args_list:
+            argv = call[0][0]
+            assert "systemctl --user restart mtor-worker" not in " ".join(
+                str(part) for part in argv
+            )
+
+    def test_auto_deploy_fails_open_when_probe_unknown(self):
+        """A failed probe (None) does not block: restart proceeds, returns True."""
+        from mtor.dispatch import _check_worker_sha
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=None),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
+                MagicMock(returncode=0, stdout="bbb222\n"),  # remote SHA (diff)
+                MagicMock(returncode=1, stdout=""),  # contains-local: NOT contained
+                MagicMock(returncode=0, stdout=""),  # push
+                MagicMock(returncode=0, stdout=""),  # merge
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
+                ),  # worker HEAD contains pushed
+                MagicMock(returncode=0, stdout=""),  # restart
+            ]
+            result = _check_worker_sha()
+
+        assert result is True
+        restart_calls = [
+            call
+            for call in mock_sp.run.call_args_list
+            if "systemctl --user restart mtor-worker"
+            in " ".join(str(part) for part in call[0][0])
+        ]
+        assert len(restart_calls) == 1
