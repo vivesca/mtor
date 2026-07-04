@@ -3,7 +3,7 @@ import ast
 import subprocess
 from pathlib import Path
 
-REPO = Path.home() / "code" / "mtor"
+REPO = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = [REPO / "mtor"]
 
 # Framework-called entrypoints (Temporal activities/workflows, cyclopts CLI handlers, rptor)
@@ -25,6 +25,7 @@ ALLOWLIST = {
     "feedback_dispatch_blocked",
     # Temporal/Langfuse framework entrypoints
     "create_pr", "create_span",
+    # stall_trace v3 stub-test API surface — restored for assays, no production caller yet
     "record_stall_event", "stall_rate", "most_common_stall_pattern",
     # rptor DAG functions (called from CLI via import)
     "scan_specs", "resolve_dag", "parse_spec", "topological_sort", "display_dag",
