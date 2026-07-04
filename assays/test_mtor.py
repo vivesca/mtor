@@ -1596,7 +1596,18 @@ class TestCheckpoints:
 
     def test_checkpoints_no_dir(self, tmp_path, monkeypatch):
         """When checkpoints dir doesn't exist, return empty list."""
+        import subprocess as _subprocess
+
+        import mtor.cli as _cli
+
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Missing local dir triggers an ssh-to-worker fallback; stub it so
+        # the test never reaches the live worker's checkpoint files.
+        monkeypatch.setattr(
+            _cli.subprocess,
+            "run",
+            lambda *a, **k: _subprocess.CompletedProcess(a, 1, stdout="", stderr=""),
+        )
         exit_code, data = invoke(["checkpoints"])
         assert exit_code == 0
         assert data["ok"] is True
