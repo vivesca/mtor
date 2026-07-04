@@ -1134,6 +1134,8 @@ def _dispatch_prompt(
             repo = parsed.get("repo", "~")
             if repo != "~":
                 spec["repo"] = _normalize_spec_repo_for_worker(str(repo))
+        elif repo:
+            spec["repo"] = _normalize_spec_repo_for_worker(str(repo))
 
         from temporalio.common import (
             SearchAttributeKey,

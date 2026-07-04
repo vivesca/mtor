@@ -2417,6 +2417,7 @@ def scout(
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 300,
+    repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
     workflow_id = _dispatch_prompt(
@@ -2426,6 +2427,7 @@ def scout(
         skip_sha_check=skip_sha_check,
         wait=wait,
         timeout=timeout,
+        repo=repo,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
@@ -2439,6 +2441,7 @@ def research(
     skip_sha_check: Annotated[bool, Parameter(name=["--skip-sha-check"])] = False,
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 600,
+    repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
     workflow_id = _dispatch_prompt(
@@ -2448,6 +2451,7 @@ def research(
         skip_sha_check=skip_sha_check,
         wait=wait,
         timeout=timeout,
+        repo=repo,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
