@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import shlex
@@ -89,7 +90,10 @@ def _parse_worker_roots(output: str) -> tuple[bool, str]:
         pid, ppid, _args = roots[0]
         return True, f"one mtor.worker root pid={pid} ppid={ppid}"
     if orphaned:
-        return False, f"orphaned mtor.worker root(s) under PID 1: {orphaned}; roots={len(roots)}"
+        return (
+            False,
+            f"orphaned mtor.worker root(s) under PID 1: {orphaned}; roots={len(roots)}",
+        )
     return False, f"expected one mtor.worker root, found {len(roots)}"
 
 
@@ -243,7 +247,11 @@ def check_health(
                 timeout=10,
             )
             ssh_ok = result.returncode == 0
-            ssh_detail = f"SSH to {host} succeeded" if ssh_ok else f"SSH failed: {result.stderr.strip()[:100]}"
+            ssh_detail = (
+                f"SSH to {host} succeeded"
+                if ssh_ok
+                else f"SSH failed: {result.stderr.strip()[:100]}"
+            )
         except (subprocess.TimeoutExpired, OSError) as exc:
             ssh_detail = f"SSH to {host} failed: {exc}"
     if not ssh_ok and not host_is_local:
@@ -258,7 +266,9 @@ def check_health(
     elif host_is_local:
         repo_ok = Path(checked_repo).exists()
         repo_detail = (
-            f"Repo at {checked_repo} exists" if repo_ok else f"Repo not found: {checked_repo}"
+            f"Repo at {checked_repo} exists"
+            if repo_ok
+            else f"Repo not found: {checked_repo}"
         )
     else:
         result = subprocess.run(
@@ -290,7 +300,9 @@ def check_health(
                 cwd=repo,
             )
             if local_head.returncode != 0:
-                head_detail = f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
+                head_detail = (
+                    f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
+                )
             elif host_is_local:
                 short = local_head.stdout.strip()[:8]
                 head_ok = True
@@ -348,7 +360,11 @@ def check_health(
                 )
             if result.returncode == 0:
                 git_clean = result.stdout.strip() == ""
-                git_detail = "Working tree clean" if git_clean else f"Uncommitted changes: {result.stdout.strip()[:80]}"
+                git_detail = (
+                    "Working tree clean"
+                    if git_clean
+                    else f"Uncommitted changes: {result.stdout.strip()[:80]}"
+                )
             else:
                 git_detail = f"git status failed: {result.stderr.strip()[:80]}"
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -403,6 +419,9 @@ def check_health(
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
                     "printf '__TEMPORAL_WORKER_SYSTEM__\\n'; "
                     "systemctl show temporal-worker.service "
+                    "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true; "
+                    "printf '__MTOR_WORKER_SYSTEM__\\n'; "
+                    "systemctl show mtor-worker.service "
                     "--property=ActiveState,SubState,MainPID --no-pager 2>/dev/null || true",
                 ),
                 capture_output=True,
@@ -411,29 +430,39 @@ def check_health(
             )
             sections = _split_marked_sections(result.stdout)
             mtor_unit = _parse_systemctl_show(sections.get("mtor_worker", ""))
-            temporal_user_unit = _parse_systemctl_show(sections.get("temporal_worker_user", ""))
-            temporal_system_unit = _parse_systemctl_show(sections.get("temporal_worker_system", ""))
+            temporal_user_unit = _parse_systemctl_show(
+                sections.get("temporal_worker_user", "")
+            )
+            temporal_system_unit = _parse_systemctl_show(
+                sections.get("temporal_worker_system", "")
+            )
+            mtor_system_unit = _parse_systemctl_show(
+                sections.get("mtor_worker_system", "")
+            )
             mtor_active = (
                 mtor_unit.get("ActiveState") == "active"
                 and mtor_unit.get("SubState") == "running"
             )
             temporal_user_active = temporal_user_unit.get("ActiveState") == "active"
             temporal_system_active = temporal_system_unit.get("ActiveState") == "active"
+            mtor_system_active = mtor_system_unit.get("ActiveState") == "active"
             service_ok = (
                 result.returncode == 0
                 and mtor_active
                 and not temporal_user_active
                 and not temporal_system_active
+                and not mtor_system_active
             )
             service_detail = (
-                "mtor-worker.service active/running; temporal-worker.service inactive in user/system scope"
+                "mtor-worker.service active/running (user scope only); temporal-worker.service inactive in user/system scope"
                 if service_ok
                 else (
-                    "Expected mtor-worker.service active/running and "
+                    "Expected mtor-worker.service active/running (user scope only) and "
                     "legacy temporal-worker.service inactive in user/system scope "
                     f"(mtor={mtor_unit or 'absent'}, "
                     f"temporal_user={temporal_user_unit or 'absent'}, "
-                    f"temporal_system={temporal_system_unit or 'absent'})"
+                    f"temporal_system={temporal_system_unit or 'absent'}, "
+                    f"mtor_system={mtor_system_unit or 'absent'})"
                 )
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -456,12 +485,67 @@ def check_health(
             process_ok = False
             process_detail = f"Worker process check failed: {exc}"
 
-    checks.append({"name": "worker_service_singleton", "ok": service_ok, "detail": service_detail})
-    checks.append({"name": "worker_process_singleton", "ok": process_ok, "detail": process_detail})
+    checks.append(
+        {"name": "worker_service_singleton", "ok": service_ok, "detail": service_detail}
+    )
+    checks.append(
+        {"name": "worker_process_singleton", "ok": process_ok, "detail": process_detail}
+    )
     if not service_ok or not process_ok:
         all_ok = False
 
     return HealthReport(ok=all_ok, checks=checks)
+
+
+def _count_active_ribosomes(host: str) -> int | None:
+    """Count in-flight ribosome subprocesses on the worker host.
+
+    Returns None when the probe fails (SSH error, unparsable output);
+    callers treat None as unknown and do not block on it.
+    """
+    # Bracketed pattern so the probe's own remote command line never matches.
+    try:
+        result = subprocess.run(
+            _host_command(host, "pgrep -fc 'effectors/[r]ibosome'"),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode == 1:
+        return 0  # pgrep: no processes matched
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _wait_for_ribosome_idle(
+    host: str,
+    timeout_seconds: int,
+    poll_seconds: float = 10.0,
+) -> dict[str, object]:
+    """Wait until no ribosome subprocesses are running on *host*.
+
+    Never blocks the deploy indefinitely: on timeout, or when the probe
+    fails, it reports and lets the worker's graceful shutdown handle
+    whatever is still in flight.
+    """
+    waited = 0.0
+    active = _count_active_ribosomes(host)
+    while active and waited < timeout_seconds:
+        time.sleep(poll_seconds)
+        waited += poll_seconds
+        active = _count_active_ribosomes(host)
+    return {
+        "ok": True,
+        "idle": active == 0,
+        "active": active if active is not None else "unknown",
+        "waited_seconds": int(waited),
+    }
 
 
 @dataclass
@@ -547,13 +631,30 @@ def deploy(
             error="Legacy temporal-worker retirement failed",
         )
 
-    # Step 4: restart worker
-    restart = subprocess.run(
-        ["ssh", host, "systemctl --user restart mtor-worker"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    # Step 4: wait for in-flight ribosome activities to finish so the
+    # restart consumes no activity attempts. Bounded — the worker's
+    # graceful shutdown covers anything still running at timeout.
+    drain_timeout = int(os.getenv("MTOR_DEPLOY_DRAIN_SECONDS", "600"))
+    drain = _wait_for_ribosome_idle(host, timeout_seconds=drain_timeout)
+    steps.append({"step": "drain", **drain})
+
+    # Step 5: restart worker. systemctl restart blocks through the unit's
+    # stop (up to TimeoutStopSec while the worker drains), so the timeout
+    # must exceed the drain window.
+    try:
+        restart = subprocess.run(
+            ["ssh", host, "systemctl --user restart mtor-worker"],
+            capture_output=True,
+            text=True,
+            timeout=drain_timeout + 90,
+        )
+    except subprocess.TimeoutExpired:
+        steps.append({"step": "restart", "ok": False})
+        return DeployResult(
+            steps=steps,
+            healthy=False,
+            error="Worker restart timed out",
+        )
     steps.append({"step": "restart", "ok": restart.returncode == 0})
     if restart.returncode != 0:
         return DeployResult(
@@ -562,7 +663,7 @@ def deploy(
             error=f"Worker restart failed: {restart.stderr.strip()[:200]}",
         )
 
-    # Step 5: let restart settle, then remove late orphan roots twice before health.
+    # Step 6: let restart settle, then remove late orphan roots twice before health.
     time.sleep(3)
     cleanup = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 1, **cleanup})
@@ -570,7 +671,7 @@ def deploy(
     cleanup_repeat = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 2, **cleanup_repeat})
 
-    # Step 6: verify health after post-settle cleanup.
+    # Step 7: verify health after post-settle cleanup.
     report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
     steps.append({"step": "health_check", "ok": report.ok})
     cleanup_ok = bool(cleanup["ok"]) and bool(cleanup_repeat["ok"])

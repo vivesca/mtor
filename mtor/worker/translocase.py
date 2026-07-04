@@ -300,6 +300,14 @@ async def _graceful_kill(
     _signal_group(proc.pid, _signal.SIGKILL)
 
 
+def _worker_shutdown_requested() -> bool:
+    """True when the current activity was cancelled by worker graceful shutdown."""
+    try:
+        return activity.is_worker_shutdown()
+    except Exception:
+        return False
+
+
 _HEARTBEAT_INTERVAL = 30.0
 
 
@@ -943,9 +951,16 @@ async def translate(
                 finalize_trace(_trace, _r)
                 return _r
             except asyncio.CancelledError:
-                # Temporal cancelled the activity (stall-detect kill or workflow cancel).
-                # Capture whatever output we can before re-raising.
+                # Temporal cancelled the activity (stall-detect kill, workflow
+                # cancel, or worker graceful shutdown). Kill the subprocess
+                # tree either way.
                 await _graceful_kill(proc)
+                if _worker_shutdown_requested():
+                    # Worker is draining (systemd stop / rictor deploy) and the
+                    # graceful window expired. Re-raise so Temporal retries the
+                    # attempt on the restarted worker instead of recording a
+                    # spurious failure result.
+                    raise
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
                         asyncio.gather(
@@ -1469,18 +1484,46 @@ async def main() -> None:
         or 2
     )  # default to 2 if no keys detected (op injects them later)
 
+    # Drain window for systemd stop: must stay under TimeoutStopSec (630s)
+    # in ~/.config/systemd/user/mtor-worker.service on the worker host.
+    drain_seconds = int(os.getenv("MTOR_GRACEFUL_SHUTDOWN_SECONDS", "540"))
+
     worker = Worker(
         client=client,
         task_queue=TASK_QUEUE,
         workflows=[TranslationWorkflow, WatchWorkflow],
         activities=[translate, chaperone, create_pr, watch_cycle],
         max_concurrent_activities=max_concurrent,
+        graceful_shutdown_timeout=timedelta(seconds=drain_seconds),
     )
     _gc_worktrees(str(Path.home() / "germline"))
+
+    # systemd stop (rictor deploy restart) sends SIGTERM. Without a handler
+    # the process dies mid-activity and in-flight ribosome subprocesses are
+    # killed with it, consuming the activity attempt. Drain instead: stop
+    # polling, give running activities the graceful window, then exit 0.
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_requested.set)
+
     print(
-        f"Translocase started on queue '{TASK_QUEUE}' (max_concurrent={max_concurrent})"
+        f"Translocase started on queue '{TASK_QUEUE}' "
+        f"(max_concurrent={max_concurrent}, drain={drain_seconds}s)"
     )
-    await worker.run()
+    run_task = asyncio.create_task(worker.run())
+    stop_task = asyncio.create_task(stop_requested.wait())
+    try:
+        await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        if not run_task.done():
+            print("Shutdown signal received -- draining in-flight activities")
+            await worker.shutdown()
+        await run_task
+    finally:
+        stop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stop_task
 
 
 if __name__ == "__main__":
