@@ -65,6 +65,39 @@ def _mode_allows_auto_commit(mode: str) -> bool:
     return mode not in {"scout", "research"}
 
 
+def _persist_output_file(
+    task: str,
+    provider: str,
+    rc: int,
+    stdout: str,
+    stderr: str,
+    diff_stat: str = "",
+    extra: str = "",
+) -> str:
+    """Write the run report to OUTPUT_DIR; return its path ('' on failure).
+
+    For read-only modes the stdout report is the entire deliverable, so
+    this must be callable from every return path of translate, including
+    timeout and cancellation.
+    """
+    task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
+    tid_str = task_id_match.group(1) if task_id_match else _time.strftime("%H%M%S")
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_file = OUTPUT_DIR / f"{_time.strftime('%Y%m%d')}-{tid_str}.txt"
+        out_text = (
+            f"Task: {task}\nProvider: {provider}\nExit: {rc}\n\n"
+            f"--- stdout ---\n{stdout}\n\n--- stderr ---\n{stderr}\n\n"
+            f"--- diff ---\n{diff_stat}\n"
+        )
+        if extra:
+            out_text += extra
+        out_file.write_text(out_text)
+        return str(out_file)
+    except OSError:
+        return ""
+
+
 _MAX_BRANCH_LEN = 80
 _BRANCH_PREFIX = "ribosome-"
 
@@ -967,6 +1000,7 @@ async def translate(
                     "task": task[:200],
                     "stdout": "",
                     "stderr": "timeout after 30m",
+                    "output_path": _persist_output_file(task, resolved_provider, -1, "", "timeout after 30m"),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -994,6 +1028,8 @@ async def translate(
                         stderr_bytes = b"cancelled"
                 except Exception:
                     stdout_bytes, stderr_bytes = b"", b"cancelled"
+                _cancelled_stdout = stdout_bytes.decode(errors="replace")
+                _cancelled_stderr = f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}"
                 _r = {
                     "success": False,
                     "exit_code": -1,
@@ -1004,8 +1040,9 @@ async def translate(
                     "requested_provider": provider,
                     "attempted_providers": sorted(_attempted),
                     "task": task[:200],
-                    "stdout": stdout_bytes.decode(errors="replace")[:1000],
-                    "stderr": f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}",
+                    "stdout": _cancelled_stdout[:1000],
+                    "stderr": _cancelled_stderr,
+                    "output_path": _persist_output_file(task, resolved_provider, -1, _cancelled_stdout, _cancelled_stderr),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -1378,28 +1415,14 @@ async def translate(
         ):
             cost_info += line + "\n"
 
-    task_id_match = _re.search(r"\[t-([0-9a-fA-F]+)\]", task)
-    tid_str = _derive_output_tid(task_id_match, workflow_id)
-    out_path = ""
-    try:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out_file = OUTPUT_DIR / f"{_time.strftime('%Y%m%d')}-{tid_str}.txt"
-        out_text = (
-            f"Task: {task}\nProvider: {provider}\nExit: {rc}\n\n"
-            f"--- stdout ---\n{stdout}\n\n--- stderr ---\n{stderr}\n\n"
-            f"--- diff ---\n{post_diff.get('stat', '')}\n"
-        )
-        if is_incomplete:
-            out_text += f"\nBranch preserved for re-dispatch: {branch_name}\n"
-        # Preserve full patch when rejected or incomplete so work is recoverable
-        if rc != 0 or not merged:
-            out_text += (
-                f"\n\n--- full patch (recoverable) ---\n{post_diff.get('patch', '')}\n"
-            )
-        out_file.write_text(out_text)
-        out_path = str(out_file)
-    except OSError:
-        pass
+    extra = ""
+    if is_incomplete:
+        extra += f"\nBranch preserved for re-dispatch: {branch_name}\n"
+    if rc != 0 or not merged:
+        extra += f"\n\n--- full patch (recoverable) ---\n{post_diff.get('patch', '')}\n"
+    out_path = _persist_output_file(
+        task, provider, rc, stdout, stderr, post_diff.get("stat", ""), extra
+    )
 
     _r = {
         "success": rc == 0,

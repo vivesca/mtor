@@ -45,6 +45,7 @@ def _summarize_workflow_result(result: dict) -> dict:
         "exit_code": result.get("exit_code", -1),
         "mode": result.get("mode", "raw"),
         "review": result.get("review", {}),
+        "output_path": result.get("output_path", ""),
     }
     for key in ("stderr", "gate", "blocked_keyword"):
         value = result.get(key, "")
