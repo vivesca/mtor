@@ -168,6 +168,7 @@ class TestWorkerShaPushRepoAware:
             patch("mtor.dispatch.time"),
             patch("mtor.dispatch._check_worker_checkout") as gate,
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
@@ -180,12 +181,12 @@ class TestWorkerShaPushRepoAware:
                 MagicMock(
                     returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
                 ),  # worker HEAD contains pushed
-                MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha(repo="~/code/mtor")
 
         assert result is True
         gate.assert_not_called()
+        mock_restart.assert_called_once()
 
         push_cmd = mock_sp.run.call_args_list[3][0][0]
         assert push_cmd[0] == "git"
@@ -203,6 +204,7 @@ class TestWorkerShaPushRepoAware:
             patch("mtor.dispatch.time"),
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),
@@ -211,11 +213,11 @@ class TestWorkerShaPushRepoAware:
                 MagicMock(returncode=0, stdout=""),  # push
                 MagicMock(returncode=0, stdout=""),  # merge
                 MagicMock(returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"),
-                MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha(repo=None)
 
         assert result is True
+        mock_restart.assert_called_once()
         push_cmd = mock_sp.run.call_args_list[3][0][0]
         push_dir = push_cmd[push_cmd.index("-C") + 1]
         assert push_dir == str(Path.home() / "germline")
