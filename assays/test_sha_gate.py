@@ -123,6 +123,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.time") as mock_time,
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
@@ -135,11 +136,11 @@ class TestCheckWorkerSha:
                 MagicMock(
                     returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
                 ),  # worker HEAD contains pushed
-                MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha()
         assert result is True
-        assert mock_sp.run.call_count == 7
+        assert mock_sp.run.call_count == 6
+        mock_restart.assert_called_once()
         # Worker advanced on first attempt → no backoff sleep, only post-restart settle.
         mock_time.sleep.assert_called_once_with(3)
 
@@ -155,6 +156,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.time") as mock_time,
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA (pushed)
@@ -167,11 +169,11 @@ class TestCheckWorkerSha:
                 # Worker overshot to ccc999 (a newer origin/main commit) that
                 # still CONTAINS the pushed aaa111 → ancestry holds, gate passes.
                 MagicMock(returncode=0, stdout="HEAD:ccc999\nCONTAINS:1\n"),
-                MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha()
         assert result is True
-        assert mock_sp.run.call_count == 7
+        assert mock_sp.run.call_count == 6
+        mock_restart.assert_called_once()
         # No backoff sleep needed; only the post-restart settle ran.
         mock_time.sleep.assert_called_once_with(3)
 
@@ -273,6 +275,10 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.time"),
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch(
+                "mtor.dispatch.restart_worker",
+                side_effect=RuntimeError("worker restart failed: systemctl failed"),
+            ),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),
@@ -285,7 +291,6 @@ class TestCheckWorkerSha:
                 MagicMock(
                     returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"
                 ),  # worker HEAD contains pushed
-                MagicMock(returncode=1, stderr="systemctl failed"),  # restart fail
             ]
             with pytest.raises(RuntimeError, match="restart failed"):
                 _check_worker_sha()
@@ -307,6 +312,7 @@ class TestCheckWorkerSha:
             patch("mtor.dispatch.time"),  # silence time.sleep(3) after restart
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa\n"),  # local HEAD
@@ -319,7 +325,6 @@ class TestCheckWorkerSha:
                 MagicMock(
                     returncode=0, stdout="HEAD:aaa\nCONTAINS:1\n"
                 ),  # worker HEAD post-merge (contains)
-                MagicMock(returncode=0, stdout=""),  # restart ok
             ]
             _check_worker_sha()
 
@@ -346,9 +351,9 @@ class TestCheckWorkerSha:
         assert "git rev-parse HEAD" in verify_cmd
         assert "git merge-base --is-ancestor" in verify_cmd
 
-        # Seventh call restarts the user-scoped worker unit.
-        restart_cmd = mock_sp.run.call_args_list[6][0][0][-1]
-        assert "systemctl --user restart mtor-worker" in restart_cmd
+        # The worker restart now goes through the shared restart_worker() helper,
+        # not an inline subprocess call.
+        mock_restart.assert_called_once()
 
     def test_merge_failure_raises(self):
         """If worker merge fails during auto-deploy, raises RuntimeError."""
@@ -924,6 +929,7 @@ class TestAutoDeployDrainGuard:
             patch("mtor.dispatch.time"),
             patch("mtor.dispatch._check_worker_checkout"),
             patch("mtor.dispatch._count_active_ribosomes", return_value=None),
+            patch("mtor.dispatch.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
@@ -934,15 +940,8 @@ class TestAutoDeployDrainGuard:
                 MagicMock(
                     returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
                 ),  # worker HEAD contains pushed
-                MagicMock(returncode=0, stdout=""),  # restart
             ]
             result = _check_worker_sha()
 
         assert result is True
-        restart_calls = [
-            call
-            for call in mock_sp.run.call_args_list
-            if "systemctl --user restart mtor-worker"
-            in " ".join(str(part) for part in call[0][0])
-        ]
-        assert len(restart_calls) == 1
+        mock_restart.assert_called_once()
