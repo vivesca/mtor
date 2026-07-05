@@ -21,7 +21,30 @@ import subprocess
 
 import pytest
 
-_DANGEROUS_MARKERS = ("ganglion", "mtor-worker", "systemctl --user")
+_DANGEROUS_RESTART_SUBSTRING = "systemctl --user restart mtor-worker"
+
+
+def _is_dangerous_command(cmd) -> tuple[bool, str]:
+    """True if *cmd* is a real restart of the production worker, or a real
+    ssh call whose target is the literal worker host "ganglion".
+
+    Narrower than blanket substring matching on "ganglion" or "mtor-worker":
+    those also match local test fixtures (e.g. a scratch git repo cloned into
+    a tmp dir literally named "ganglion" in test_sync.py/test_watch.py) and
+    pre-existing unmocked local health-probe calls (systemctl --user show,
+    not restart) elsewhere in the suite -- neither of which touches
+    production and neither of which this fixture is meant to catch.
+    """
+    if isinstance(cmd, (list, tuple)):
+        parts = [str(part) for part in cmd]
+    else:
+        parts = [str(cmd)]
+    joined = " ".join(parts)
+    if _DANGEROUS_RESTART_SUBSTRING in joined:
+        return True, joined
+    if parts and parts[0] == "ssh" and "ganglion" in parts:
+        return True, joined
+    return False, joined
 
 
 @pytest.fixture(autouse=True)
@@ -29,11 +52,8 @@ def _block_real_worker_calls(monkeypatch):
     real_run = subprocess.run
 
     def _guarded_run(cmd, *args, **kwargs):
-        if isinstance(cmd, (list, tuple)):
-            cmd_str = " ".join(str(part) for part in cmd)
-        else:
-            cmd_str = str(cmd)
-        if any(marker in cmd_str for marker in _DANGEROUS_MARKERS):
+        dangerous, cmd_str = _is_dangerous_command(cmd)
+        if dangerous:
             raise RuntimeError(
                 "BLOCKED by assays/conftest.py safety fixture: a test attempted "
                 f"a REAL subprocess call touching the production worker: {cmd_str!r}. "
