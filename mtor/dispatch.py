@@ -439,15 +439,22 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
         return True
 
     # Auto-deploy: push + fast-forward + restart.
-    # Use -C to pin git context to ~/germline regardless of caller cwd —
+    # Use -C to pin git context to the target repo's local checkout (the same
+    # *repo* param that produced worker_repo_dir and local_cmd above), falling
+    # back to ~/germline regardless of caller cwd when no repo is given —
     # otherwise dispatching from a non-`main` repo (e.g. quorate on master)
-    # fails with bogus "src refspec main does not match any".
-    germline_dir = str(Path.home() / "germline")
+    # fails with bogus "src refspec main does not match any". Pushing from a
+    # hardcoded ~/germline for a non-germline dispatch would push the wrong
+    # repo's HEAD to the wrong origin, leaving the target repo's origin/main
+    # untouched and this whole SHA-gate unable to ever converge.
+    local_push_dir = (
+        str(Path(repo).expanduser()) if repo else str(Path.home() / "germline")
+    )
     push = subprocess.run(
         [
             "git",
             "-C",
-            germline_dir,
+            local_push_dir,
             "push",
             "origin",
             "HEAD:main",

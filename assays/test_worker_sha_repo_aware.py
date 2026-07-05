@@ -149,3 +149,73 @@ class TestGermlineGateScoping:
 
         assert result is True
         gate.assert_called_once()
+
+
+class TestWorkerShaPushRepoAware:
+    """The auto-deploy push step must target the repo's LOCAL checkout, not
+    always ~/germline — pushing germline's HEAD to germline's origin does
+    nothing to get a non-germline target repo's commit onto its own
+    origin/main."""
+
+    def test_non_germline_repo_pushes_from_local_repo_path(self):
+        """repo=~/code/mtor, out of sync: the local `git push` must -C into
+        the mtor local checkout (mirroring local_cmd's -C above), never
+        ~/germline."""
+        from pathlib import Path
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout") as gate,
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa111\n"),  # local SHA
+                MagicMock(returncode=0, stdout="bbb222\n"),  # worker SHA (diff)
+                MagicMock(
+                    returncode=1, stdout=""
+                ),  # contains-local probe: NOT contained → deploy
+                MagicMock(returncode=0, stdout=""),  # push
+                MagicMock(returncode=0, stdout=""),  # merge
+                MagicMock(
+                    returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"
+                ),  # worker HEAD contains pushed
+                MagicMock(returncode=0, stdout=""),  # restart
+            ]
+            result = _check_worker_sha(repo="~/code/mtor")
+
+        assert result is True
+        gate.assert_not_called()
+
+        push_cmd = mock_sp.run.call_args_list[3][0][0]
+        assert push_cmd[0] == "git"
+        assert "push" in push_cmd
+        push_dir = push_cmd[push_cmd.index("-C") + 1]
+        assert push_dir == str(Path("~/code/mtor").expanduser())
+        assert "germline" not in push_dir
+
+    def test_default_repo_push_still_uses_germline(self):
+        """repo=None: push still targets ~/germline (behaviour preserved)."""
+        from pathlib import Path
+
+        with (
+            patch("mtor.dispatch.subprocess") as mock_sp,
+            patch("mtor.dispatch.time"),
+            patch("mtor.dispatch._check_worker_checkout"),
+            patch("mtor.dispatch._count_active_ribosomes", return_value=0),
+        ):
+            mock_sp.run.side_effect = [
+                MagicMock(returncode=0, stdout="aaa111\n"),
+                MagicMock(returncode=0, stdout="bbb222\n"),
+                MagicMock(returncode=1, stdout=""),
+                MagicMock(returncode=0, stdout=""),  # push
+                MagicMock(returncode=0, stdout=""),  # merge
+                MagicMock(returncode=0, stdout="HEAD:aaa111\nCONTAINS:1\n"),
+                MagicMock(returncode=0, stdout=""),  # restart
+            ]
+            result = _check_worker_sha(repo=None)
+
+        assert result is True
+        push_cmd = mock_sp.run.call_args_list[3][0][0]
+        push_dir = push_cmd[push_cmd.index("-C") + 1]
+        assert push_dir == str(Path.home() / "germline")
