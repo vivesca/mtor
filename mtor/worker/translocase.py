@@ -14,6 +14,7 @@ import json
 import os
 import random as _random
 import re as _re
+import shutil
 import signal as _signal
 import subprocess as _subprocess
 import sys
@@ -62,6 +63,40 @@ TASK_QUEUE = "translation-queue"
 RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
 LOG_DIR = Path.home() / "code" / "mtor" / "logs"
+OPENCODE_XDG_BASE = (
+    Path.home() / ".local" / "share" / "vivesca" / "ribosome-opencode-home"
+)
+
+
+def _opencode_xdg_env(workflow_id: str) -> dict[str, str]:
+    """Per-task XDG_DATA_HOME/XDG_STATE_HOME so concurrent opencode subprocesses
+    never share one SQLite DB (~/.local/share/opencode/opencode.db) or log dir.
+
+    opencode's config and any credentials live under XDG_CONFIG_HOME
+    (~/.config/opencode/), a separate root this does not touch.
+    """
+    task_dir = OPENCODE_XDG_BASE / (workflow_id or "unlabeled")
+    return {
+        "XDG_DATA_HOME": str(task_dir / "data"),
+        "XDG_STATE_HOME": str(task_dir / "state"),
+    }
+
+
+def _gc_opencode_xdg_dirs(max_age_seconds: int = 7200) -> None:
+    """Remove per-task opencode XDG isolation dirs older than max_age_seconds."""
+    if not OPENCODE_XDG_BASE.is_dir():
+        return
+    now = _time.time()
+    for entry in os.listdir(OPENCODE_XDG_BASE):
+        entry_path = OPENCODE_XDG_BASE / entry
+        try:
+            age_seconds = now - entry_path.stat().st_mtime
+        except OSError:
+            continue
+        if age_seconds < max_age_seconds:
+            continue
+        with contextlib.suppress(OSError):
+            shutil.rmtree(entry_path)
 
 
 def _mode_allows_auto_commit(mode: str) -> bool:
@@ -1005,6 +1040,7 @@ async def translate(
                     **os.environ,
                     "RIBOSOME_PROVIDER": harness or resolved_provider,
                     "RIBOSOME_TASK_ID": workflow_id,
+                    **_opencode_xdg_env(workflow_id),
                     "HOME": str(Path.home()),
                 },
                 start_new_session=True,  # process group kill — prevents orphan ribosome processes
@@ -1105,7 +1141,9 @@ async def translate(
                     "task": task[:200],
                     "stdout": "",
                     "stderr": "timeout after 30m",
-                    "output_path": _persist_output_file(task, resolved_provider, -1, "", "timeout after 30m"),
+                    "output_path": _persist_output_file(
+                        task, resolved_provider, -1, "", "timeout after 30m"
+                    ),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -1134,7 +1172,9 @@ async def translate(
                 except Exception:
                     stdout_bytes, stderr_bytes = b"", b"cancelled"
                 _cancelled_stdout = stdout_bytes.decode(errors="replace")
-                _cancelled_stderr = f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}"
+                _cancelled_stderr = (
+                    f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}"
+                )
                 _r = {
                     "success": False,
                     "exit_code": -1,
@@ -1147,7 +1187,13 @@ async def translate(
                     "task": task[:200],
                     "stdout": _cancelled_stdout[:1000],
                     "stderr": _cancelled_stderr,
-                    "output_path": _persist_output_file(task, resolved_provider, -1, _cancelled_stdout, _cancelled_stderr),
+                    "output_path": _persist_output_file(
+                        task,
+                        resolved_provider,
+                        -1,
+                        _cancelled_stdout,
+                        _cancelled_stderr,
+                    ),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -1647,6 +1693,7 @@ async def main() -> None:
         graceful_shutdown_timeout=timedelta(seconds=drain_seconds),
     )
     _gc_worktrees(str(Path.home() / "germline"))
+    _gc_opencode_xdg_dirs()
     for _reap_repo in (Path.home() / "germline", Path.home() / "code" / "mtor"):
         with contextlib.suppress(Exception):
             _reap_orphaned_worktree_processes(str(_reap_repo))
