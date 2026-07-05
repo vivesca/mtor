@@ -44,17 +44,17 @@ class TestDeployCommand:
             patch("mtor.cli.subprocess") as mock_sp,
             patch("time.sleep") as mock_sleep,
             patch("mtor.cli._doctor") as mock_doctor,
+            patch("mtor.cli.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout=""),       # push
                 MagicMock(returncode=0, stdout="aaa\n"),  # local rev-parse (pushed SHA)
                 MagicMock(returncode=0, stdout=""),       # worker ff-merge
                 MagicMock(returncode=0, stdout="aaa\n"),  # worker rev-parse (matches)
-                MagicMock(returncode=0, stdout=""),       # restart
             ]
             deploy()
 
-        assert _restart_issued(mock_sp)
+        mock_restart.assert_called_once()
         mock_doctor.assert_called_once()
         # Matched on first attempt → no backoff sleep, only the post-restart settle.
         mock_sleep.assert_called_once_with(3)
@@ -70,13 +70,13 @@ class TestDeployCommand:
             patch("mtor.cli.subprocess") as mock_sp,
             patch("time.sleep"),
             patch("mtor.cli._doctor"),
+            patch("mtor.cli.restart_worker"),
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout=""),       # push
                 MagicMock(returncode=0, stdout="aaa\n"),  # local rev-parse
                 MagicMock(returncode=0, stdout=""),       # worker ff-merge
                 MagicMock(returncode=0, stdout="aaa\n"),  # worker rev-parse
-                MagicMock(returncode=0, stdout=""),       # restart
             ]
             deploy()
 
@@ -103,6 +103,7 @@ class TestDeployCommand:
             patch("mtor.cli.subprocess") as mock_sp,
             patch("time.sleep") as mock_sleep,
             patch("mtor.cli._doctor") as mock_doctor,
+            patch("mtor.cli.restart_worker") as mock_restart,
         ):
             mock_sp.run.side_effect = [
                 MagicMock(returncode=0, stdout=""),       # push
@@ -111,11 +112,10 @@ class TestDeployCommand:
                 MagicMock(returncode=0, stdout="bbb\n"),  # worker rev-parse 1 (stale)
                 MagicMock(returncode=0, stdout=""),       # merge attempt 2
                 MagicMock(returncode=0, stdout="aaa\n"),  # worker rev-parse 2 (now matches)
-                MagicMock(returncode=0, stdout=""),       # restart
             ]
             deploy()
 
-        assert _restart_issued(mock_sp)
+        mock_restart.assert_called_once()
         mock_doctor.assert_called_once()
         # One backoff sleep (2.0) before the successful retry, plus settle (3).
         sleep_args = [c.args for c in mock_sleep.call_args_list]
