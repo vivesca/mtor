@@ -25,7 +25,7 @@ from mtor import (
     WORKFLOW_TYPE,
 )
 from mtor.client import _get_client
-from mtor.infra import _count_active_ribosomes
+from mtor.infra import _count_active_ribosomes, restart_worker
 from mtor.dedup import (
     DEFAULT_STATE_PATH,
     DEFAULT_WINDOW_S,
@@ -558,14 +558,7 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
             "wait for them to finish or re-run with --skip-sha-check"
         )
 
-    restart = subprocess.run(
-        ["ssh", WORKER_HOST, "systemctl --user restart mtor-worker"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if restart.returncode != 0:
-        raise RuntimeError(f"restart failed: {restart.stderr.strip()}")
+    restart_worker()
 
     time.sleep(3)
     return True
