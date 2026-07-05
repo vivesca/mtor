@@ -30,3 +30,9 @@ def test_ganglion_safety_net_blocks_via_module_qualified_reference():
             ["ssh", "ganglion", "systemctl", "--user", "restart", "mtor-worker"]
         )
     assert "ganglion" in str(excinfo.value)
+
+
+def test_ganglion_safety_net_allows_local_ganglion_named_tmpdir(tmp_path):
+    ganglion_dir = tmp_path / "ganglion"
+    ganglion_dir.mkdir()
+    subprocess.run(["git", "init", str(ganglion_dir)], capture_output=True, text=True)
