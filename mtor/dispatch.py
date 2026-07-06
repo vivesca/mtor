@@ -370,7 +370,14 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
     if skip:
         return True
 
-    worker_repo_dir = _worker_addressable_repo_path(repo) or WORKER_GERMLINE_DIR
+    _resolved_worker_repo = _worker_addressable_repo_path(repo)
+    if repo and not _resolved_worker_repo and str(repo).strip() not in (".", "~"):
+        raise RuntimeError(
+            f"repo {repo!r} is not addressable on the worker (only paths under "
+            "~/code or ~/germline are supported); re-run with --skip-sha-check "
+            "or dispatch a repo under one of those roots"
+        )
+    worker_repo_dir = _resolved_worker_repo or WORKER_GERMLINE_DIR
 
     local_cmd = ["git"]
     if repo:
