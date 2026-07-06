@@ -16,6 +16,8 @@ import tempfile
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKFLOW_TYPE
 from mtor.cli import app
 
@@ -51,6 +53,15 @@ def invoke(args: list[str] | None = None) -> tuple[int, dict]:
             f"Output is not valid JSON. Exit={exit_code}\nOutput: {output!r}\nException: {exc}"
         ) from exc
     return exit_code, data
+
+
+@pytest.fixture(autouse=True)
+def _mock_worker_opencode_config(monkeypatch):
+    """Mock the worker opencode-config ssh probe to avoid real ssh calls."""
+    monkeypatch.setattr(
+        "mtor.doctor._check_worker_opencode_config",
+        lambda: {"name": "opencode_config_worker", "ok": True, "detail": "mocked in test"},
+    )
 
 
 def make_mock_client():
