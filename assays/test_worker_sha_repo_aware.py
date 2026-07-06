@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mtor.dispatch import _check_worker_sha, _worker_addressable_repo_path
 
 
@@ -108,6 +110,21 @@ class TestWorkerShaRepoAware:
                 f"unaddressable repo did not fall back to germline: {cmd!r}"
             )
             assert "cd ''" not in cmd, f"worker probe used an empty cd target: {cmd!r}"
+
+    def test_unrecognized_real_repo_raises_clear_error(self):
+        """repo='~/projects/foo' is a real path but not under ~/code or
+        ~/germline -- must raise immediately with a clear message, NOT fall
+        back to germline silently (unlike the '.' / '~' sentinel case above,
+        which is intentional and must keep working)."""
+        assert _worker_addressable_repo_path("~/projects/foo") == ""
+
+        with patch("mtor.dispatch.subprocess") as mock_sp:
+            with pytest.raises(RuntimeError, match="not addressable on the worker"):
+                _check_worker_sha(repo="~/projects/foo")
+
+        # Fails BEFORE any subprocess call -- no confusing SHA-mismatch retry loop,
+        # no silent germline push.
+        mock_sp.run.assert_not_called()
 
 
 class TestGermlineGateScoping:

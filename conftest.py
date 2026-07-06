@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 
+from mtor import WORKER_HOST
 from mtor.worker import chaperone_review
 
 
@@ -49,13 +50,13 @@ def _block_real_ganglion_subprocess_calls(monkeypatch):
             joined_lower = command.lower()
             if "systemctl --user restart mtor-worker" in joined_lower:
                 blocked = True
-            elif joined_lower.startswith("ssh ") and "ganglion" in joined_lower:
+            elif joined_lower.startswith("ssh ") and WORKER_HOST.lower() in joined_lower:
                 blocked = True
         else:
             joined_lower = " ".join(str(part) for part in command).lower()
             if "systemctl --user restart mtor-worker" in joined_lower:
                 blocked = True
-            elif len(command) > 0 and command[0] == "ssh" and "ganglion" in command[1:]:
+            elif len(command) > 0 and command[0] == "ssh" and WORKER_HOST in command[1:]:
                 blocked = True
         if blocked:
             raise RuntimeError(
