@@ -695,10 +695,11 @@ def _worker_target_repo_state(repo: str | None, *, skip: bool = False) -> dict:
 
         remote_cmd = (
             f"cd {shlex.quote(worker_repo)} && "
-            "printf 'BRANCH:%s\\n' \"$(git rev-parse --abbrev-ref HEAD)\" && "
+            'branch="$(git rev-parse --abbrev-ref HEAD)" && '
+            "printf 'BRANCH:%s\\n' \"$branch\" && "
             "printf 'HEAD:%s\\n' \"$(git rev-parse HEAD)\" && "
             "printf 'ORIGIN_MAIN:%s\\n' "
-            "\"$(git ls-remote origin refs/heads/main | awk '{print $1}')\" && "
+            '"$(git ls-remote origin "refs/heads/$branch" | awk \'{print $1}\')" && '
             "printf '%s\\n' 'MTOR_STATUS_START' && "
             "git status --porcelain=v1 -uall"
         )
@@ -739,10 +740,11 @@ def _worker_target_repo_state(repo: str | None, *, skip: bool = False) -> dict:
         errors: list[str] = []
         if state["local_sha"] != state["worker_sha"]:
             errors.append("worker target HEAD differs from local target HEAD")
+        branch_label = state.get("branch") or "default branch"
         if state["origin_sha"] and state["origin_sha"] != state["worker_sha"]:
-            errors.append("worker target HEAD differs from origin/main")
+            errors.append(f"worker target HEAD differs from origin/{branch_label}")
         if not state["origin_sha"]:
-            errors.append("worker target origin/main lookup returned no SHA")
+            errors.append(f"worker target origin/{branch_label} lookup returned no SHA")
         if state["dirty"]:
             errors.append(
                 "worker target repo dirty/untracked files: " + "\n".join(dirty_lines)
