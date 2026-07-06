@@ -56,6 +56,7 @@ from mtor.worker.git_ops import (
     _git_pull_ff_only,
     _git_snapshot,
     _main_checkout_state,
+    _reap_landed_branches,
 )
 
 TASK_QUEUE = "translation-queue"
@@ -1105,7 +1106,9 @@ async def translate(
                     "task": task[:200],
                     "stdout": "",
                     "stderr": "timeout after 30m",
-                    "output_path": _persist_output_file(task, resolved_provider, -1, "", "timeout after 30m"),
+                    "output_path": _persist_output_file(
+                        task, resolved_provider, -1, "", "timeout after 30m"
+                    ),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -1134,7 +1137,9 @@ async def translate(
                 except Exception:
                     stdout_bytes, stderr_bytes = b"", b"cancelled"
                 _cancelled_stdout = stdout_bytes.decode(errors="replace")
-                _cancelled_stderr = f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}"
+                _cancelled_stderr = (
+                    f"cancelled: {stderr_bytes.decode(errors='replace')[:500]}"
+                )
                 _r = {
                     "success": False,
                     "exit_code": -1,
@@ -1147,7 +1152,13 @@ async def translate(
                     "task": task[:200],
                     "stdout": _cancelled_stdout[:1000],
                     "stderr": _cancelled_stderr,
-                    "output_path": _persist_output_file(task, resolved_provider, -1, _cancelled_stdout, _cancelled_stderr),
+                    "output_path": _persist_output_file(
+                        task,
+                        resolved_provider,
+                        -1,
+                        _cancelled_stdout,
+                        _cancelled_stderr,
+                    ),
                 }
                 finalize_trace(_trace, _r)
                 return _r
@@ -1650,6 +1661,8 @@ async def main() -> None:
     for _reap_repo in (Path.home() / "germline", Path.home() / "code" / "mtor"):
         with contextlib.suppress(Exception):
             _reap_orphaned_worktree_processes(str(_reap_repo))
+        with contextlib.suppress(Exception):
+            _reap_landed_branches(str(_reap_repo))
 
     # systemd stop (rictor deploy restart) sends SIGTERM. Without a handler
     # the process dies mid-activity and in-flight ribosome subprocesses are
