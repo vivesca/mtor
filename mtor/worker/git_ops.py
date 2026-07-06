@@ -895,6 +895,163 @@ def _worktree_has_live_process(wt_path: str, proc_root: Path = Path("/proc")) ->
         return False
 
 
+def _resolve_default_branch(repo_root: str) -> str:
+    """Resolve the repo's default branch instead of hardcoding main.
+
+    Prefer origin's HEAD pointer, fall back to a local main then master.
+    Returns an empty string when none can be resolved.
+    """
+    head = _run_worker_command(
+        ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if head.returncode == 0 and head.stdout.strip():
+        return head.stdout.strip().split("/", 1)[-1]
+    for name in ("main", "master"):
+        check = _run_worker_command(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if check.returncode == 0:
+            return name
+    return ""
+
+
+def _reap_landed_branches(
+    repo_root: str,
+    active_branches: frozenset[str] = frozenset(),
+    min_age_seconds: int = 1800,
+) -> dict:
+    """Delete ribosome-* branches already merged into the default branch.
+
+    Fills the gap left by _gc_worktrees, which only fires on orphaned
+    worktrees: a clean landing leaves no worktree, so its merged branch
+    accumulates forever, locally and on origin. Best-effort, never raises.
+    Returns a summary dict with keys ``reaped``, ``remote_deleted``,
+    ``skipped_active``, ``errors`` (each a list of strings).
+
+    Safety gates, in order: skip branches named in ``active_branches``;
+    skip branches whose worktree directory still exists (worktree
+    lifecycle belongs to _gc_worktrees); skip branches not merged into
+    the resolved default branch (recoverable work); skip branches whose
+    tip commit is younger than ``min_age_seconds``. The remote branch is
+    deleted only when the remote tip itself is an ancestor of the local
+    default branch — a remote holding commits the local repo has not
+    merged is left alone.
+    """
+    summary: dict[str, list[str]] = {
+        "reaped": [],
+        "remote_deleted": [],
+        "skipped_active": [],
+        "errors": [],
+    }
+    try:
+        if not repo_root or not os.path.isdir(repo_root):
+            return summary
+        default_branch = _resolve_default_branch(repo_root)
+        if not default_branch:
+            return summary
+        refs_r = _run_worker_command(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/ribosome-*",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if refs_r.returncode != 0:
+            return summary
+        candidates = [ln.strip() for ln in refs_r.stdout.splitlines() if ln.strip()]
+        worktree_base = os.path.join(repo_root, ".worktrees")
+        for branch in candidates:
+            try:
+                if branch in active_branches:
+                    summary["skipped_active"].append(branch)
+                    continue
+                if os.path.exists(os.path.join(worktree_base, branch)):
+                    continue
+                merged = _run_worker_command(
+                    ["git", "merge-base", "--is-ancestor", branch, default_branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    timeout=10,
+                )
+                if merged.returncode != 0:
+                    continue
+                tip_time = _run_worker_command(
+                    ["git", "log", "-1", "--format=%ct", branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if tip_time.returncode != 0:
+                    continue
+                try:
+                    age_seconds = _time.time() - float(tip_time.stdout.strip())
+                except ValueError:
+                    continue
+                if age_seconds < min_age_seconds:
+                    continue
+                del_r = _run_worker_command(
+                    ["git", "branch", "-D", branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if del_r.returncode != 0:
+                    continue
+                summary["reaped"].append(branch)
+                print(f"[reap] removed landed branch {branch}", file=sys.stderr)
+                ls = _run_worker_command(
+                    ["git", "ls-remote", "--heads", "origin", branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if ls.returncode != 0:
+                    continue
+                tokens = ls.stdout.split()
+                remote_sha = tokens[0] if tokens else ""
+                if not remote_sha:
+                    continue
+                anc = _run_worker_command(
+                    ["git", "merge-base", "--is-ancestor", remote_sha, default_branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    timeout=10,
+                )
+                if anc.returncode != 0:
+                    continue
+                push = _run_worker_command(
+                    ["git", "push", "origin", "--delete", branch],
+                    cwd=repo_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if push.returncode == 0:
+                    summary["remote_deleted"].append(branch)
+                    print(f"[reap] deleted remote branch {branch}", file=sys.stderr)
+            except Exception as exc:
+                summary["errors"].append(f"{branch}: {exc}")
+    except Exception as exc:
+        summary["errors"].append(f"fatal: {exc}")
+    return summary
+
+
 def _gc_worktrees(repo_root: str) -> None:
     """Remove orphaned ribosome worktrees older than 2 hours."""
     worktree_base = os.path.join(repo_root, ".worktrees")
