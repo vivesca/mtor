@@ -423,6 +423,8 @@ class TestCheckWorkerSha:
 
     def test_repo_param_uses_git_minus_c(self):
         """When repo is provided, local SHA lookup uses git -C <repo>."""
+        from pathlib import Path
+
         from mtor.dispatch import _check_worker_sha
 
         with (
@@ -433,11 +435,11 @@ class TestCheckWorkerSha:
                 MagicMock(returncode=0, stdout="deadbeef\n"),
                 MagicMock(returncode=0, stdout="deadbeef\n"),
             ]
-            result = _check_worker_sha(repo="/path/to/repo")
+            result = _check_worker_sha(repo="~/code/mtor")
         assert result is True
         local_call = mock_sp.run.call_args_list[0]
         cmd = local_call[0][0]
-        assert cmd == ["git", "-C", "/path/to/repo", "rev-parse", "HEAD"]
+        assert cmd == ["git", "-C", str(Path("~/code/mtor").expanduser()), "rev-parse", "HEAD"]
 
     def test_repo_param_expands_tilde(self):
         """Tilde in repo path is expanded before passing to git -C."""
