@@ -56,12 +56,68 @@ def invoke(args: list[str] | None = None) -> tuple[int, dict]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_worker_opencode_config(monkeypatch):
-    """Mock the worker opencode-config ssh probe to avoid real ssh calls."""
-    monkeypatch.setattr(
-        "mtor.doctor._check_worker_opencode_config",
-        lambda: {"name": "opencode_config_worker", "ok": True, "detail": "mocked in test"},
+def _mock_worker_ssh_probes(monkeypatch, _block_real_ganglion_subprocess_calls):
+    """Answer doctor()'s ssh-to-worker probes with canned success output.
+
+    mtor.doctor has five real ssh call sites: the opencode-config read, the
+    opencode runtime probe, the heartbeat stat in reconcile_running_workflows,
+    the provider health-file read, and the gh auth status check. The root
+    pytest guard fixture blocks all of them with a RuntimeError; depending on
+    that guard fixture layers this interceptor on top of it, so worker probes
+    get deterministic answers while every other subprocess call still passes
+    through the guard.
+    """
+    import subprocess
+
+    from mtor import doctor as doctor_mod
+
+    real_run = subprocess.run
+    worker_config = json.dumps(
+        {
+            "provider": {
+                doctor_mod._OPENCODE_EXPECTED_PROVIDER: {
+                    "options": {
+                        "baseURL": doctor_mod._OPENCODE_EXPECTED_API,
+                        "apiKey": "{env:ZHIPUAI_API_KEY}",
+                    }
+                }
+            },
+            "model": doctor_mod._OPENCODE_EXPECTED_MODEL,
+            "small_model": doctor_mod._OPENCODE_EXPECTED_SMALL_MODEL,
+            "permission": {"*": "allow", "external_directory": {"*": "allow"}},
+            "mcp": {},
+        }
     )
+
+    def _canned(stdout):
+        return subprocess.CompletedProcess(
+            args=["ssh"], returncode=0, stdout=stdout, stderr=""
+        )
+
+    def _fake_run(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args")
+        if isinstance(command, list) and command:
+            remote = " ".join(str(part) for part in command[1:])
+            is_worker_probe = command[0] == "ssh" or (
+                command[0] == "bash" and "opencode run" in remote
+            )
+            if is_worker_probe:
+                if "opencode.json" in remote:
+                    return _canned(worker_config)
+                if "opencode run" in remote:
+                    return _canned(
+                        "exit=0\nstdout_bytes=32\nstderr_bytes=0\nprobe_text=present\n"
+                    )
+                if "stat -c %Y" in remote:
+                    return _canned("MISSING\n")
+                if "json.load" in remote:
+                    return _canned("{}\n")
+                if "gh auth status" in remote:
+                    return _canned("Logged in to github.com\n")
+                return _canned("")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
 
 
 def make_mock_client():
