@@ -575,6 +575,54 @@ def _git_push(repo_root: str) -> None:
         print(f"WARNING: git push error: {exc}", file=sys.stderr)
 
 
+def _branch_has_unmerged_commits(repo_root: str, branch_name: str) -> bool:
+    """True if branch_name has commits main doesn't have."""
+    log = _run_worker_command(
+        ["git", "log", "--oneline", f"main..{branch_name}"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=repo_root,
+    )
+    return log.returncode == 0 and bool(log.stdout.strip())
+
+
+def _guard_branch_delete(repo_root: str, branch_name: str) -> bool:
+    """Push branch_name to ganglion before a force-delete reaps its tip.
+
+    _create_worktree and _gc_worktrees force-delete worker branches. Without
+    this guard, a committed-but-unpushed tip becomes a dangling object that
+    `git gc` reaps and that autophagy.salvage can't see (it only fetches and
+    walks pushed ganglion/<branch> refs). Pushing here lands the tip on the
+    same remote the existing cherry-pick salvage loop already walks — no new
+    machinery. Returns True if it's safe to delete, False to keep the branch.
+    """
+    try:
+        if not _branch_has_unmerged_commits(repo_root, branch_name):
+            return True
+        push = _run_worker_command(
+            ["git", "push", "ganglion", branch_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=repo_root,
+        )
+        if push.returncode == 0:
+            return True
+        print(
+            f"WARNING: could not push unmerged tip {branch_name} to ganglion; "
+            f"keeping branch instead of deleting: {push.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as exc:
+        print(
+            f"WARNING: branch-delete guard error for {branch_name}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
     """Create a git worktree for isolated ribosome execution. Returns worktree path.
 
@@ -593,13 +641,15 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
             cwd=repo_root,
         )
 
-    # Delete stale branch if it exists from a prior failed attempt
-    _run_worker_command(
-        ["git", "branch", "-D", branch_name],
-        capture_output=True,
-        timeout=5,
-        cwd=repo_root,
-    )
+    # Delete stale branch if it exists from a prior failed attempt. Guard
+    # first — a stale name can carry a real committed tip, not just junk.
+    if _guard_branch_delete(repo_root, branch_name):
+        _run_worker_command(
+            ["git", "branch", "-D", branch_name],
+            capture_output=True,
+            timeout=5,
+            cwd=repo_root,
+        )
 
     last_err = ""
     for attempt in range(retries):
@@ -878,9 +928,10 @@ def _gc_worktrees(repo_root: str) -> None:
                 cwd=repo_root,
             )
         with contextlib.suppress(Exception):
-            _run_worker_command(
-                ["git", "branch", "-D", entry],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
-            )
+            if _guard_branch_delete(repo_root, entry):
+                _run_worker_command(
+                    ["git", "branch", "-D", entry],
+                    capture_output=True,
+                    timeout=10,
+                    cwd=repo_root,
+                )
