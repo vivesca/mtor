@@ -85,9 +85,7 @@ def _locked_mutate(mutate: Callable[[dict[str, Any]], T]) -> T:
     dict (re-read under the lock, never a caller-cached snapshot), mutates it
     in place, and returns the caller's result.
     """
-    with (
-        contextlib.nullcontext()
-    ):  # TEMP: lock disabled to prove regression test catches bug
+    with _triage_lock():
         data = load_triage()
         result = mutate(data)
         save_triage(data)
@@ -218,28 +216,6 @@ def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
         }
 
     return _locked_mutate(mutate)
-    incoming = set(ids)
-    archived_at = datetime.now(UTC).isoformat()
-    newly_archived_ids: list[str] = []
-    for workflow_id in sorted(incoming):
-        if workflow_id not in records:
-            records[workflow_id] = {
-                "workflow_id": workflow_id,
-                "reason": reason,
-                "archived_at": archived_at,
-            }
-            newly_archived_ids.append(workflow_id)
-    # Remove newly archived from reviewed
-    data["reviewed"] = sorted(set(data["reviewed"]) - incoming)
-    data["archived"] = [records[workflow_id] for workflow_id in sorted(records)]
-    save_triage(data)
-    newly_archived_records = [records[wid] for wid in newly_archived_ids]
-    return {
-        "archived": newly_archived_ids,
-        "archived_records": newly_archived_records,
-        "count": len(newly_archived_ids),
-        "archived_total": len(data["archived"]),
-    }
 
 
 def parse_duration(duration_str: str) -> timedelta:
