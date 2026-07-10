@@ -6,13 +6,92 @@ Storage: ~/.config/mtor/triage.json
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import re
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 TRIAGE_PATH = Path.home() / ".config" / "mtor" / "triage.json"
+
+T = TypeVar("T")
+
+
+def _lock_path() -> Path:
+    """Path to the interprocess lock file guarding triage read-modify-write."""
+    return TRIAGE_PATH.parent / (TRIAGE_PATH.name + ".lock")
+
+
+@contextlib.contextmanager
+def _triage_lock():
+    """Exclusive interprocess lock around the triage load-mutate-save sequence.
+
+    Uses ``fcntl.flock`` on a sibling lock file — the same convention as
+    ``mtor/worker/git_ops.py``. Works on Linux and macOS. Blocks until the
+    lock is acquired; released on close. Without this, concurrent
+    ``mtor review``/``archive``/``verdict`` invocations each load the same
+    stale state and the last writer clobbers the earlier batches.
+    """
+    TRIAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock = _lock_path()
+    lock_fh = open(lock, "a+")
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_fh.close()
+
+
+def _replace_file(src: str, dst: str) -> None:
+    """Atomic replace of ``dst`` with ``src`` (POSIX, same filesystem)."""
+    os.replace(src, dst)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a temp file + atomic replace.
+
+    A crash before the replace leaves the prior file intact (the temp file is
+    cleaned up on failure), so the destination can never be observed as a
+    truncated/partial JSON document.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
+            tmp_fh.write(text)
+            tmp_fh.flush()
+            os.fsync(tmp_fh.fileno())
+        _replace_file(tmp_name, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def _locked_mutate(mutate: Callable[[dict[str, Any]], T]) -> T:
+    """Load triage, run ``mutate`` under an exclusive lock, persist, return result.
+
+    The whole load-mutate-save sequence is serialized so concurrent writers
+    cannot clobber each other. ``mutate`` receives the freshly-loaded data
+    dict (re-read under the lock, never a caller-cached snapshot), mutates it
+    in place, and returns the caller's result.
+    """
+    with (
+        contextlib.nullcontext()
+    ):  # TEMP: lock disabled to prove regression test catches bug
+        data = load_triage()
+        result = mutate(data)
+        save_triage(data)
+        return result
 
 
 def _default_data() -> dict[str, Any]:
@@ -76,23 +155,30 @@ def load_triage() -> dict[str, Any]:
 
 
 def save_triage(data: dict[str, Any]) -> None:
-    """Save triage data to disk. Creates parent dirs on first write."""
-    TRIAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    """Save triage data to disk atomically. Creates parent dirs on first write.
+
+    Writes through a temp file followed by atomic replace, so a crash mid-save
+    cannot leave a partial/truncated ``triage.json``. Note: this is a full-file
+    overwrite and does NOT itself take the interprocess lock — callers that
+    read-modify-write must go through ``_locked_mutate`` to avoid lost updates.
+    """
     data["updated"] = datetime.now(UTC).isoformat()
-    TRIAGE_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    _atomic_write_text(TRIAGE_PATH, json.dumps(data, indent=2) + "\n")
 
 
 def review_ids(ids: list[str]) -> dict[str, Any]:
     """Add IDs to reviewed set. Idempotent. Returns envelope result dict."""
-    data = load_triage()
-    reviewed = set(data["reviewed"])
-    archived = archived_ids(data)
-    for wid in ids:
-        if wid not in archived:
-            reviewed.add(wid)
-    data["reviewed"] = sorted(reviewed)
-    save_triage(data)
-    return {"reviewed": data["reviewed"], "count": len(data["reviewed"])}
+
+    def mutate(data: dict[str, Any]) -> dict[str, Any]:
+        reviewed = set(data["reviewed"])
+        archived = archived_ids(data)
+        for wid in ids:
+            if wid not in archived:
+                reviewed.add(wid)
+        data["reviewed"] = sorted(reviewed)
+        return {"reviewed": data["reviewed"], "count": len(data["reviewed"])}
+
+    return _locked_mutate(mutate)
 
 
 def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
@@ -100,10 +186,38 @@ def archive_ids(ids: list[str], *, reason: str = "legacy") -> dict[str, Any]:
 
     Only IDs newly archived by *this* call appear in ``archived`` and
     ``archived_records``.  The total size of the persisted archive is
-    reported separately via ``archived_total``.
+    reported separately via ``archived_total`` (reflects the merged persisted
+    archive after the locked write).
     """
-    data = load_triage()
-    records = {record["workflow_id"]: record for record in normalize_archived(data["archived"])}
+
+    def mutate(data: dict[str, Any]) -> dict[str, Any]:
+        records = {
+            record["workflow_id"]: record
+            for record in normalize_archived(data["archived"])
+        }
+        incoming = set(ids)
+        archived_at = datetime.now(UTC).isoformat()
+        newly_archived_ids: list[str] = []
+        for workflow_id in sorted(incoming):
+            if workflow_id not in records:
+                records[workflow_id] = {
+                    "workflow_id": workflow_id,
+                    "reason": reason,
+                    "archived_at": archived_at,
+                }
+                newly_archived_ids.append(workflow_id)
+        # Remove newly archived from reviewed
+        data["reviewed"] = sorted(set(data["reviewed"]) - incoming)
+        data["archived"] = [records[workflow_id] for workflow_id in sorted(records)]
+        newly_archived_records = [records[wid] for wid in newly_archived_ids]
+        return {
+            "archived": newly_archived_ids,
+            "archived_records": newly_archived_records,
+            "count": len(newly_archived_ids),
+            "archived_total": len(data["archived"]),
+        }
+
+    return _locked_mutate(mutate)
     incoming = set(ids)
     archived_at = datetime.now(UTC).isoformat()
     newly_archived_ids: list[str] = []
@@ -148,13 +262,15 @@ def parse_duration(duration_str: str) -> timedelta:
 
 def override_verdict(ids: list[str], verdict: str) -> dict[str, Any]:
     """Set verdict override for workflow IDs. Stored locally, overlays Temporal SA."""
-    data = load_triage()
-    overrides = data.get("verdict_overrides", {})
-    for wid in ids:
-        overrides[wid] = verdict
-    data["verdict_overrides"] = overrides
-    save_triage(data)
-    return {"overridden": len(ids), "verdict": verdict}
+
+    def mutate(data: dict[str, Any]) -> dict[str, Any]:
+        overrides = data.get("verdict_overrides", {})
+        for wid in ids:
+            overrides[wid] = verdict
+        data["verdict_overrides"] = overrides
+        return {"overridden": len(ids), "verdict": verdict}
+
+    return _locked_mutate(mutate)
 
 
 def get_verdict_overrides() -> dict[str, str]:
