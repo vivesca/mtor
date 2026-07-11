@@ -793,6 +793,82 @@ def _search_attr_preview(
     return attrs
 
 
+# Absolute path tokens in a prompt. Root char is ``~`` or ``/``; the body
+# allows word/path chars. The lookbehind avoids matching the tail of a longer
+# token (e.g. the ``/code`` inside ``some/path/code``) by requiring the root
+# char to follow whitespace, a quote, backtick, paren, ``=``, or ``,`` — or
+# the start of the string.
+_PATH_TOKEN_RE = re.compile(r"(?:(?<=[\s\"'`(=,])|^)((?:~|/)[A-Za-z0-9._\-/]{2,})")
+
+# Path prefixes the ganglion worker can actually read. Anything outside
+# these roots exists only on the dispatching host and dies minutes later on
+# the worker. Mirrors the addressable set _worker_addressable_repo_path
+# honours, expanded to the whole worker home.
+_WORKER_REACHABLE_PREFIXES = ("~/code/", "~/germline/", "/home/vivesca/")
+
+
+def _normalize_prompt_path_for_worker(token: str) -> str:
+    """Collapse Mac-home paths to the worker-relative ``~/`` form.
+
+    The dispatcher may run on the Mac (Path.home() == /Users/terry) or on
+    ganglion itself (Path.home() == /home/vivesca). Reusing
+    _normalize_spec_repo_for_worker would only fold paths under the local
+    Path.home(), so a Mac-authored ``/Users/terry/code/...`` inspected on
+    ganglion would survive unchanged and read as unreachable. Strip the
+    ``/Users/<name>/`` segment explicitly instead so reachability is
+    host-agnostic.
+    """
+    if token.startswith("~"):
+        return token
+    users = re.match(r"^/Users/[^/]+/(.+)$", token)
+    if users:
+        return "~/" + users.group(1)
+    return token
+
+
+def _prompt_path_plan(prompt: str, *, allow_local_paths: bool = False) -> dict:
+    """Classify absolute paths in the prompt as worker-reachable or host-local.
+
+    A tripwire, not a sandbox: regex token extraction will miss exotic
+    quoting, and relative paths are intentionally unchecked. The goal is to
+    catch the common case — a prompt that names a Mac-local scratchpad file
+    the ganglion worker cannot read — before it burns minutes on ganglion.
+    """
+    seen: dict[str, None] = {}
+    for match in _PATH_TOKEN_RE.finditer(prompt):
+        token = match.group(1)
+        # Drop single-level roots (/etc, /tmp) and tokens too short to be a
+        # real file path. Require a separator somewhere after the root char.
+        if len(token) < 6:
+            continue
+        body = token[1:] if token[0] in "~/" else token
+        if "/" not in body:
+            continue
+        seen[token] = None
+
+    paths = list(seen)
+    local_only: list[str] = []
+    for token in paths:
+        normed = _normalize_prompt_path_for_worker(token)
+        if not normed.startswith(_WORKER_REACHABLE_PREFIXES):
+            local_only.append(token)
+
+    overridden = bool(local_only) and allow_local_paths
+    ok = (not local_only) or allow_local_paths
+    detail = (
+        f"{len(local_only)} host-local path(s) the worker cannot read"
+        if local_only
+        else f"{len(paths)} path(s), all worker-reachable"
+    )
+    return {
+        "paths": paths,
+        "local_only": local_only,
+        "ok": ok,
+        "overridden": overridden,
+        "detail": detail,
+    }
+
+
 def _dispatch_explanation(
     prompt: str,
     *,
@@ -805,6 +881,7 @@ def _dispatch_explanation(
     harness: str = "",
     paused: bool = False,
     frozen: bool = False,
+    allow_local_paths: bool = False,
 ) -> dict:
     """Build a read-only dispatch plan explanation."""
     if spec_path is not None:
@@ -860,6 +937,7 @@ def _dispatch_explanation(
 
     dedup = _dedup_plan(prompt, spec_path=spec_path) if prompt.strip() else {}
     spec_repo = spec_data.get("repo") if spec_data else None
+    prompt_paths = _prompt_path_plan(prompt, allow_local_paths=allow_local_paths)
     worker_sha = (
         {
             "skipped": True,
@@ -898,6 +976,8 @@ def _dispatch_explanation(
         blocked_reasons.append("worker_sha_unknown")
     if not target_repo.get("ok"):
         blocked_reasons.append("target_repo_preflight_failed")
+    if not prompt_paths["ok"]:
+        blocked_reasons.append("prompt_references_local_paths")
 
     search_attrs = _search_attr_preview(
         provider=resolved_provider,
@@ -927,6 +1007,7 @@ def _dispatch_explanation(
         "freeze": {"frozen": frozen},
         "worker_sha": worker_sha,
         "target_repo": target_repo,
+        "prompt_paths": prompt_paths,
         "risk": risk,
         "provider": {
             "selected": resolved_provider,
@@ -978,6 +1059,7 @@ def _dispatch_prompt(
     spec_path: Path | None = None,
     harness: str = "",
     repo: str | None = None,
+    allow_local_paths: bool = False,
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
     # If prompt is a file path, read it as the spec
@@ -997,6 +1079,24 @@ def _dispatch_prompt(
             prompt,
             spec_path=spec_path,
             prompt_for_cmd=prompt[:60],
+        )
+
+    # Path-locality preflight: a prompt referencing host-local files (e.g. a
+    # Mac scratchpad under /private/tmp) is unreadable on the ganglion worker
+    # and dies minutes into the run. Fail fast locally instead. Runs after
+    # file inlining and spec injection so injected constraint paths are seen.
+    prompt_paths = _prompt_path_plan(prompt, allow_local_paths=allow_local_paths)
+    if not prompt_paths["ok"]:
+        sys.exit(
+            _err(
+                "mtor",
+                f"Prompt references paths the ganglion worker cannot read: "
+                f"{', '.join(prompt_paths['local_only'])}",
+                "PROMPT_LOCAL_PATHS",
+                "Inline the file content into the prompt, commit it to ~/code "
+                "or ~/germline and push, or run the check locally. "
+                "Override: --allow-local-paths",
+            )
         )
 
     cmd = f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''}"

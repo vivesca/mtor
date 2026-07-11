@@ -642,6 +642,7 @@ def default_handler(
     spec: Annotated[Path | None, Parameter(name=["--spec"])] = None,
     harness: Annotated[str, Parameter(name=["--harness"])] = "",
     explain: Annotated[bool, Parameter(name=["--explain"])] = False,
+    allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Bare invocation returns command tree; with a prompt, dispatches to Temporal.
 
@@ -762,6 +763,7 @@ def default_handler(
                 harness=harness,
                 paused=_is_paused(),
                 frozen=_is_frozen(),
+                allow_local_paths=allow_local_paths,
             )
             _ok(
                 f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''} --explain",
@@ -853,6 +855,7 @@ def default_handler(
             spec_path=spec,
             harness=harness,
             repo=_spec_repo,
+            allow_local_paths=allow_local_paths,
         )
 
         # Record dedup only after dispatch succeeds — failed preflight must not
@@ -2458,6 +2461,7 @@ def scout(
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 300,
     repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
+    allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
     workflow_id = _dispatch_prompt(
@@ -2468,6 +2472,7 @@ def scout(
         wait=wait,
         timeout=timeout,
         repo=repo,
+        allow_local_paths=allow_local_paths,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
@@ -2482,6 +2487,7 @@ def research(
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 600,
     repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
+    allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
     workflow_id = _dispatch_prompt(
@@ -2492,6 +2498,7 @@ def research(
         wait=wait,
         timeout=timeout,
         repo=repo,
+        allow_local_paths=allow_local_paths,
     )
     if wait and workflow_id:
         sys.exit(_wait_and_print_logs(workflow_id, timeout=timeout))
