@@ -27,13 +27,18 @@ from mtor.cli import app
 
 
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
-    """Invoke CLI and return (exit_code, parsed_json)."""
+    """Invoke CLI and return (exit_code, parsed_json).
+
+    Fixtures here use pytest tmp_path repos, which the prompt path-locality
+    preflight correctly classifies as host-local scratch; the override flag
+    keeps these gate tests exercising their own concern.
+    """
     captured = io.StringIO()
     old_stdout = sys.stdout
     exit_code = 0
     try:
         sys.stdout = captured
-        app(args or [])
+        app([*(args or []), "--allow-local-paths"])
     except SystemExit as exc:
         exit_code = exc.code if isinstance(exc.code, int) else 1
     finally:
@@ -144,12 +149,15 @@ class TestBuildWithSpecAccepted:
 
     def test_spec_prompt_dispatches(self, tmp_path: Path):
         """mtor --spec spec.md 'prompt' passes the gate and dispatches."""
-        spec_file = _write_spec(tmp_path, (
-            "status: ready\n"
-            f"repo: {tmp_path}\n"
-            "tests:\n"
-            f"  run: \"cd {tmp_path} && uv run pytest\"\n"
-        ))
+        spec_file = _write_spec(
+            tmp_path,
+            (
+                "status: ready\n"
+                f"repo: {tmp_path}\n"
+                "tests:\n"
+                f'  run: "cd {tmp_path} && uv run pytest"\n'
+            ),
+        )
 
         client, handle = _make_mock_client()
         with _patch_dispatch(client):
@@ -161,12 +169,16 @@ class TestBuildWithSpecAccepted:
 
     def test_spec_only_dispatches(self, tmp_path: Path):
         """mtor --spec spec.md (no positional prompt) dispatches with spec as prompt."""
-        spec_file = _write_spec(tmp_path, (
-            "status: ready\n"
-            f"repo: {tmp_path}\n"
-            "tests:\n"
-            f"  run: \"cd {tmp_path} && uv run pytest\"\n"
-        ), body="# Spec\nImplement the bar module")
+        spec_file = _write_spec(
+            tmp_path,
+            (
+                "status: ready\n"
+                f"repo: {tmp_path}\n"
+                "tests:\n"
+                f'  run: "cd {tmp_path} && uv run pytest"\n'
+            ),
+            body="# Spec\nImplement the bar module",
+        )
 
         client, handle = _make_mock_client()
         with _patch_dispatch(client):
@@ -181,12 +193,9 @@ class TestSpecValidationAlwaysEnforced:
 
     def test_invalid_spec_missing_tests_rejected(self, tmp_path: Path):
         """Spec without tests field is rejected."""
-        spec_file = _write_spec(tmp_path, (
-            "status: ready\n"
-            f"repo: {tmp_path}\n"
-            "files:\n"
-            "  - mtor/foo.py\n"
-        ))
+        spec_file = _write_spec(
+            tmp_path, (f"status: ready\nrepo: {tmp_path}\nfiles:\n  - mtor/foo.py\n")
+        )
 
         client, handle = _make_mock_client()
         with ExitStack() as stack:
@@ -198,9 +207,7 @@ class TestSpecValidationAlwaysEnforced:
             stack.enter_context(patch("mtor.cli._is_frozen", return_value=False))
             stack.enter_context(patch("mtor.cli._is_paused", return_value=False))
 
-            exit_code, data = invoke(
-                ["--spec", str(spec_file), "Implement foo"]
-            )
+            exit_code, data = invoke(["--spec", str(spec_file), "Implement foo"])
 
         assert exit_code == 1, data
         assert data["ok"] is False

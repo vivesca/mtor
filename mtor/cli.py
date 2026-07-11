@@ -167,7 +167,7 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
         )
         if result.returncode == 0:
             return result.stdout
-    except (subprocess.TimeoutExpired, OSError):
+    except Exception:  # noqa: BLE001 — best-effort by contract; never raises
         pass
 
     return ""
@@ -293,7 +293,7 @@ def _fetch_running_log_tail(workflow_id: str) -> str:
                 if workflow_id in fname or wf_suffix in fname:
                     log_path = candidate
                     break
-    except (subprocess.TimeoutExpired, OSError):
+    except Exception:  # noqa: BLE001 — best-effort by contract; never raises
         pass
 
     if not log_path:
@@ -308,7 +308,7 @@ def _fetch_running_log_tail(workflow_id: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout
-    except (subprocess.TimeoutExpired, OSError):
+    except Exception:  # noqa: BLE001 — best-effort by contract; never raises
         pass
 
     return ""

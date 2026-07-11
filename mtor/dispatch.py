@@ -855,11 +855,12 @@ def _search_attr_preview(
 # the start of the string.
 _PATH_TOKEN_RE = re.compile(r"(?:(?<=[\s\"'`(=,])|^)((?:~|/)[A-Za-z0-9._\-/]{2,})")
 
-# Path prefixes the ganglion worker can actually read. Anything outside
-# these roots exists only on the dispatching host and dies minutes later on
-# the worker. Mirrors the addressable set _worker_addressable_repo_path
-# honours, expanded to the whole worker home.
-_WORKER_REACHABLE_PREFIXES = ("~/code/", "~/germline/", "/home/vivesca/")
+# Dispatcher-local scratch roots that can never exist on the worker host.
+# A prompt naming a file under these dies minutes later on ganglion, so the
+# preflight blocks it up front. Home-anchored paths are NOT blocked — the
+# worker home mirrors most dispatcher repos (code, germline, epigenome,
+# chromatin, docs, …), so an allowlist over-blocks legitimate targets.
+_HOST_LOCAL_EPHEMERAL_PREFIXES = ("/private/", "/tmp/", "/var/folders/")
 
 
 def _normalize_prompt_path_for_worker(token: str) -> str:
@@ -905,7 +906,7 @@ def _prompt_path_plan(prompt: str, *, allow_local_paths: bool = False) -> dict:
     local_only: list[str] = []
     for token in paths:
         normed = _normalize_prompt_path_for_worker(token)
-        if not normed.startswith(_WORKER_REACHABLE_PREFIXES):
+        if normed.startswith(_HOST_LOCAL_EPHEMERAL_PREFIXES):
             local_only.append(token)
 
     overridden = bool(local_only) and allow_local_paths

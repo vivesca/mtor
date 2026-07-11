@@ -153,7 +153,11 @@ Update dispatch explanation.
         "error": "",
     }
 
-    exit_code, data = invoke(["--spec", str(spec_path), "--explain"])
+    # tmp_path specs are correctly host-local to the path preflight; the
+    # override flag keeps this test about explain-plan content.
+    exit_code, data = invoke(
+        ["--spec", str(spec_path), "--explain", "--allow-local-paths"]
+    )
 
     assert exit_code == 0
     assert data["ok"] is True

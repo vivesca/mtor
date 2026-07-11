@@ -23,13 +23,18 @@ from mtor.cli import app
 
 
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
-    """Invoke CLI and return (exit_code, parsed_json)."""
+    """Invoke CLI and return (exit_code, parsed_json).
+
+    Fixtures here use pytest tmp_path repos, which the prompt path-locality
+    preflight correctly classifies as host-local scratch; the override flag
+    keeps these gate tests exercising their own concern.
+    """
     captured = io.StringIO()
     old_stdout = sys.stdout
     exit_code = 0
     try:
         sys.stdout = captured
-        app(args or [])
+        app([*(args or []), "--allow-local-paths"])
     except SystemExit as exc:
         exit_code = exc.code if isinstance(exc.code, int) else 1
     finally:
@@ -212,9 +217,7 @@ class TestSpecPlusTask:
 
         client, handle = _make_mock_client()
         with _patch_client(client):
-            exit_code, data = invoke(
-                ["--spec", str(spec_file), "Fix the failing test"]
-            )
+            exit_code, data = invoke(["--spec", str(spec_file), "Fix the failing test"])
 
         assert exit_code == 0, data
         assert data["ok"] is True
@@ -229,15 +232,12 @@ class TestSpecPlusTask:
         """Spec content appears before the positional task with newline separator."""
         spec_file = tmp_path / "notes.md"
         spec_file.write_text(
-            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\n"
-            "SPEC_BODY"
+            "---\nstatus: ready\nrepo: .\ntests:\n  run: pytest\n---\n\nSPEC_BODY"
         )
 
         client, handle = _make_mock_client()
         with _patch_client(client):
-            exit_code, data = invoke(
-                ["--spec", str(spec_file), "TASK_ARG"]
-            )
+            exit_code, data = invoke(["--spec", str(spec_file), "TASK_ARG"])
 
         assert exit_code == 0
         call_args = client.start_workflow.call_args

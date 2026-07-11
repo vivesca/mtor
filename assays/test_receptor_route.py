@@ -54,7 +54,7 @@ def write_spec(
         "scope:\n"
         f"  - {scope}\n"
         "tests:\n"
-        f"  run: \"cd {repo} && uv run pytest assays/test_receptor_route_fixture.py -v\"\n"
+        f'  run: "cd {repo} && uv run pytest assays/test_receptor_route_fixture.py -v"\n'
         "---\n"
         f"{body}\n",
         encoding="utf-8",
@@ -92,7 +92,7 @@ class TestValidateReceptorSpec:
             "status: ready\n"
             f"repo: {repo}\n"
             "tests:\n"
-            f"  run: \"cd {repo} && uv run pytest assays/test_missing.py -v\"\n"
+            f'  run: "cd {repo} && uv run pytest assays/test_missing.py -v"\n'
             "---\n"
             "# Spec\n",
             encoding="utf-8",
@@ -165,9 +165,27 @@ class TestReceptorCommand:
         client.start_workflow = AsyncMock(return_value=handle)
 
         with ExitStack() as stack:
-            stack.enter_context(patch("mtor.dispatch._get_client", return_value=(client, None)))
-            stack.enter_context(patch("mtor.dispatch._check_worker_sha", return_value=True))
+            stack.enter_context(
+                patch("mtor.dispatch._get_client", return_value=(client, None))
+            )
+            stack.enter_context(
+                patch("mtor.dispatch._check_worker_sha", return_value=True)
+            )
             stack.enter_context(patch("mtor.dispatch.validate_spec", return_value=[]))
+            # tmp_path repos are correctly host-local to the path preflight;
+            # neutralise it so this test exercises only the receptor route.
+            stack.enter_context(
+                patch(
+                    "mtor.dispatch._prompt_path_plan",
+                    return_value={
+                        "paths": [],
+                        "local_only": [],
+                        "ok": True,
+                        "overridden": False,
+                        "detail": "",
+                    },
+                )
+            )
             exit_code, data = invoke(["receptor", "--spec", str(spec), "Update route"])
 
         assert exit_code == 0
