@@ -515,6 +515,36 @@ async def _tee_stream(
     return bytes(buf)
 
 
+async def _heartbeat_pulse(
+    label: str,
+    *,
+    interval_s: float = 15.0,
+    beat=None,
+) -> None:
+    """Independent heartbeat pulse — unstarveable by other translocase work.
+
+    Wave-1 2026-07-11 post-mortem: ``activity.heartbeat()`` was only sent at the
+    tail of each 30s stall-check tick, after an awaited git-diff computation on
+    the shared event loop / thread pool. Under event-loop starvation that
+    delivery slipped past the 3m heartbeat timeout and Temporal SIGKILLed a
+    healthy worker. This pulse runs as its own task with nothing in its loop
+    body besides ``beat()`` and ``sleep``, so its cadence is independent of
+    stall-check work. The default ``beat`` is a closure over
+    ``activity.heartbeat`` resolved at call time (so tests inject a fake);
+    every exception from ``beat`` is swallowed so a transient RPC failure can
+    never end the pulse. Loops forever until the task is cancelled.
+    """
+    if beat is None:
+
+        def beat():
+            activity.heartbeat(f"{label} pulse")
+
+    while True:
+        with contextlib.suppress(Exception):
+            beat()
+        await asyncio.sleep(interval_s)
+
+
 async def _heartbeat_stall_check(
     proc,
     work_dir: str,
@@ -594,10 +624,8 @@ async def _heartbeat_stall_check(
             recent_hashes.pop(0)
             recent_stdout_bytes.pop(0)
 
-        with contextlib.suppress(Exception):
-            activity.heartbeat(
-                f"{provider}:{task[:60]} tick:{tick} diff:{diff_hash} out:{current_stdout_bytes}"
-            )
+        # Heartbeat delivery moved to the dedicated _heartbeat_pulse task so
+        # RPC cadence cannot be starved by the git-diff computation above.
 
         # Scout/research modes are read-only, so use output growth as liveness.
         if skip_stall:
@@ -1075,6 +1103,7 @@ async def translate(
                 trace=_trace,
             )
         )
+        pulse_task = asyncio.create_task(_heartbeat_pulse(f"{provider}:{task[:60]}"))
         try:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -1164,8 +1193,11 @@ async def translate(
                 return _r
         finally:
             hb_task.cancel()
+            pulse_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hb_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await pulse_task
             if log_fh:
                 with contextlib.suppress(OSError):
                     log_fh.close()

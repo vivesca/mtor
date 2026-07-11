@@ -70,6 +70,23 @@ def _translate_retry_policy(dispatch_mode: str, use_v2: bool) -> RetryPolicy:
     return _RETRY_POLICY_V2_MUTATING
 
 
+def _resolve_heartbeat_timeout(patched) -> timedelta:
+    """Resolve the translate activity heartbeat timeout via the patch-marker ladder.
+
+    Newest marker wins so in-flight replays — which only know older markers —
+    keep their previous timeout. ``translate-heartbeat-6m`` is the wave-1
+    2026-07-11 fix: a dedicated pulse task now delivers heartbeats independently
+    of stall-check work, but the prior 3m window proved too tight when the shared
+    event loop stalled on a git-diff computation and Temporal SIGKILLed a
+    healthy worker. The 15m branch is the pre-patch fallback for oldest replays.
+    """
+    if patched("translate-heartbeat-6m"):
+        return timedelta(minutes=6)
+    if patched("translate-heartbeat-3m"):
+        return timedelta(minutes=3)
+    return timedelta(minutes=15)
+
+
 def _failure_cause_flag(cause: BaseException | None) -> str:
     """Classify an activity failure cause for triage. Empty string if unknown."""
     if isinstance(cause, TemporalTimeoutError):
@@ -145,13 +162,12 @@ class TranslationWorkflow:
         use_review_v2 = workflow.patched("review-v2-slim-payload")
         use_retry_v2 = workflow.patched("translate-retry-v2")
 
-        # Crashed-worker detection: translocase heartbeats every 30s and the
-        # SDK throttles heartbeat RPCs to at most every 60s, so 3m is safe.
-        # Gated behind patched() so in-flight replays keep the old 15m timeout.
-        if workflow.patched("translate-heartbeat-3m"):
-            heartbeat_timeout = timedelta(minutes=3)
-        else:
-            heartbeat_timeout = timedelta(minutes=15)
+        # Crashed-worker detection: a dedicated pulse task in translocase now
+        # delivers activity.heartbeat() independently of the stall-check tick,
+        # so the timeout only needs to cover a genuinely dead worker. The
+        # ladder preserves old timeouts for in-flight replays that predate each
+        # marker: 6m (pulse) -> 3m (stall-check tail) -> 15m (original).
+        heartbeat_timeout = _resolve_heartbeat_timeout(workflow.patched)
 
         try:
             # Raw subprocess mode (default)
