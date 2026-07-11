@@ -173,6 +173,147 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
     return ""
 
 
+def _liveness_from_log_tail(
+    tail_text: str, *, now_ts: str | None = None
+) -> dict[str, Any]:
+    """Derive a liveness state from the last RIBOSOME_PROGRESS heartbeat in a log tail.
+
+    Scans for the last line containing ``RIBOSOME_PROGRESS:`` whose JSON payload has
+    ``event == "heartbeat"``, then maps the heartbeat age to a state:
+    ``active`` (<120s), ``quiet`` (120-300s), ``stalled`` (>300s). Missing or
+    malformed heartbeat -> ``unknown`` with all numeric fields None. Never raises.
+    """
+    from datetime import UTC, datetime
+
+    unknown = {
+        "state": "unknown",
+        "heartbeat_age_seconds": None,
+        "elapsed_seconds": None,
+        "output_bytes": None,
+        "stale_for_seconds": None,
+    }
+    if not tail_text:
+        return dict(unknown)
+
+    marker = "RIBOSOME_PROGRESS:"
+    heartbeat: dict[str, Any] | None = None
+    for line in reversed(tail_text.splitlines()):
+        idx = line.find(marker)
+        if idx == -1:
+            continue
+        try:
+            event = json.loads(line[idx + len(marker) :].strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "heartbeat":
+            heartbeat = event
+            break
+
+    if heartbeat is None:
+        return dict(unknown)
+
+    ts = heartbeat.get("ts")
+    hb_dt = None
+    if isinstance(ts, str):
+        try:
+            hb_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            hb_dt = None
+    if hb_dt is None:
+        return dict(unknown)
+
+    now_dt = None
+    if now_ts:
+        try:
+            now_dt = datetime.fromisoformat(now_ts.replace("Z", "+00:00"))
+        except ValueError:
+            now_dt = None
+    if now_dt is None:
+        now_dt = datetime.now(UTC)
+
+    age = int((now_dt - hb_dt).total_seconds())
+    detail = heartbeat.get("detail")
+    if not isinstance(detail, str):
+        detail = ""
+
+    def _extract_int(key: str) -> int | None:
+        token = f"{key}="
+        for part in detail.split():
+            if part.startswith(token):
+                try:
+                    return int(part[len(token) :].rstrip("s"))
+                except ValueError:
+                    return None
+        return None
+
+    if age < 120:
+        state = "active"
+    elif age <= 300:
+        state = "quiet"
+    else:
+        state = "stalled"
+
+    return {
+        "state": state,
+        "heartbeat_age_seconds": age,
+        "elapsed_seconds": _extract_int("elapsed"),
+        "output_bytes": _extract_int("output_bytes"),
+        "stale_for_seconds": _extract_int("stale_for"),
+    }
+
+
+def _fetch_running_log_tail(workflow_id: str) -> str:
+    """Best-effort short-timeout SSH tail of a RUNNING workflow's log.
+
+    Resolves the log path via SSH find (as the ``logs`` command does), then tails
+    the last 40 lines. ~5s budget per call. Returns ``""`` on any failure; never raises.
+    """
+    wf_suffix = workflow_id.rsplit("-", 1)[-1] if "-" in workflow_id else workflow_id
+    log_path = ""
+    try:
+        find_result = subprocess.run(
+            [
+                "ssh",
+                WORKER_HOST,
+                (
+                    f"find {OUTPUTS_DIR} {WORKER_LOG_DIR} -maxdepth 1 "
+                    f"\\( -name '*.txt' -o -name '{workflow_id}.log' -o "
+                    f"-name '{workflow_id}.jsonl' \\) -type f "
+                    f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -40 | cut -d' ' -f2-"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if find_result.returncode == 0:
+            for line in find_result.stdout.strip().splitlines():
+                candidate = line.strip()
+                fname = candidate.rsplit("/", 1)[-1]
+                if workflow_id in fname or wf_suffix in fname:
+                    log_path = candidate
+                    break
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    if not log_path:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["ssh", WORKER_HOST, f"tail -40 {log_path}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return ""
+
+
 def _build_failure_reason(task_result: dict) -> str:
     """Build a human-readable failure reason from task result + chaperone flags."""
     parts: list[str] = []
@@ -1152,6 +1293,12 @@ def status(workflow_id: str, short: bool = False) -> None:
         if workflow_id in vo:
             result_payload["verdict"] = vo[workflow_id]
         result_payload["operator_state"] = _operator_state(status_val, result_payload)
+
+        # RUNNING workflows: attach heartbeat-derived liveness from the worker log tail.
+        # Fetch failures degrade to {"state": "unknown", ...} and never break status.
+        if status_val == "RUNNING":
+            tail = _fetch_running_log_tail(workflow_id)
+            result_payload["liveness"] = _liveness_from_log_tail(tail)
 
         # Add failure_reason for non-approved terminal states
         if status_val in ("FAILED", "CANCELED", "TERMINATED") or (
