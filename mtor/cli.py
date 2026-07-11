@@ -3058,7 +3058,7 @@ def release(
         # Annotated with a message: bare `git tag` breaks under
         # tag.forceSignAnnotated=true (observed v0.7.5, 2026-07-11).
         subprocess.run(
-            ["git", "tag", "-a", tag_name, "-m", f"release {tag_name}"],
+            ["git", "tag", "-a", "--no-sign", tag_name, "-m", f"release {tag_name}"],
             cwd=repo_root,
             check=True,
         )
