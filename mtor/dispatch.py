@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from porin import action as _action
@@ -776,6 +777,60 @@ def _dedup_plan(prompt: str, spec_path: Path | None = None) -> dict:
     }
 
 
+WORKER_LOAD_QUERY_TIMEOUT_S = 3.0
+
+
+def _count_running_workflows() -> int | None:
+    """Count Temporal workflows currently in ExecutionStatus Running.
+
+    Returns None when Temporal is unreachable or the visibility query does not
+    complete within WORKER_LOAD_QUERY_TIMEOUT_S — callers treat that as "load
+    unknown" rather than blocking or failing the dispatch. Mirrors the
+    list_workflows visibility query used by riboseq (cli.py ~930).
+    """
+    try:
+        import asyncio
+
+        from temporalio.client import Client
+
+        async def _count() -> int:
+            client = await Client.connect(TEMPORAL_HOST)
+            total = 0
+            async for _ in client.list_workflows(query="ExecutionStatus = 'Running'"):
+                total += 1
+            return total
+
+        return asyncio.run(
+            asyncio.wait_for(_count(), timeout=WORKER_LOAD_QUERY_TIMEOUT_S)
+        )
+    except Exception:
+        return None
+
+
+def _worker_load_plan(count_running: Callable[[], int] | None = None) -> dict:
+    """Snapshot of current worker load for the dispatch envelope.
+
+    Advisory only — tells the operator whether a freshly dispatched task will
+    be picked up immediately or sit queued behind other running work. Never
+    blocks or fails a dispatch: any exception degrades to ``running=None`` with
+    ``ok=True`` and a "load unknown" detail.
+    """
+    counter = count_running if count_running is not None else _count_running_workflows
+    try:
+        running = counter()
+    except Exception:
+        running = None
+
+    if running is None:
+        detail = "load unknown"
+    elif running == 0:
+        detail = "worker idle"
+    else:
+        detail = f"queued behind {running} running task(s)"
+
+    return {"running": running, "ok": True, "detail": detail}
+
+
 def _search_attr_preview(
     *,
     provider: str,
@@ -1003,6 +1058,7 @@ def _dispatch_explanation(
             "errors": validation_errors,
         },
         "dedup": dedup,
+        "worker_load": _worker_load_plan(),
         "pause": {"paused": paused},
         "freeze": {"frozen": frozen},
         "worker_sha": worker_sha,
@@ -1309,6 +1365,8 @@ def _dispatch_prompt(
             result_envelope["chain_length"] = len(chain)
         if spec_path is not None:
             result_envelope["spec"] = str(spec_path)
+
+        result_envelope["worker_load"] = _worker_load_plan()
 
         next_actions = [
             _action(f"mtor status {started_id}", "Poll workflow status"),
