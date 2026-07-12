@@ -143,6 +143,27 @@ class TestRunChecks:
         coverage_findings = [r for r in results if r["category"] == "coverage"]
         assert not any("tested-effector" in r["target"] for r in coverage_findings)
 
+    def test_effector_with_central_assay_not_flagged(self, tmp_path):
+        from mtor.scan import _run_checks
+
+        effectors = tmp_path / "effectors"
+        effectors.mkdir()
+        effector_dir = effectors / "central-effector"
+        effector_dir.mkdir()
+        (effector_dir / "central_effector.py").write_text("VALUE = 1\n")
+        assays = tmp_path / "assays"
+        assays.mkdir()
+        (assays / "test_central_effector.py").write_text("def test_ok(): pass\n")
+
+        results = _run_checks(
+            effectors_dir=effectors,
+            marks_dir=tmp_path / "marks",
+            repo_dir=tmp_path,
+        )
+
+        coverage_findings = [r for r in results if r["category"] == "coverage"]
+        assert not any("central-effector" in r["target"] for r in coverage_findings)
+
     def test_finds_stale_marks(self, tmp_path):
         from mtor.scan import _run_checks
 

@@ -69,7 +69,8 @@ def _run_checks(
 
     findings: list[dict[str, Any]] = []
     findings.extend(_check_todo_fixme(effectors_dir))
-    findings.extend(_check_missing_assays(effectors_dir))
+    central_assays_dir = repo_dir / "assays" if effectors_dir.parent == repo_dir else None
+    findings.extend(_check_missing_assays(effectors_dir, central_assays_dir))
     findings.extend(_check_stale_marks(marks_dir))
     findings.extend(_check_divergent_forks(repo_dir, code_dir))
     return findings
@@ -108,8 +109,10 @@ def _check_todo_fixme(effectors_dir: Path) -> list[dict[str, Any]]:
     return findings
 
 
-def _check_missing_assays(effectors_dir: Path) -> list[dict[str, Any]]:
-    """Find effectors that lack an assays/ directory."""
+def _check_missing_assays(
+    effectors_dir: Path, central_assays_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Find effectors without local or repository-level assays."""
     findings: list[dict[str, Any]] = []
     if not effectors_dir.is_dir():
         return findings
@@ -122,7 +125,11 @@ def _check_missing_assays(effectors_dir: Path) -> list[dict[str, Any]]:
         if child.name == ".venv":
             continue
         assays_dir = child / "assays"
-        if not assays_dir.is_dir():
+        central_test = None
+        if central_assays_dir is not None:
+            normalized = child.name.replace("-", "_")
+            central_test = central_assays_dir / f"test_{normalized}.py"
+        if not assays_dir.is_dir() and not (central_test and central_test.is_file()):
             findings.append({
                 "description": f"Effector '{child.name}' has no assays/ directory",
                 "category": "coverage",
