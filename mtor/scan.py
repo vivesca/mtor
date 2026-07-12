@@ -3,8 +3,7 @@
 Runs deterministic checks on the codebase:
   1. grep for TODO/FIXME in effectors (hygiene)
   2. find effectors without assays/ directories (coverage)
-  3. check for stale marks older than 30 days in ~/epigenome/marks/ (maintenance)
-  4. detect divergent forks — an in-tree package (germline/packages|effectors)
+  3. detect divergent forks — an in-tree package (germline/packages|effectors)
      that also lives standalone in ~/code, i.e. an incomplete abscission
      (the donor copy was never removed after the component graduated). (maintenance)
 """
@@ -13,18 +12,15 @@ from __future__ import annotations
 
 import os
 import re
-import time
 import tomllib
 from pathlib import Path
 from typing import Any
 
 REPO_DIR = os.environ.get("MTOR_REPO_DIR", str(Path.home() / "germline"))
-EPIGENOME_DIR = os.environ.get("MTOR_EPIGENOME_DIR", str(Path.home() / "epigenome"))
 CODE_DIR = os.environ.get("MTOR_CODE_DIR", str(Path.home() / "code"))
 
 VALID_CATEGORIES: tuple[str, ...] = ("hygiene", "coverage", "maintenance")
 
-_STALE_DAYS = 30
 _TODO_PATTERN = re.compile(r"\b(TODO|FIXME)\b")
 # Parents under germline that hold in-tree Python packages, checked for
 # standalone twins in ~/code (the graduated-component location).
@@ -45,7 +41,8 @@ def _run_checks(
         Directory containing effector subdirectories. Defaults to
         ``$REPO_DIR/effectors``.
     marks_dir : Path
-        Directory containing mark files. Defaults to ``~/epigenome/marks``.
+        Retained for call compatibility. Memory staleness is owned by the
+        recall-aware memory-maintenance subsystem rather than this code scan.
     repo_dir : Path
         Germline root (holds ``packages/`` and ``effectors/``). Defaults to
         ``$REPO_DIR``. Used by the divergent-fork check.
@@ -60,8 +57,6 @@ def _run_checks(
     """
     if effectors_dir is None:
         effectors_dir = Path(REPO_DIR) / "effectors"
-    if marks_dir is None:
-        marks_dir = Path(EPIGENOME_DIR) / "marks"
     if repo_dir is None:
         repo_dir = Path(REPO_DIR)
     if code_dir is None:
@@ -69,9 +64,10 @@ def _run_checks(
 
     findings: list[dict[str, Any]] = []
     findings.extend(_check_todo_fixme(effectors_dir))
-    central_assays_dir = repo_dir / "assays" if effectors_dir.parent == repo_dir else None
+    central_assays_dir = (
+        repo_dir / "assays" if effectors_dir.parent == repo_dir else None
+    )
     findings.extend(_check_missing_assays(effectors_dir, central_assays_dir))
-    findings.extend(_check_stale_marks(marks_dir))
     findings.extend(_check_divergent_forks(repo_dir, code_dir))
     return findings
 
@@ -100,12 +96,14 @@ def _check_todo_fixme(effectors_dir: Path) -> list[dict[str, Any]]:
                 continue
             for line_no, line in enumerate(text.splitlines(), 1):
                 if _TODO_PATTERN.search(line):
-                    findings.append({
-                        "description": f"Found {line.strip()} at {py_file.name}:{line_no}",
-                        "category": "hygiene",
-                        "priority": "low",
-                        "target": str(py_file.relative_to(effectors_dir)),
-                    })
+                    findings.append(
+                        {
+                            "description": f"Found {line.strip()} at {py_file.name}:{line_no}",
+                            "category": "hygiene",
+                            "priority": "low",
+                            "target": str(py_file.relative_to(effectors_dir)),
+                        }
+                    )
     return findings
 
 
@@ -130,49 +128,15 @@ def _check_missing_assays(
             normalized = child.name.replace("-", "_")
             central_test = central_assays_dir / f"test_{normalized}.py"
         if not assays_dir.is_dir() and not (central_test and central_test.is_file()):
-            findings.append({
-                "description": f"Effector '{child.name}' has no assays/ directory",
-                "category": "coverage",
-                "priority": "medium",
-                "target": child.name,
-            })
+            findings.append(
+                {
+                    "description": f"Effector '{child.name}' has no assays/ directory",
+                    "category": "coverage",
+                    "priority": "medium",
+                    "target": child.name,
+                }
+            )
     return findings
-
-
-def _check_stale_marks(marks_dir: Path) -> list[dict[str, Any]]:
-    """Summarize mark files older than 30 days as one maintenance batch."""
-    if not marks_dir.is_dir():
-        return []
-
-    cutoff = time.time() - _STALE_DAYS * 86400
-    count = 0
-    oldest_days = 0
-    for mark_file in sorted(marks_dir.iterdir()):
-        if not mark_file.is_file():
-            continue
-        try:
-            mtime = mark_file.stat().st_mtime
-        except OSError:
-            continue
-        if mtime < cutoff:
-            days_stale = int((time.time() - mtime) / 86400)
-            count += 1
-            oldest_days = max(oldest_days, days_stale)
-    if not count:
-        return []
-
-    noun = "mark" if count == 1 else "marks"
-    return [
-        {
-            "description": (
-                f"{count} stale {noun} older than {_STALE_DAYS} days "
-                f"(oldest {oldest_days} days); review as one maintenance batch"
-            ),
-            "category": "maintenance",
-            "priority": "high",
-            "target": str(marks_dir),
-        }
-    ]
 
 
 def _pkg_name_version(pkg_root: Path) -> tuple[str | None, str | None]:
@@ -221,7 +185,11 @@ def _check_divergent_forks(repo_dir: Path, code_dir: Path) -> list[dict[str, Any
         if not parent.is_dir():
             continue
         for child in sorted(parent.iterdir()):
-            if not child.is_dir() or child.name.startswith(".") or child.name == "__pycache__":
+            if (
+                not child.is_dir()
+                or child.name.startswith(".")
+                or child.name == "__pycache__"
+            ):
                 continue
             in_name, in_ver = _pkg_name_version(child)
             if not in_name:
@@ -239,21 +207,25 @@ def _check_divergent_forks(repo_dir: Path, code_dir: Path) -> list[dict[str, Any
                 continue
 
             if in_ver and st_ver and in_ver != st_ver:
-                ver_note = f" at diverging versions (in-tree {in_ver} vs standalone {st_ver})"
+                ver_note = (
+                    f" at diverging versions (in-tree {in_ver} vs standalone {st_ver})"
+                )
             elif in_ver and st_ver and in_ver == st_ver:
                 ver_note = f" (both {in_ver} — a vendored second copy)"
             else:
                 ver_note = ""
 
-            findings.append({
-                "description": (
-                    f"Possible incomplete abscission: package '{in_name}' exists both "
-                    f"in-tree at {parent_name}/{child.name} and standalone at {standalone}{ver_note}. "
-                    f"Re-derive which one is live (recipe, not a stale note), then remove or "
-                    f"demote the donor per the abscission step-8 completion gate."
-                ),
-                "category": "maintenance",
-                "priority": "high",
-                "target": f"{parent_name}/{child.name}",
-            })
+            findings.append(
+                {
+                    "description": (
+                        f"Possible incomplete abscission: package '{in_name}' exists both "
+                        f"in-tree at {parent_name}/{child.name} and standalone at {standalone}{ver_note}. "
+                        f"Re-derive which one is live (recipe, not a stale note), then remove or "
+                        f"demote the donor per the abscission step-8 completion gate."
+                    ),
+                    "category": "maintenance",
+                    "priority": "high",
+                    "target": f"{parent_name}/{child.name}",
+                }
+            )
     return findings

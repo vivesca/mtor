@@ -434,7 +434,7 @@ tree.add_command(
 )
 tree.add_command(
     "scan",
-    "Run deterministic checks: TODO/FIXME, missing tests, stale marks.",
+    "Run deterministic checks for hygiene, coverage, and divergent forks.",
     params=[],
     annotations={"readonly": True},
 )

@@ -164,67 +164,21 @@ class TestRunChecks:
         coverage_findings = [r for r in results if r["category"] == "coverage"]
         assert not any("central-effector" in r["target"] for r in coverage_findings)
 
-    def test_finds_stale_marks(self, tmp_path):
+    def test_scan_does_not_treat_mark_mtime_as_memory_staleness(self, tmp_path):
         from mtor.scan import _run_checks
 
         marks = tmp_path / "marks"
         marks.mkdir()
-        # Create a stale mark file (>30 days old mtime)
         stale = marks / "old-mark.json"
         stale.write_text('{"status": "active"}')
-        # Set mtime to 60 days ago
         import time
 
         old_time = time.time() - 60 * 86400
         os.utime(stale, (old_time, old_time))
 
         results = _run_checks(effectors_dir=tmp_path, marks_dir=marks)
-        maint_findings = [r for r in results if r["category"] == "maintenance"]
-        assert len(maint_findings) > 0
-        assert any(
-            "old-mark" in r["target"] or "stale" in r["description"].lower()
-            for r in maint_findings
-        )
-
-    def test_recent_mark_not_flagged(self, tmp_path):
-        from mtor.scan import _run_checks
-
-        marks = tmp_path / "marks"
-        marks.mkdir()
-        fresh = marks / "fresh-mark.json"
-        fresh.write_text('{"status": "active"}')
-
-        results = _run_checks(effectors_dir=tmp_path, marks_dir=marks)
-        maint_findings = [r for r in results if r["category"] == "maintenance"]
-        assert not any("fresh-mark" in r["target"] for r in maint_findings)
-
-    def test_stale_marks_are_one_aggregate_finding(self, tmp_path):
-        from mtor.scan import _run_checks
-
-        marks = tmp_path / "marks"
-        marks.mkdir()
-        import time
-
-        old_time = time.time() - 60 * 86400
-        for name in ("one.md", "two.md", "three.md"):
-            path = marks / name
-            path.write_text("stale")
-            os.utime(path, (old_time, old_time))
-
-        results = _run_checks(effectors_dir=tmp_path, marks_dir=marks)
-        stale_findings = [
-            finding
-            for finding in results
-            if finding["category"] == "maintenance"
-            and "stale mark" in finding["description"].lower()
-        ]
-
-        assert len(stale_findings) == 1
-        assert "3 stale marks" in stale_findings[0]["description"]
-        assert stale_findings[0]["target"] == str(marks)
         assert not any(
-            name in stale_findings[0]["description"]
-            for name in ("one.md", "two.md", "three.md")
+            "stale mark" in result["description"].lower() for result in results
         )
 
     def test_excludes_venv_dirs(self, tmp_path):
