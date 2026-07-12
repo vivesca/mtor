@@ -133,12 +133,13 @@ def _check_missing_assays(effectors_dir: Path) -> list[dict[str, Any]]:
 
 
 def _check_stale_marks(marks_dir: Path) -> list[dict[str, Any]]:
-    """Find mark files older than 30 days."""
-    findings: list[dict[str, Any]] = []
+    """Summarize mark files older than 30 days as one maintenance batch."""
     if not marks_dir.is_dir():
-        return findings
+        return []
 
     cutoff = time.time() - _STALE_DAYS * 86400
+    count = 0
+    oldest_days = 0
     for mark_file in sorted(marks_dir.iterdir()):
         if not mark_file.is_file():
             continue
@@ -148,13 +149,23 @@ def _check_stale_marks(marks_dir: Path) -> list[dict[str, Any]]:
             continue
         if mtime < cutoff:
             days_stale = int((time.time() - mtime) / 86400)
-            findings.append({
-                "description": f"Stale mark '{mark_file.name}' ({days_stale} days old)",
-                "category": "maintenance",
-                "priority": "high",
-                "target": str(mark_file),
-            })
-    return findings
+            count += 1
+            oldest_days = max(oldest_days, days_stale)
+    if not count:
+        return []
+
+    noun = "mark" if count == 1 else "marks"
+    return [
+        {
+            "description": (
+                f"{count} stale {noun} older than {_STALE_DAYS} days "
+                f"(oldest {oldest_days} days); review as one maintenance batch"
+            ),
+            "category": "maintenance",
+            "priority": "high",
+            "target": str(marks_dir),
+        }
+    ]
 
 
 def _pkg_name_version(pkg_root: Path) -> tuple[str | None, str | None]:

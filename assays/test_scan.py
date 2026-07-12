@@ -86,7 +86,9 @@ class TestRunChecks:
 
         results = _run_checks(effectors_dir=tmp_path, marks_dir=tmp_path)
         for r in results:
-            assert r["category"] in VALID_CATEGORIES, f"Invalid category: {r['category']}"
+            assert r["category"] in VALID_CATEGORIES, (
+                f"Invalid category: {r['category']}"
+            )
 
     def test_priorities_are_valid(self, tmp_path):
         from mtor.scan import _run_checks
@@ -94,7 +96,9 @@ class TestRunChecks:
         results = _run_checks(effectors_dir=tmp_path, marks_dir=tmp_path)
         valid_priorities = {"low", "medium", "high"}
         for r in results:
-            assert r["priority"] in valid_priorities, f"Invalid priority: {r['priority']}"
+            assert r["priority"] in valid_priorities, (
+                f"Invalid priority: {r['priority']}"
+            )
 
     def test_finds_todo_fixme(self, tmp_path):
         from mtor.scan import _run_checks
@@ -108,7 +112,8 @@ class TestRunChecks:
         todo_findings = [r for r in results if r["category"] == "hygiene"]
         assert len(todo_findings) > 0
         assert any(
-            "TODO" in r["description"] or "FIXME" in r["description"] for r in todo_findings
+            "TODO" in r["description"] or "FIXME" in r["description"]
+            for r in todo_findings
         )
 
     def test_finds_effectors_without_assays(self, tmp_path):
@@ -171,6 +176,35 @@ class TestRunChecks:
         results = _run_checks(effectors_dir=tmp_path, marks_dir=marks)
         maint_findings = [r for r in results if r["category"] == "maintenance"]
         assert not any("fresh-mark" in r["target"] for r in maint_findings)
+
+    def test_stale_marks_are_one_aggregate_finding(self, tmp_path):
+        from mtor.scan import _run_checks
+
+        marks = tmp_path / "marks"
+        marks.mkdir()
+        import time
+
+        old_time = time.time() - 60 * 86400
+        for name in ("one.md", "two.md", "three.md"):
+            path = marks / name
+            path.write_text("stale")
+            os.utime(path, (old_time, old_time))
+
+        results = _run_checks(effectors_dir=tmp_path, marks_dir=marks)
+        stale_findings = [
+            finding
+            for finding in results
+            if finding["category"] == "maintenance"
+            and "stale mark" in finding["description"].lower()
+        ]
+
+        assert len(stale_findings) == 1
+        assert "3 stale marks" in stale_findings[0]["description"]
+        assert stale_findings[0]["target"] == str(marks)
+        assert not any(
+            name in stale_findings[0]["description"]
+            for name in ("one.md", "two.md", "three.md")
+        )
 
     def test_excludes_venv_dirs(self, tmp_path):
         from mtor.scan import _run_checks
