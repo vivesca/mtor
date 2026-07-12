@@ -274,6 +274,34 @@ class TestScanCLI:
         _, data = invoke(["scan"])
         assert "next_actions" in data
 
+    def test_auto_builds_prompt_from_scan_finding_contract(self, monkeypatch):
+        import mtor.cli as cli
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            cli,
+            "_run_checks",
+            lambda: [
+                {
+                    "description": "Effector lacks an assay",
+                    "category": "coverage",
+                    "priority": "medium",
+                    "target": "sample-effector",
+                }
+            ],
+        )
+
+        def fake_dispatch(prompt: str, **kwargs: object) -> None:
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+
+        monkeypatch.setattr(cli, "_dispatch_prompt", fake_dispatch)
+
+        cli.auto(provider="zhipu", skip_sha_check=False)
+
+        assert "sample-effector" in str(captured["prompt"])
+        assert "Effector lacks an assay" in str(captured["prompt"])
+
     def test_scan_command_field(self, tmp_path, monkeypatch):
         import mtor.scan as _scan
 

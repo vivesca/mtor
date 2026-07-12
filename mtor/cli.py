@@ -2796,7 +2796,8 @@ def auto(
 
     # Build a prompt from the top findings
     finding_lines = "\n".join(
-        f"- {f['file']}:{f.get('line', '')} {f['issue']}" for f in findings[:5]
+        f"- [{f['priority']}/{f['category']}] {f['target']}: {f['description']}"
+        for f in findings[:5]
     )
     auto_prompt = (
         f"Fix the following issues in ~/code/mtor:\n{finding_lines}\n\n"
