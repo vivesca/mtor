@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mtor import OUTPUTS_DIR, WORKER_HOST, WORKER_LOG_DIR
+from mtor.backend import require_temporal_backend
 
 
 def _default_mtor_code_dir() -> str:
@@ -298,6 +299,7 @@ def check_health(
     worker_host: str | None = None,
     repo_dir: str | None = None,
     remote_repo_dir: str | None = None,
+    expected_sha: str | None = None,
 ) -> HealthReport:
     """Run infrastructure health checks and return a report.
 
@@ -362,47 +364,111 @@ def check_health(
         all_ok = False
     checks.append({"name": "repo_dir", "ok": repo_ok, "detail": repo_detail})
 
-    # Check 3: Worker checkout HEAD matches the local checkout.
+    # Check 3: Worker checkout contains the immutable deployed SHA when one is
+    # supplied. Standalone checks retain exact local-vs-worker drift detection.
     head_ok = False
     head_detail = "Skipped (repo missing)"
     if repo_ok:
         try:
-            local_head = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=repo,
-            )
-            if local_head.returncode != 0:
-                head_detail = (
-                    f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
-                )
-            elif host_is_local:
-                short = local_head.stdout.strip()[:8]
-                head_ok = True
-                head_detail = f"worker HEAD matches local HEAD: {short}"
+            if expected_sha is not None:
+                if host_is_local:
+                    worker_head = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        cwd=repo,
+                    )
+                    contains = subprocess.run(
+                        [
+                            "git",
+                            "merge-base",
+                            "--is-ancestor",
+                            expected_sha,
+                            "HEAD",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        cwd=repo,
+                    )
+                else:
+                    worker_head = subprocess.run(
+                        _host_command(
+                            host,
+                            f"cd {shlex.quote(remote_repo)} && git rev-parse HEAD",
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    contains = subprocess.run(
+                        _host_command(
+                            host,
+                            f"cd {shlex.quote(remote_repo)} && "
+                            "git merge-base --is-ancestor "
+                            f"{shlex.quote(expected_sha)} HEAD",
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                worker_sha = worker_head.stdout.strip()
+                if worker_head.returncode != 0:
+                    head_detail = (
+                        "worker git rev-parse failed: "
+                        f"{worker_head.stderr.strip()[:80]}"
+                    )
+                else:
+                    head_ok = contains.returncode == 0
+                    head_detail = (
+                        "worker HEAD contains deployed SHA: "
+                        f"deployed {expected_sha[:8]} worker {worker_sha[:8]}"
+                        if head_ok
+                        else "worker HEAD does not contain deployed SHA: "
+                        f"deployed {expected_sha[:8]} worker {worker_sha[:8]}"
+                    )
             else:
-                remote_head = subprocess.run(
-                    _host_command(
-                        host,
-                        f"cd {shlex.quote(remote_repo)} && git rev-parse HEAD",
-                    ),
+                local_head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    cwd=repo,
                 )
-                if remote_head.returncode != 0:
-                    head_detail = f"worker git rev-parse failed: {remote_head.stderr.strip()[:80]}"
-                else:
-                    local_sha = local_head.stdout.strip()
-                    remote_sha = remote_head.stdout.strip()
-                    head_ok = local_sha == remote_sha
+                if local_head.returncode != 0:
                     head_detail = (
-                        f"worker HEAD matches local HEAD: {local_sha[:8]}"
-                        if head_ok
-                        else f"worker HEAD differs: local {local_sha[:8]} worker {remote_sha[:8]}"
+                        f"local git rev-parse failed: {local_head.stderr.strip()[:80]}"
                     )
+                elif host_is_local:
+                    short = local_head.stdout.strip()[:8]
+                    head_ok = True
+                    head_detail = f"worker HEAD matches local HEAD: {short}"
+                else:
+                    remote_head = subprocess.run(
+                        _host_command(
+                            host,
+                            f"cd {shlex.quote(remote_repo)} && git rev-parse HEAD",
+                        ),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if remote_head.returncode != 0:
+                        head_detail = (
+                            "worker git rev-parse failed: "
+                            f"{remote_head.stderr.strip()[:80]}"
+                        )
+                    else:
+                        local_sha = local_head.stdout.strip()
+                        remote_sha = remote_head.stdout.strip()
+                        head_ok = local_sha == remote_sha
+                        head_detail = (
+                            f"worker HEAD matches local HEAD: {local_sha[:8]}"
+                            if head_ok
+                            else "worker HEAD differs: "
+                            f"local {local_sha[:8]} worker {remote_sha[:8]}"
+                        )
         except (subprocess.TimeoutExpired, OSError) as exc:
             head_detail = f"git HEAD check failed: {exc}"
     checks.append({"name": "worker_repo_head", "ok": head_ok, "detail": head_detail})
@@ -635,6 +701,22 @@ class DeployResult:
         return {"steps": self.steps, "healthy": self.healthy, "error": self.error}
 
 
+def _resolve_deploy_sha(repo: str) -> str:
+    """Resolve one immutable commit for every stage of a deployment."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        cwd=repo,
+    )
+    sha = result.stdout.strip()
+    if result.returncode != 0 or not sha:
+        detail = result.stderr.strip()[:200] or "git returned an empty commit"
+        raise RuntimeError(f"local git HEAD lookup failed: {detail}")
+    return sha
+
+
 def restart_worker(host: str | None = None) -> None:
     """Restart mtor-worker on *host*, tolerating the SIGTERM drain window.
 
@@ -644,6 +726,7 @@ def restart_worker(host: str | None = None) -> None:
     call sites used timeout=15, which raised subprocess.TimeoutExpired mid-drain
     and crashed the caller even though the restart itself completed.
     """
+    require_temporal_backend()
     host = host or WORKER_HOST
 
     # Busy pre-check: a positive count explains why the restart will block.
@@ -693,19 +776,30 @@ def deploy(
     """Sync code to worker host, restart mtor worker, verify health.
 
     Steps:
-      1. git push local HEAD to origin/main
-      2. SSH fast-forward worker checkout from origin/main
-      3. Restart mtor-worker.service
-      4. Verify health with check_health
+      1. Resolve and push one immutable commit to origin/main
+      2. Fast-forward the worker and prove it contains that commit
+      3. Reconcile the worker's frozen environment
+      4. Restart mtor-worker.service
+      5. Verify health against the same immutable commit
     """
+    require_temporal_backend()
     host = worker_host or WORKER_HOST
     repo = repo_dir or MTOR_CODE_DIR
     remote_repo = remote_repo_dir or REMOTE_MTOR_CODE_DIR
     steps: list[dict[str, object]] = []
 
-    # Step 1: publish local HEAD to origin/main.
+    # Step 1: capture one immutable commit before any network operation. Local
+    # HEAD may advance independently while a slow worker restart is draining.
+    try:
+        deployed_sha = _resolve_deploy_sha(repo)
+    except RuntimeError as exc:
+        steps.append({"step": "resolve_head", "ok": False})
+        return DeployResult(steps=steps, healthy=False, error=str(exc))
+    steps.append({"step": "resolve_head", "ok": True, "sha": deployed_sha})
+
+    # Step 2: publish that literal commit, not the moving HEAD symbolic ref.
     push = subprocess.run(
-        ["git", "push", "origin", "HEAD:main"],
+        ["git", "push", "origin", f"{deployed_sha}:refs/heads/main"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -717,34 +811,102 @@ def deploy(
             healthy=False,
             error=f"push failed: {push.stderr.strip()[:200]}",
         )
-    steps.append({"step": "push", "ok": True})
+    steps.append({"step": "push", "ok": True, "sha": deployed_sha})
 
-    # Step 2: fast-forward worker checkout from origin/main.
-    merge = subprocess.run(
+    # Step 3: fast-forward the worker, then prove its checkout contains the
+    # published commit. Retry successful no-op merges to absorb fetch lag.
+    merge_attempts = 3
+    verified = False
+    verify = None
+    for attempt in range(1, merge_attempts + 1):
+        merge = subprocess.run(
+            [
+                "ssh",
+                host,
+                "bash",
+                "-lc",
+                (
+                    f"set -e; cd {shlex.quote(remote_repo)}; "
+                    "git fetch origin main; "
+                    "git merge --ff-only origin/main"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if merge.returncode != 0:
+            steps.append({"step": "merge", "ok": False})
+            return DeployResult(
+                steps=steps,
+                healthy=False,
+                error=f"merge failed: {merge.stderr.strip()[:200]}",
+            )
+        verify = subprocess.run(
+            [
+                "ssh",
+                host,
+                "bash",
+                "-lc",
+                (
+                    f"cd {shlex.quote(remote_repo)} && "
+                    "git merge-base --is-ancestor "
+                    f"{shlex.quote(deployed_sha)} HEAD"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if verify.returncode == 0:
+            verified = True
+            break
+        if attempt < merge_attempts:
+            time.sleep(2)
+    steps.append({"step": "merge", "ok": True, "attempts": attempt})
+    steps.append(
+        {
+            "step": "verify_worker_head",
+            "ok": verified,
+            "sha": deployed_sha,
+            "attempts": attempt,
+        }
+    )
+    if not verified:
+        detail = verify.stderr.strip()[:200] if verify is not None else ""
+        return DeployResult(
+            steps=steps,
+            healthy=False,
+            error=(
+                "worker HEAD does not contain deployed SHA "
+                f"{deployed_sha[:8]} after {merge_attempts} attempts"
+                + (f": {detail}" if detail else "")
+            ),
+        )
+
+    # Step 4: source merges do not refresh generated console entry points.
+    # Reconcile from the reviewed lock before touching the running service.
+    sync = subprocess.run(
         [
             "ssh",
             host,
             "bash",
             "-lc",
-            (
-                f"set -e; cd {shlex.quote(remote_repo)}; "
-                "git fetch origin main; "
-                "git merge --ff-only origin/main"
-            ),
+            f"set -e; cd {shlex.quote(remote_repo)}; uv sync --frozen",
         ],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=300,
     )
-    steps.append({"step": "merge", "ok": merge.returncode == 0})
-    if merge.returncode != 0:
+    steps.append({"step": "sync_environment", "ok": sync.returncode == 0})
+    if sync.returncode != 0:
         return DeployResult(
             steps=steps,
             healthy=False,
-            error=f"merge failed: {merge.stderr.strip()[:200]}",
+            error=f"environment sync failed: {sync.stderr.strip()[:200]}",
         )
 
-    # Step 3: retire the obsolete system-level worker before restarting the authoritative unit.
+    # Step 5: retire the obsolete system-level worker before restarting the authoritative unit.
     retire_legacy = _retire_legacy_temporal_worker(host)
     steps.append({"step": "retire_legacy_temporal_worker", **retire_legacy})
     if not retire_legacy["ok"]:
@@ -754,14 +916,14 @@ def deploy(
             error="Legacy temporal-worker retirement failed",
         )
 
-    # Step 4: wait for in-flight ribosome activities to finish so the
+    # Step 6: wait for in-flight ribosome activities to finish so the
     # restart consumes no activity attempts. Bounded — the worker's
     # graceful shutdown covers anything still running at timeout.
     drain_timeout = int(os.getenv("MTOR_DEPLOY_DRAIN_SECONDS", "600"))
     drain = _wait_for_ribosome_idle(host, timeout_seconds=drain_timeout)
     steps.append({"step": "drain", **drain})
 
-    # Step 5: restart worker. systemctl restart blocks through the unit's
+    # Step 7: restart worker. systemctl restart blocks through the unit's
     # stop (up to TimeoutStopSec while the worker drains), so the timeout
     # must exceed the drain window.
     try:
@@ -775,7 +937,7 @@ def deploy(
         )
     steps.append({"step": "restart", "ok": True})
 
-    # Step 6: let restart settle, then remove late orphan roots twice before health.
+    # Step 8: let restart settle, then remove late orphan roots twice before health.
     time.sleep(3)
     cleanup = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 1, **cleanup})
@@ -783,9 +945,14 @@ def deploy(
     cleanup_repeat = _cleanup_orphaned_worker_roots(host)
     steps.append({"step": "orphan_cleanup", "attempt": 2, **cleanup_repeat})
 
-    # Step 7: verify health after post-settle cleanup.
-    report = check_health(worker_host=host, repo_dir=repo, remote_repo_dir=remote_repo)
-    steps.append({"step": "health_check", "ok": report.ok})
+    # Step 9: verify health against the same SHA captured before publication.
+    report = check_health(
+        worker_host=host,
+        repo_dir=repo,
+        remote_repo_dir=remote_repo,
+        expected_sha=deployed_sha,
+    )
+    steps.append({"step": "health_check", "ok": report.ok, "sha": deployed_sha})
     cleanup_ok = bool(cleanup["ok"]) and bool(cleanup_repeat["ok"])
     healthy = cleanup_ok and report.ok
 
@@ -862,6 +1029,8 @@ def clean(
 
 async def setup_search_attributes() -> dict[str, object]:
     """Register custom search attributes on the Temporal server."""
+    require_temporal_backend()
+
     from temporalio.api.enums.v1 import IndexedValueType
     from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
     from temporalio.client import Client

@@ -1,35 +1,21 @@
-"""Temporal client connection logic."""
+"""Compatibility client helpers over the durable-backend boundary."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-from mtor import TEMPORAL_HOST
-
 
 def _get_client():
-    """Connect to Temporal server. Returns (client, None) or (None, error_msg)."""
-    try:
-        import asyncio
+    """Return the raw Temporal client for explicitly unmigrated legacy paths."""
+    from mtor.backend import TemporalBackend, connect_backend
 
-        from temporalio.client import Client
-
-        try:
-            asyncio.get_running_loop()
-            return None, "cannot connect synchronously from a running event loop"
-        except RuntimeError:
-            pass
-
-        async def _connect():
-            return await Client.connect(TEMPORAL_HOST)
-
-        client = asyncio.run(_connect())
-        return client, None
-    except ImportError:
-        return None, "temporalio SDK not installed"
-    except Exception as exc:
-        return None, str(exc)
+    backend, error = connect_backend()
+    if error or backend is None:
+        return None, error
+    if not isinstance(backend, TemporalBackend):
+        return None, f"backend {backend.name!r} has no legacy Temporal client"
+    return backend.native_client, None
 
 
 def _pending_activity_records(desc: Any) -> list[Any]:

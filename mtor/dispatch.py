@@ -18,12 +18,16 @@ from porin import action as _action
 from mtor import (
     EXPECTED_GERMLINE_REMOTE,
     EXPECTED_WORKER_BRANCH,
-    TASK_QUEUE,
     TEMPORAL_HOST,
     VERSION,
     WORKER_GERMLINE_DIR,
     WORKER_HOST,
-    WORKFLOW_TYPE,
+)
+from mtor.backend import (
+    BackendConfigurationError,
+    Submission,
+    _coerce_temporal_client_for_compatibility,
+    selected_backend_name,
 )
 from mtor.client import _get_client
 from mtor.infra import (
@@ -999,6 +1003,8 @@ def _dispatch_explanation(
     allow_local_paths: bool = False,
 ) -> dict:
     """Build a read-only dispatch plan explanation."""
+    selected_backend_name()
+
     if spec_path is not None:
         prompt = _inject_spec_constraints(
             prompt,
@@ -1178,6 +1184,19 @@ def _dispatch_prompt(
     allow_local_paths: bool = False,
 ) -> str | None:
     """Core dispatch logic. Returns workflow_id when wait=True, else prints JSON."""
+    try:
+        selected_backend_name()
+    except BackendConfigurationError as exc:
+        sys.exit(
+            _err(
+                "mtor",
+                str(exc),
+                "BACKEND_UNSUPPORTED",
+                "Set MTOR_DURABLE_BACKEND=temporal for this build",
+                exit_code=3,
+            )
+        )
+
     # If prompt is a file path, read it as the spec
     prompt_path = None
     if "\n" not in prompt and len(prompt) < 512:
@@ -1367,42 +1386,22 @@ def _dispatch_prompt(
         elif repo:
             spec["repo"] = _normalize_spec_repo_for_worker(str(repo))
 
-        from temporalio.common import (
-            SearchAttributeKey,
-            SearchAttributePair,
-            TypedSearchAttributes,
-            WorkflowIDConflictPolicy,
-            WorkflowIDReusePolicy,
-        )
-
-        search_attrs = [
-            SearchAttributePair(
-                SearchAttributeKey.for_keyword("mtor_provider"), resolved_provider
-            ),
-            SearchAttributePair(SearchAttributeKey.for_keyword("mtor_mode"), spec_mode),
-            SearchAttributePair(
-                SearchAttributeKey.for_keyword("mtor_risk"), classify_risk(full_prompt)
-            ),
+        metadata = [
+            ("mtor_provider", resolved_provider),
+            ("mtor_mode", spec_mode),
+            ("mtor_risk", classify_risk(full_prompt)),
         ]
         if spec_path:
-            search_attrs.append(
-                SearchAttributePair(
-                    SearchAttributeKey.for_keyword("mtor_spec"),
-                    str(spec_path.expanduser().resolve()),
-                )
-            )
+            metadata.append(("mtor_spec", str(spec_path.expanduser().resolve())))
 
         async def _start():
-            handle = await client.start_workflow(
-                WORKFLOW_TYPE,
-                args=[[spec]],
-                id=workflow_id,
-                task_queue=TASK_QUEUE,
-                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-                id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-                search_attributes=TypedSearchAttributes(search_attrs),
+            return await _coerce_temporal_client_for_compatibility(client).submit(
+                Submission(
+                    task_id=workflow_id,
+                    stages=(spec,),
+                    metadata=tuple(metadata),
+                )
             )
-            return handle.id
 
         # Close the race with a worker drain that began during preflight.
         _require_worker_admission(cmd)

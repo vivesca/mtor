@@ -5,7 +5,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-source ~/.env.fly 2>/dev/null || true
+if [[ -f "$HOME/.env.fly" ]]; then
+    source "$HOME/.env.fly"
+fi
+
+durable_backend="${MTOR_DURABLE_BACKEND-temporal}"
+durable_backend="$(printf '%s' "$durable_backend" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+if [[ "$durable_backend" != "temporal" ]]; then
+    echo "Unsupported durable backend '${durable_backend:-<empty>}'; this release enables only temporal." >&2
+    exit 3
+fi
 
 echo "==> Starting Temporal server (docker compose)..."
 docker compose up -d
