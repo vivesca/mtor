@@ -1906,38 +1906,53 @@ class TestCheckpoints:
 
 
 class TestLogs:
+    @staticmethod
+    def _invoke_remote_log(
+        tmp_path,
+        monkeypatch,
+        workflow_id: str,
+        remote_path: str,
+        *,
+        scp_content: str | None = None,
+        scp_returncode: int = 0,
+        scp_stderr: str = "",
+    ):
+        import mtor.cli as _cli
+
+        client, handle = make_mock_client()
+        handle.result = AsyncMock(
+            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "scp" and scp_content is not None:
+                Path(cmd[-1]).write_text(scp_content)
+            return MagicMock(
+                returncode=scp_returncode,
+                stdout="",
+                stderr=scp_stderr,
+            )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with (
+            _patch_client(client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
+            return invoke(["logs", workflow_id])
+
     def test_logs_caches_remote_worker_path_under_home_cache(
         self, tmp_path, monkeypatch
     ):
         """Remote /home/vivesca log paths are fetched into a local cache."""
-        import mtor.cli as _cli
-
         workflow_id = "ribosome-glm51-spec-a989709c-6a06468c"
         remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.jsonl"
-        mock_client, wf_handle = make_mock_client()
-        wf_handle.result = AsyncMock(
-            return_value={
-                "exit_code": 0,
-                "success": True,
-                "output_path": remote_path,
-            }
+        exit_code, data = self._invoke_remote_log(
+            tmp_path,
+            monkeypatch,
+            workflow_id,
+            remote_path,
+            scp_content='{"workflow_id": "wf", "provider": "zhipu"}\n',
         )
-
-        def fake_run(cmd, *args, **kwargs):
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            if cmd and cmd[0] == "scp":
-                Path(cmd[-1]).write_text('{"workflow_id": "wf", "provider": "zhipu"}\n')
-            return result
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with (
-            _patch_client(mock_client),
-            patch.object(_cli.subprocess, "run", side_effect=fake_run),
-        ):
-            exit_code, data = invoke(["logs", workflow_id])
 
         assert exit_code == 0
         assert data["ok"] is True
@@ -1951,31 +1966,19 @@ class TestLogs:
 
     def test_logs_refreshes_existing_remote_cache(self, tmp_path, monkeypatch):
         """An explicit logs read refreshes a cache that predates remote completion."""
-        import mtor.cli as _cli
-
         workflow_id = "ribosome-glm52-refresh-existing-cache"
         remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.log"
         cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.log"
         cache_path.parent.mkdir(parents=True)
         cache_path.write_text("stale line\n")
 
-        mock_client, wf_handle = make_mock_client()
-        wf_handle.result = AsyncMock(
-            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        exit_code, data = self._invoke_remote_log(
+            tmp_path,
+            monkeypatch,
+            workflow_id,
+            remote_path,
+            scp_content="fresh line\n",
         )
-
-        def fake_run(cmd, *args, **kwargs):
-            result = MagicMock(returncode=0, stdout="", stderr="")
-            if cmd and cmd[0] == "scp":
-                Path(cmd[-1]).write_text("fresh line\n")
-            return result
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with (
-            _patch_client(mock_client),
-            patch.object(_cli.subprocess, "run", side_effect=fake_run),
-        ):
-            exit_code, data = invoke(["logs", workflow_id])
 
         assert exit_code == 0
         assert data["result"]["lines"] == ["fresh line"]
@@ -1987,30 +1990,20 @@ class TestLogs:
         self, tmp_path, monkeypatch
     ):
         """A failed refresh never truncates the last usable cached snapshot."""
-        import mtor.cli as _cli
-
         workflow_id = "ribosome-glm52-refresh-failure"
         remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.log"
         cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.log"
         cache_path.parent.mkdir(parents=True)
         cache_path.write_text("last usable line\n")
 
-        mock_client, wf_handle = make_mock_client()
-        wf_handle.result = AsyncMock(
-            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        exit_code, data = self._invoke_remote_log(
+            tmp_path,
+            monkeypatch,
+            workflow_id,
+            remote_path,
+            scp_returncode=1,
+            scp_stderr="network down",
         )
-
-        def fake_run(cmd, *args, **kwargs):
-            if cmd and cmd[0] == "scp":
-                return MagicMock(returncode=1, stdout="", stderr="network down")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with (
-            _patch_client(mock_client),
-            patch.object(_cli.subprocess, "run", side_effect=fake_run),
-        ):
-            exit_code, data = invoke(["logs", workflow_id])
 
         assert exit_code == 0
         assert data["result"]["lines"] == ["last usable line"]
