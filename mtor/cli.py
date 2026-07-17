@@ -9,7 +9,7 @@ Exit codes:
   0 - ok
   1 - error (generic, non-temporal)
   2 - usage error (missing required args)
-  3 - temporal unreachable
+  3 - backend unsupported or Temporal unreachable
   4 - workflow not found
 """
 
@@ -40,11 +40,18 @@ from mtor import (
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
+from mtor.client import _get_client as _legacy_get_client
 from mtor.client import (
-    _get_client,
     _pending_activity_records,
     _pending_activity_timestamp,
     workflow_execution_state,
+)
+from mtor.backend import (
+    BackendConfigurationError,
+    Decision,
+    StopMode,
+    _coerce_temporal_client_for_compatibility,
+    selected_backend_name,
 )
 from mtor.dedup import check_duplicate as _check_dedup
 from mtor.dedup import record_dispatch as _record_dispatch
@@ -94,6 +101,28 @@ def _check_dedup_only(*args, **kwargs):
     return _check_dedup(*args, **kwargs)
 
 
+def _require_backend_configuration(cmd: str) -> None:
+    """Fail before network, worker or artifact side effects on bad selection."""
+    try:
+        selected_backend_name()
+    except BackendConfigurationError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "BACKEND_UNSUPPORTED",
+                "Set MTOR_DURABLE_BACKEND=temporal for this build",
+                exit_code=3,
+            )
+        )
+
+
+def _get_client():
+    """Keep legacy CLI paths fail-closed until they join the backend seam."""
+    _require_backend_configuration("mtor")
+    return _legacy_get_client()
+
+
 # ---------------------------------------------------------------------------
 # Wait/poll helpers for scout/research --wait
 # ---------------------------------------------------------------------------
@@ -106,11 +135,11 @@ def _fetch_log_text(workflow_id: str, client=None) -> str:
         try:
 
             async def _get_output_path():
-                handle = client.get_workflow_handle(workflow_id)
-                desc = await handle.describe()
-                if getattr(getattr(desc, "status", None), "name", None) == "RUNNING":
+                backend = _coerce_temporal_client_for_compatibility(client)
+                snapshot = await backend.inspect(workflow_id)
+                if snapshot.status == "RUNNING":
                     return ""
-                wf_result = await handle.result()
+                wf_result = await backend.result(workflow_id)
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)
                     if task_result:
@@ -641,6 +670,7 @@ def _read_lifecycle_events(log_path: str) -> list[dict[str, Any]]:
 
 def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
     """Poll workflow until done, then print logs. Returns exit code."""
+    _require_backend_configuration(f"mtor logs {workflow_id}")
     client, err = _get_client()
     if err:
         return 1
@@ -661,12 +691,11 @@ def _wait_and_print_logs(workflow_id: str, *, timeout: int = 300) -> int:
         try:
 
             async def _poll():
-                handle = client.get_workflow_handle(workflow_id)
-                desc = await handle.describe()
-                return desc
+                backend = _coerce_temporal_client_for_compatibility(client)
+                return await backend.inspect(workflow_id)
 
-            desc = asyncio.run(_poll())
-            status_name = desc.status.name if desc.status else "UNKNOWN"
+            snapshot = asyncio.run(_poll())
+            status_name = snapshot.status
         except Exception:
             status_name = "UNKNOWN"
 
@@ -892,6 +921,9 @@ def default_handler(
             )
 
         if explain:
+            _require_backend_configuration(
+                f"mtor {prompt[:60]}{'...' if len(prompt) > 60 else ''} --explain"
+            )
             from mtor.dispatch import _dispatch_explanation
 
             plan = _dispatch_explanation(
@@ -1230,6 +1262,7 @@ def status(workflow_id: str, short: bool = False) -> None:
     """
     cmd = f"mtor status {workflow_id}"
 
+    _require_backend_configuration(cmd)
     client, err = _get_client()
     if err:
         sys.exit(
@@ -1246,18 +1279,18 @@ def status(workflow_id: str, short: bool = False) -> None:
     try:
 
         async def _status():
-            handle = client.get_workflow_handle(workflow_id)
-            desc = await handle.describe()
+            backend = _coerce_temporal_client_for_compatibility(client)
+            snapshot = await backend.inspect(workflow_id)
             wf_result = None
-            if desc.status and desc.status.name == "COMPLETED":
+            if snapshot.status == "COMPLETED":
                 with contextlib.suppress(Exception):
-                    wf_result = await handle.result()
-            return desc, wf_result
+                    wf_result = await backend.result(workflow_id)
+            return snapshot, wf_result
 
-        desc, wf_result = asyncio.run(_status())
-        status_val = desc.status.name if desc.status else "UNKNOWN"
-        start_time = desc.start_time.isoformat() if desc.start_time else None
-        close_time = desc.close_time.isoformat() if desc.close_time else None
+        snapshot, wf_result = asyncio.run(_status())
+        status_val = snapshot.status
+        start_time = snapshot.start_time.isoformat() if snapshot.start_time else None
+        close_time = snapshot.close_time.isoformat() if snapshot.close_time else None
 
         result_payload: dict[str, Any] = {
             "workflow_id": workflow_id,
@@ -1968,6 +2001,7 @@ def logs(
 ) -> None:
     """Fetch workflow output from worker host. --active shows currently-writing logs."""
     if active:
+        _require_backend_configuration("mtor logs --active")
         _active_logs()
         return
 
@@ -1994,6 +2028,7 @@ def logs(
         )
 
     cmd = f"mtor logs {workflow_id}"
+    _require_backend_configuration(cmd)
 
     # Step 1: Query Temporal for the workflow result to get output_path
     log_path = ""
@@ -2002,11 +2037,11 @@ def logs(
         try:
 
             async def _get_output_path():
-                handle = client.get_workflow_handle(workflow_id)
-                desc = await handle.describe()
-                if getattr(getattr(desc, "status", None), "name", None) == "RUNNING":
+                backend = _coerce_temporal_client_for_compatibility(client)
+                snapshot = await backend.inspect(workflow_id)
+                if snapshot.status == "RUNNING":
                     return ""
-                wf_result = await handle.result()
+                wf_result = await backend.result(workflow_id)
                 if isinstance(wf_result, dict):
                     task_result = _extract_first_result(wf_result)
                     if task_result:
@@ -2256,6 +2291,7 @@ def batch_cancel(
 
     Example: mtor batch-cancel --query "ExecutionStatus = 'Running' AND StartTime < '2026-04-06'"
     """
+    _require_backend_configuration("mtor batch-cancel")
     client, err = _get_client()
     if err:
         sys.exit(
@@ -2271,11 +2307,11 @@ def batch_cancel(
     async def _do_batch():
         count = 0
         cancelled = 0
+        backend = _coerce_temporal_client_for_compatibility(client)
         async for wf in client.list_workflows(query=query):
             count += 1
             with contextlib.suppress(Exception):
-                handle = client.get_workflow_handle(wf.id)
-                await handle.cancel()
+                await backend.stop(wf.id, StopMode.COOPERATIVE, reason=reason)
                 cancelled += 1
         return count, cancelled
 
@@ -2471,6 +2507,7 @@ def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
 
 def _terminate_workflow(workflow_id: str, cmd: str) -> None:
     """Shared terminate logic for both cancel and terminate commands."""
+    _require_backend_configuration(cmd)
     client, err = _get_client()
     if err:
         sys.exit(
@@ -2487,8 +2524,12 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
     try:
 
         async def _do_terminate():
-            handle = client.get_workflow_handle(workflow_id)
-            await handle.terminate(reason="Terminated via mtor CLI")
+            backend = _coerce_temporal_client_for_compatibility(client)
+            await backend.stop(
+                workflow_id,
+                StopMode.IMMEDIATE,
+                reason="Terminated via mtor CLI",
+            )
 
         asyncio.run(_do_terminate())
         process_cleanup = _reap_worker_processes(workflow_id)
@@ -2765,6 +2806,7 @@ def receptor(
         )
 
     if explain:
+        _require_backend_configuration(cmd)
         from mtor.dispatch import _dispatch_explanation
 
         plan = _dispatch_explanation(
@@ -2855,6 +2897,7 @@ def schema() -> None:
 @app.command
 def approve(workflow_id: str) -> None:
     """Approve a deferred (SRP-paused) ribosome task."""
+    _require_backend_configuration("mtor approve")
     client, err = _get_client()
     if err:
         sys.exit(
@@ -2870,8 +2913,8 @@ def approve(workflow_id: str) -> None:
     try:
 
         async def _signal():
-            handle = client.get_workflow_handle(workflow_id)
-            await handle.signal("approve_task", workflow_id)
+            backend = _coerce_temporal_client_for_compatibility(client)
+            await backend.decide(workflow_id, Decision.APPROVE)
 
         asyncio.run(_signal())
         _ok(
@@ -2906,6 +2949,7 @@ def approve(workflow_id: str) -> None:
 @app.command
 def deny(workflow_id: str) -> None:
     """Deny a deferred (SRP-paused) ribosome task."""
+    _require_backend_configuration("mtor deny")
     client, err = _get_client()
     if err:
         sys.exit(
@@ -2921,8 +2965,8 @@ def deny(workflow_id: str) -> None:
     try:
 
         async def _signal():
-            handle = client.get_workflow_handle(workflow_id)
-            await handle.signal("reject_task", workflow_id)
+            backend = _coerce_temporal_client_for_compatibility(client)
+            await backend.decide(workflow_id, Decision.REJECT)
 
         asyncio.run(_signal())
         _ok(
@@ -3138,6 +3182,8 @@ def publish(
 def deploy() -> None:
     """Sync code to worker host, restart mtor worker, verify health."""
     import time
+
+    _require_backend_configuration("mtor deploy")
 
     # Step 1: publish local HEAD to origin/main.
     print("[deploy] syncing to worker...", file=sys.stderr)
@@ -3867,6 +3913,7 @@ def ragulator(
         return
 
     # action == "start"
+    _require_backend_configuration(cmd)
     # --once: use local run_watch (backward compat)
     if once:
         import sys as _sys
@@ -3947,6 +3994,7 @@ def ragulator(
 
 def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
     """Stop a running WatchWorkflow via signal or termination."""
+    _require_backend_configuration(cmd)
     if not workflow_id:
         # Try to find running watch workflows
         client, err = _get_client()
@@ -4019,6 +4067,7 @@ def _stop_watch_workflow(cmd: str, workflow_id: str | None) -> None:
 
 def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
     """Query the status of a running WatchWorkflow."""
+    _require_backend_configuration(cmd)
     if not workflow_id:
         sys.exit(
             _err(
@@ -4243,6 +4292,7 @@ def dispatch_all(
     from mtor.dispatch import _inject_spec_constraints
 
     cmd = "mtor dispatch-all"
+    _require_backend_configuration(cmd)
     directory = dir.expanduser()
 
     specs = scan_specs(directory)
@@ -4386,6 +4436,7 @@ def check() -> None:
 def rictor_deploy() -> None:
     """Sync code to worker, restart services, verify health."""
     cmd = "mtor rictor deploy"
+    _require_backend_configuration(cmd)
     result = _deploy()
     payload = result.to_dict()
     next_actions = []
@@ -4410,9 +4461,11 @@ def clean(
 @rictor_app.command(name="setup-search-attrs")
 def setup_search_attrs() -> None:
     """Register custom search attributes on the Temporal server."""
+    cmd = "mtor rictor setup-search-attrs"
+    _require_backend_configuration(cmd)
+
     from mtor.infra import setup_search_attributes
 
-    cmd = "mtor rictor setup-search-attrs"
     try:
         result = asyncio.run(setup_search_attributes())
         _ok(cmd, result, version=VERSION)
@@ -4434,9 +4487,11 @@ def reconcile(
     - done → warn if listed files/functions not found in codebase
     - ready → report blocked if any dependency not done
     """
+    cmd = "mtor reconcile"
+    _require_backend_configuration(cmd)
+
     from mtor.reconcile import reconcile_all
 
-    cmd = "mtor reconcile"
     directory = dir.expanduser()
 
     if not directory.exists():

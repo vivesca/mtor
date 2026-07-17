@@ -1995,6 +1995,13 @@ async def main() -> None:
         print(__doc__)
         sys.exit(0)
 
+    # This worker is Temporal-specific until a real alternative runtime owns
+    # recovery and draining. Refuse unsupported configuration before client
+    # connection, worktree recovery or activity registration.
+    from mtor.backend import require_temporal_backend
+
+    require_temporal_backend()
+
     # Deferred import to avoid circular dependency with workflow.py
     from mtor.worker.workflow import TranslationWorkflow, WatchWorkflow
 

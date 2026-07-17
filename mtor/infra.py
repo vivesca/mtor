@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mtor import OUTPUTS_DIR, WORKER_HOST, WORKER_LOG_DIR
+from mtor.backend import require_temporal_backend
 
 
 def _default_mtor_code_dir() -> str:
@@ -644,6 +645,7 @@ def restart_worker(host: str | None = None) -> None:
     call sites used timeout=15, which raised subprocess.TimeoutExpired mid-drain
     and crashed the caller even though the restart itself completed.
     """
+    require_temporal_backend()
     host = host or WORKER_HOST
 
     # Busy pre-check: a positive count explains why the restart will block.
@@ -698,6 +700,7 @@ def deploy(
       3. Restart mtor-worker.service
       4. Verify health with check_health
     """
+    require_temporal_backend()
     host = worker_host or WORKER_HOST
     repo = repo_dir or MTOR_CODE_DIR
     remote_repo = remote_repo_dir or REMOTE_MTOR_CODE_DIR
@@ -862,6 +865,8 @@ def clean(
 
 async def setup_search_attributes() -> dict[str, object]:
     """Register custom search attributes on the Temporal server."""
+    require_temporal_backend()
+
     from temporalio.api.enums.v1 import IndexedValueType
     from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
     from temporalio.client import Client

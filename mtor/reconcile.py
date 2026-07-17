@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from mtor.backend import require_temporal_backend
 from mtor.client import _get_client
 from mtor.spec import update_spec_status
 from mtor.rptor import parse_spec, scan_specs
@@ -170,6 +171,8 @@ def reconcile_spec(
        - check each dependency's status
        - if any dep is not done: mark as blocked
     """
+    require_temporal_backend()
+
     result = {
         "name": spec.get("name", "unknown"),
         "path": spec.get("path", ""),
@@ -315,6 +318,8 @@ def reconcile_workflow_specs(
     explicit directory. A stale workflow cannot overwrite a newer dispatch of
     the same spec because its workflow ID must still match the frontmatter.
     """
+    require_temporal_backend()
+
     fixed: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     correct = 0
@@ -377,6 +382,8 @@ def reconcile_all(
 
     Returns JSON-compatible result with statistics and fixes.
     """
+    require_temporal_backend()
+
     scanned = scan_specs(spec_dir)
     spec_map = {s["name"]: s for s in scanned}
 

@@ -32,7 +32,9 @@ All config via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TEMPORAL_HOST` | `ganglion:7233` | Temporal server address |
+| `MTOR_DURABLE_BACKEND` | `temporal` | Durable backend selector. This release enables only `temporal` and fails closed on every other value. |
+| `MTOR_TEMPORAL_HOST` | `ganglion:7233` | Temporal server address used by the CLI. |
+| `TEMPORAL_HOST` | `ganglion:7233` | Temporal server address used by the existing worker service. |
 
 Other settings (task queue, output paths) are configured in `mtor/__init__.py`.
 
@@ -115,7 +117,7 @@ Every response is a JSON envelope with `ok`, `command`, `result`/`error`, and `n
 | 0 | Success |
 | 1 | Generic error |
 | 2 | Usage error (missing required arguments) |
-| 3 | Temporal unreachable |
+| 3 | Backend unsupported or Temporal unreachable |
 | 4 | Workflow not found |
 
 ## Requirements
