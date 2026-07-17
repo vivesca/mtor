@@ -61,13 +61,33 @@ def _run_worker_command(command, *args, **kwargs):
 def _status_paths_for_auto_commit(status_output: str) -> list[str]:
     """Return explicit, non-runtime paths from git porcelain output."""
     paths: list[str] = []
-    for line in status_output.splitlines():
-        if len(line) < 4:
-            continue
-        raw_path = line[3:]
-        candidates = raw_path.split(" -> ") if " -> " in raw_path else [raw_path]
+    records: list[tuple[str, list[str]]] = []
+    nul_delimited = "\0" in status_output
+    if nul_delimited:
+        fields = status_output.split("\0")
+        index = 0
+        while index < len(fields):
+            field = fields[index]
+            index += 1
+            if len(field) < 4:
+                continue
+            status = field[:2]
+            candidates = [field[3:]]
+            if ("R" in status or "C" in status) and index < len(fields):
+                candidates.append(fields[index])
+                index += 1
+            records.append((status, candidates))
+    else:
+        for line in status_output.splitlines():
+            if len(line) < 4:
+                continue
+            raw_path = line[3:]
+            candidates = raw_path.split(" -> ") if " -> " in raw_path else [raw_path]
+            records.append((line[:2], candidates))
+
+    for _status, candidates in records:
         for candidate in candidates:
-            normalized = candidate.strip()
+            normalized = candidate if nul_delimited else candidate.strip()
             if not normalized or any(
                 normalized == denied.rstrip("/") or normalized.startswith(denied)
                 for denied in _AUTO_COMMIT_DENYLIST
@@ -77,15 +97,93 @@ def _status_paths_for_auto_commit(status_output: str) -> list[str]:
     return paths
 
 
+def _worktree_git_dir(work_dir: str) -> Path | None:
+    """Resolve the exact worktree's Git directory without walking to a parent."""
+    root = Path(work_dir)
+    if not work_dir or not root.exists():
+        return None
+    top_level_result = _run_worker_command(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if top_level_result.returncode != 0 or not top_level_result.stdout.strip():
+        return None
+    if Path(top_level_result.stdout.strip()).resolve() != root.resolve():
+        return None
+    git_dir_result = _run_worker_command(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if git_dir_result.returncode != 0 or not git_dir_result.stdout.strip():
+        return None
+    git_dir = Path(git_dir_result.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    return git_dir.resolve()
+
+
+def _checkpointable_worktree_paths(work_dir: str) -> list[str] | None:
+    """Return substantive dirty paths, or ``None`` when status is unknown.
+
+    Destructive cleanup callers must distinguish a clean worktree from one
+    whose status could not be inspected. An index lock is treated as active
+    unless an operator removes it; lifecycle code never guesses that it is stale.
+    """
+    try:
+        root = Path(work_dir)
+        if not work_dir or not root.exists():
+            return []
+
+        git_dir = _worktree_git_dir(work_dir)
+        if git_dir is None:
+            # A plain stale directory nested under a repository is not a
+            # worktree. Do not walk up to the parent checkout's .git directory
+            # or stage/delete anything from that checkout.
+            return None
+        if (git_dir / "index.lock").exists():
+            return None
+
+        status = _run_worker_command(
+            ["git", "status", "--porcelain=v1", "-z", "-uall"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if status.returncode != 0:
+            return None
+        return _status_paths_for_auto_commit(status.stdout)
+    except (OSError, _subprocess.SubprocessError):
+        return None
+
+
 def _cleanup_worktree(work_dir: str) -> None:
-    """Best-effort cleanup for failed ribosome worktree runs."""
+    """Clean a failed worktree only while no process or Git lock owns it."""
     root = Path(work_dir)
     if not work_dir or not root.exists():
         return
 
-    git_dir = root / ".git"
-    with contextlib.suppress(OSError):
-        (git_dir / "index.lock").unlink(missing_ok=True)
+    def assert_inactive() -> Path:
+        if _worktree_has_live_process(work_dir):
+            raise RuntimeError(
+                f"worktree {work_dir} has a live process; refusing cleanup"
+            )
+        git_dir = _worktree_git_dir(work_dir)
+        if git_dir is None:
+            raise RuntimeError(f"cannot inspect worktree {work_dir}; refusing cleanup")
+        if (git_dir / "index.lock").exists():
+            raise RuntimeError(
+                f"worktree {work_dir} has an index lock; refusing cleanup"
+            )
+        return git_dir
+
+    git_dir = assert_inactive()
 
     for state_name in ("rebase-merge", "rebase-apply", "MERGE_HEAD"):
         state_path = git_dir / state_name
@@ -96,11 +194,13 @@ def _cleanup_worktree(work_dir: str) -> None:
             if "rebase" in state_name
             else ["git", "merge", "--abort"]
         )
+        assert_inactive()
         with contextlib.suppress(Exception):
             _run_worker_command(command, capture_output=True, cwd=work_dir, timeout=10)
         break
 
     for command in (["git", "checkout", "--", "."], ["git", "clean", "-fd"]):
+        assert_inactive()
         with contextlib.suppress(Exception):
             _run_worker_command(command, capture_output=True, cwd=work_dir, timeout=10)
 
@@ -191,46 +291,26 @@ def _checkpoint_worktree(
     when the wrapper dies by signal (SIGKILL, OOM, collateral pkill) this is
     the only salvage path before _cleanup_worktree or a force-remove destroys
     the tree (2026-07-04: exit_code=-9 lost three uncommitted test files).
-    Never raises; returns the stash sha (or patch path) on success, None when
-    there was nothing to save.
+    Never raises; returns the verified checkpoint commit SHA on success and
+    ``None`` when there was nothing to save or preservation failed.
     """
     try:
         root = Path(work_dir)
         if not work_dir or not root.exists():
             return None
-        # A killed git process can leave a stale index.lock that would block
-        # everything below. Worktree .git is a file — resolve the real dir.
-        gd = _run_worker_command(
-            ["git", "rev-parse", "--git-dir"],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if gd.returncode == 0 and gd.stdout.strip():
-            git_dir = Path(gd.stdout.strip())
-            if not git_dir.is_absolute():
-                git_dir = root / git_dir
-            with contextlib.suppress(OSError):
-                (git_dir / "index.lock").unlink(missing_ok=True)
-
-        status = _run_worker_command(
-            ["git", "status", "--porcelain", "-uall"],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if status.returncode != 0 or not status.stdout.strip():
-            return None
-        paths = _status_paths_for_auto_commit(status.stdout)
+        paths = _checkpointable_worktree_paths(work_dir)
         if not paths:
             return None
 
         wf_label = _re.sub(r"[^A-Za-z0-9._-]", "_", workflow_id or "unknown")
+        checkpoint_id = f"{_time.time_ns()}-{os.getpid()}"
         # Stage explicit paths so untracked files are captured by the stash.
-        with contextlib.suppress(Exception):
-            _run_worker_command(["git", "add", "--", *paths], cwd=work_dir, timeout=30)
+        _run_worker_command(
+            ["git", "add", "--", *paths],
+            cwd=work_dir,
+            check=True,
+            timeout=30,
+        )
 
         stash_ref = ""
         stash = _run_worker_command(
@@ -242,38 +322,49 @@ def _checkpoint_worktree(
         )
         if stash.returncode == 0:
             stash_ref = stash.stdout.strip()
-        if stash_ref:
-            # Anchor the dangling stash commit in the shared object store so
-            # gc cannot reap it after the worktree is removed.
-            with contextlib.suppress(Exception):
-                _run_worker_command(
-                    [
-                        "git",
-                        "update-ref",
-                        f"refs/ribosome-checkpoints/{wf_label}",
-                        stash_ref,
-                    ],
-                    cwd=work_dir,
-                    timeout=10,
-                )
+        if not stash_ref:
+            return None
+
+        # Every attempt receives an immutable ref. Verify the ref before any
+        # caller is allowed to remove the worktree; a dangling stash SHA alone
+        # is not a durable recovery artifact.
+        # Use a separate flat v2 namespace. Deployed v1 checkpoints used leaf
+        # refs at refs/ribosome-checkpoints/<workflow>; nesting below those
+        # leaves would collide with Git's file-backed ref layout.
+        git_ref = f"refs/ribosome-checkpoints-v2/{checkpoint_id}"
+        update_ref = _run_worker_command(
+            ["git", "update-ref", git_ref, stash_ref],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if update_ref.returncode != 0:
+            return None
+        verify_ref = _run_worker_command(
+            ["git", "rev-parse", "--verify", git_ref],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if verify_ref.returncode != 0 or verify_ref.stdout.strip() != stash_ref:
+            return None
 
         _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-        # Belt and braces: a plain patch survives even without the object store.
+        # Belt and braces: retain a binary-capable patch beside the verified ref.
         patch_file = ""
         patch = _run_worker_command(
-            ["git", "diff", "HEAD"],
+            ["git", "diff", "--binary", "HEAD"],
             cwd=work_dir,
             capture_output=True,
             text=True,
             timeout=30,
         )
         if patch.returncode == 0 and patch.stdout.strip():
-            patch_path = _CHECKPOINT_DIR / f"{wf_label}.patch"
+            patch_path = _CHECKPOINT_DIR / f"{checkpoint_id}-{wf_label}.patch"
             patch_path.write_text(patch.stdout)
             patch_file = str(patch_path)
-
-        if not stash_ref and not patch_file:
-            return None
 
         stat = _run_worker_command(
             ["git", "diff", "--stat", "HEAD"],
@@ -287,27 +378,60 @@ def _checkpoint_worktree(
             if stat.returncode == 0 and stat.stdout.strip()
             else ""
         )
+        metadata_path = _CHECKPOINT_DIR / f"{checkpoint_id}-{wf_label}.json"
         entry = {
+            "checkpoint_id": checkpoint_id,
             "workflow_id": workflow_id or "unknown",
             "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
             "task": task[:100],
             "provider": provider,
             "exit_code": exit_code,
             "stash_ref": stash_ref,
+            "git_ref": git_ref,
             "diff_stat": stat_tail,
             "patch_file": patch_file,
             "source": "translocase",
         }
-        (_CHECKPOINT_DIR / f"{wf_label}.json").write_text(_json.dumps(entry) + "\n")
+        metadata_path.write_text(_json.dumps(entry) + "\n")
         print(
             f"[checkpoint] saved uncommitted work for {wf_label}: "
             f"stash={stash_ref[:12] if stash_ref else 'none'} patch={patch_file or 'none'}",
             file=sys.stderr,
         )
-        return stash_ref or patch_file
+        return stash_ref
     except Exception as exc:
         print(f"[checkpoint] failed for {workflow_id}: {exc}", file=sys.stderr)
         return None
+
+
+def _checkpoint_worktree_or_raise(
+    work_dir: str,
+    workflow_id: str,
+    *,
+    task: str = "",
+    provider: str = "",
+    exit_code: int | None = None,
+) -> str | None:
+    """Checkpoint substantive changes and fail closed if preservation fails."""
+    paths = _checkpointable_worktree_paths(work_dir)
+    if paths is None:
+        raise RuntimeError(
+            f"cannot inspect worktree {work_dir}; refusing destructive cleanup"
+        )
+    if not paths:
+        return None
+    saved = _checkpoint_worktree(
+        work_dir,
+        workflow_id,
+        task=task,
+        provider=provider,
+        exit_code=exit_code,
+    )
+    if not saved:
+        raise RuntimeError(
+            f"cannot checkpoint dirty worktree {work_dir}; refusing destructive cleanup"
+        )
+    return saved
 
 
 def _main_checkout_state(repo_root: str) -> dict:
@@ -634,12 +758,21 @@ def _create_worktree(repo_root: str, branch_name: str, retries: int = 3) -> str:
     worktree_path = os.path.join(worktree_base, branch_name)
 
     if os.path.exists(worktree_path):
-        _run_worker_command(
-            ["git", "worktree", "remove", "--force", worktree_path],
-            capture_output=True,
-            timeout=10,
-            cwd=repo_root,
+        if _worktree_has_live_process(worktree_path):
+            raise RuntimeError(
+                f"worktree {worktree_path} still has a live process; "
+                "refusing retry cleanup"
+            )
+        _checkpoint_worktree_or_raise(
+            worktree_path,
+            branch_name,
+            task="retry: existing worktree",
         )
+        if not _remove_worktree_if_inactive(repo_root, worktree_path):
+            raise RuntimeError(
+                f"failed to remove preserved worktree {worktree_path}; "
+                "refusing retry cleanup"
+            )
 
     # Delete stale branch if it exists from a prior failed attempt. Guard
     # first — a stale name can carry a real committed tip, not just junk.
@@ -725,14 +858,15 @@ def _merge_worktree(repo_root: str, branch_name: str, worktree_path: str) -> boo
     finally:
         _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
         lock_fd.close()
-        with contextlib.suppress(Exception):
-            _run_worker_command(
-                ["git", "worktree", "remove", "--force", worktree_path],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
+        removed = False
+        try:
+            removed = _remove_worktree_if_inactive(repo_root, worktree_path)
+        except RuntimeError as exc:
+            print(
+                f"[merge] preserving active worktree {worktree_path}: {exc}",
+                file=sys.stderr,
             )
-        if delete_branch:
+        if delete_branch and removed:
             with contextlib.suppress(Exception):
                 _run_worker_command(
                     ["git", "branch", "-D", branch_name],
@@ -864,14 +998,19 @@ def _create_pr_impl(
     }
 
 
-def _worktree_has_live_process(wt_path: str, proc_root: Path = Path("/proc")) -> bool:
-    """True if any process on this host has its cwd inside *wt_path*.
+def _worktree_process_pids(wt_path: str, proc_root: Path = Path("/proc")) -> set[int]:
+    """Return processes using *wt_path* through cwd or an open file.
 
-    Checked via /proc/*/cwd on the Linux ganglion host. Falls back to
+    Checked via /proc/*/cwd and /proc/*/fd on the Linux ganglion host. Falls back to
     ``lsof +D`` when *proc_root* does not exist (e.g. local dev/test on
     macOS, or when a caller injects a fake path in tests).
     """
     real_wt = os.path.realpath(wt_path)
+    pids: set[int] = set()
+
+    def belongs_to_worktree(path: str) -> bool:
+        return path == real_wt or path.startswith(real_wt + os.sep)
+
     if proc_root.is_dir():
         for pid_dir in proc_root.iterdir():
             if not pid_dir.name.isdigit():
@@ -879,20 +1018,69 @@ def _worktree_has_live_process(wt_path: str, proc_root: Path = Path("/proc")) ->
             try:
                 cwd = os.readlink(pid_dir / "cwd")
             except OSError:
+                cwd = ""
+            if belongs_to_worktree(cwd):
+                pids.add(int(pid_dir.name))
                 continue
-            if cwd == real_wt or cwd.startswith(real_wt + os.sep):
-                return True
-        return False
+            fd_dir = pid_dir / "fd"
+            try:
+                descriptors = list(fd_dir.iterdir())
+            except OSError:
+                continue
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor)
+                except OSError:
+                    continue
+                if belongs_to_worktree(target):
+                    pids.add(int(pid_dir.name))
+                    break
+        return pids
     try:
         result = _run_worker_command(
-            ["lsof", "+D", real_wt],
+            ["lsof", "-t", "+D", real_wt],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        return bool(result.stdout.strip())
+        pids.update(
+            int(line) for line in result.stdout.splitlines() if line.strip().isdigit()
+        )
+        return pids
     except Exception:
-        return False
+        return set()
+
+
+def _worktree_has_live_process(wt_path: str, proc_root: Path = Path("/proc")) -> bool:
+    """True if any process has its cwd or an open file inside *wt_path*."""
+    return bool(_worktree_process_pids(wt_path, proc_root=proc_root))
+
+
+def _remove_worktree_if_inactive(
+    repo_root: str, worktree_path: str, *, timeout: int = 10
+) -> bool:
+    """Final fail-closed census immediately before force-removing a worktree."""
+    root = Path(worktree_path)
+    if not root.exists():
+        return True
+    if _worktree_has_live_process(worktree_path):
+        raise RuntimeError(
+            f"worktree {worktree_path} has a live process; refusing removal"
+        )
+    git_dir = _worktree_git_dir(worktree_path)
+    if git_dir is None:
+        raise RuntimeError(f"cannot inspect worktree {worktree_path}; refusing removal")
+    if (git_dir / "index.lock").exists():
+        raise RuntimeError(
+            f"worktree {worktree_path} has an index lock; refusing removal"
+        )
+    result = _run_worker_command(
+        ["git", "worktree", "remove", "--force", worktree_path],
+        capture_output=True,
+        timeout=timeout,
+        cwd=repo_root,
+    )
+    return result.returncode == 0
 
 
 def _resolve_default_branch(repo_root: str) -> str:
@@ -1076,14 +1264,23 @@ def _gc_worktrees(repo_root: str) -> None:
         print(f"[gc] removing orphaned worktree: {entry}", file=sys.stderr)
         # An orphaned worktree can hold the only copy of work whose harness
         # died by signal — salvage before the force-remove destroys it.
-        _checkpoint_worktree(wt_path, entry, task="gc: orphaned worktree")
-        with contextlib.suppress(Exception):
-            _run_worker_command(
-                ["git", "worktree", "remove", "--force", wt_path],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
+        try:
+            _checkpoint_worktree_or_raise(
+                wt_path,
+                entry,
+                task="gc: orphaned worktree",
             )
+        except RuntimeError as exc:
+            print(f"[gc] preserving {entry}: {exc}", file=sys.stderr)
+            continue
+        try:
+            removed = _remove_worktree_if_inactive(repo_root, wt_path)
+        except RuntimeError as exc:
+            print(f"[gc] preserving {entry}: {exc}", file=sys.stderr)
+            continue
+        if not removed:
+            print(f"[gc] failed to remove preserved worktree: {entry}", file=sys.stderr)
+            continue
         with contextlib.suppress(Exception):
             if _guard_branch_delete(repo_root, entry):
                 _run_worker_command(

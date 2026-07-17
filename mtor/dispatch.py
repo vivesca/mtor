@@ -1344,6 +1344,7 @@ def _dispatch_prompt(
             harness=harness or "ribosome",
         )
         spec = {
+            "task_id": workflow_id,
             "task": full_prompt,
             "provider": resolved_provider,
             "mode": spec_mode,

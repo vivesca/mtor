@@ -161,6 +161,7 @@ class TranslationWorkflow:
         # #3: Version guard — new code paths gated behind patched()
         use_review_v2 = workflow.patched("review-v2-slim-payload")
         use_retry_v2 = workflow.patched("translate-retry-v2")
+        use_stable_approval_id = workflow.patched("stable-deferred-approval-id")
 
         # Crashed-worker detection: a dedicated pulse task in translocase now
         # delivers activity.heartbeat() independently of the stall-check tick,
@@ -180,7 +181,14 @@ class TranslationWorkflow:
             )
             # SRP defer: if activity returned deferred, wait for approval signal
             if result.get("deferred"):
-                task_id = spec.get("task", "")[:50]
+                if use_stable_approval_id:
+                    # Every current dispatch path creates one task per workflow
+                    # and carries the workflow ID as its approval identity.
+                    task_id = spec.get("task_id") or workflow.info().workflow_id
+                else:
+                    # Preserve deterministic replay for histories created before
+                    # the stable identity field existed.
+                    task_id = spec.get("task", "")[:50]
                 review = {
                     "approved": False,
                     "verdict": "deferred",
@@ -413,7 +421,9 @@ class WatchWorkflow:
     ) -> dict:
         """Dispatch a single spec as a child TranslationWorkflow."""
         name = spec.get("name", "unnamed")
+        child_workflow_id = f"watch-{name}-c{cycle}"
         child_spec = {
+            "task_id": child_workflow_id,
             "task": spec.get("body", "") or spec.get("name", ""),
             "provider": spec.get("provider", provider),
             "mode": spec.get("mode", "raw"),
@@ -427,7 +437,7 @@ class WatchWorkflow:
         result = await workflow.execute_child_workflow(
             TranslationWorkflow.run,
             args=[child_input],
-            id=f"watch-{name}-c{cycle}",
+            id=child_workflow_id,
             task_queue=task_queue,
         )
         return result

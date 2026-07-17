@@ -82,8 +82,10 @@ class PlanWorkflow:
         name = spec.get("name", "")
         task = spec.get("task", "")
         provider = spec.get("provider", "zhipu")
+        child_workflow_id = f"plan-child-{name}"
 
         child_spec = {
+            "task_id": child_workflow_id,
             "task": task,
             "provider": provider,
             "mode": spec.get("mode", "raw"),
@@ -92,7 +94,7 @@ class PlanWorkflow:
         result = await workflow.execute_child_workflow(
             TranslationWorkflow.run,
             args=[[child_spec]],
-            id=f"plan-child-{name}",
+            id=child_workflow_id,
             task_queue=TASK_QUEUE,
         )
 
@@ -134,7 +136,8 @@ class PlanWorkflow:
                     if name not in self._pending:
                         continue
                     blocking = [
-                        dep for dep in spec.get("depends_on", [])
+                        dep
+                        for dep in spec.get("depends_on", [])
                         if dep not in self._completed
                     ]
                     missing = [dep for dep in blocking if dep not in known]
@@ -150,16 +153,18 @@ class PlanWorkflow:
                         reason = f"unresolved deps (cycle?): {blocking}"
                     self._pending.discard(name)
                     self._failed.add(name)
-                    all_results.append({
-                        "name": name,
-                        "result": {
-                            "total": 0,
-                            "succeeded": 0,
-                            "blocked": True,
-                            "verdict": verdict,
-                            "reason": reason,
-                        },
-                    })
+                    all_results.append(
+                        {
+                            "name": name,
+                            "result": {
+                                "total": 0,
+                                "succeeded": 0,
+                                "blocked": True,
+                                "verdict": verdict,
+                                "reason": reason,
+                            },
+                        }
+                    )
                 break
 
             # Start ready specs in parallel
@@ -171,13 +176,16 @@ class PlanWorkflow:
             for spec, result in zip(ready, results):
                 name = spec.get("name", "")
                 self._results[name] = result
-                all_results.append({
-                    "name": name,
-                    "result": result,
-                })
+                all_results.append(
+                    {
+                        "name": name,
+                        "result": result,
+                    }
+                )
 
         succeeded = sum(
-            1 for r in self._results.values()
+            1
+            for r in self._results.values()
             if isinstance(r, dict) and r.get("succeeded", 0) > 0
         )
         blocked = sum(1 for r in all_results if r.get("result", {}).get("blocked"))

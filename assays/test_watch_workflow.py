@@ -162,6 +162,10 @@ class TestWatchWorkflowDispatchesReadySpecs:
 
         assert result["total_dispatched"] == 2
         assert len(_DISPATCHED_SPECS) == 2
+        assert {spec["task_id"] for spec in _DISPATCHED_SPECS} == {
+            "watch-spec-alpha-c1",
+            "watch-spec-beta-c1",
+        }
 
 
 class TestWatchWorkflowRespectsMaxConcurrent:

@@ -51,6 +51,25 @@ def test_worktree_has_live_process_false_when_no_match(tmp_path):
     )
 
 
+def test_worktree_has_live_process_when_cwd_changed_but_file_is_open(tmp_path):
+    worktree_dir = tmp_path / "worktree"
+    worktree_dir.mkdir()
+    active_file = worktree_dir / "active.lock"
+    active_file.write_text("held")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    proc_root = tmp_path / "proc"
+    pid_dir = proc_root / "123"
+    (pid_dir / "fd").mkdir(parents=True)
+    (pid_dir / "cwd").symlink_to(elsewhere)
+    (pid_dir / "fd" / "7").symlink_to(active_file)
+
+    assert (
+        git_ops._worktree_has_live_process(str(worktree_dir), proc_root=proc_root)
+        is True
+    )
+
+
 def test_gc_worktrees_skips_worktree_with_live_process(tmp_path):
     wt_base = tmp_path / ".worktrees"
     wt_dir = wt_base / "ribosome-abc123"
@@ -65,5 +84,38 @@ def test_gc_worktrees_skips_worktree_with_live_process(tmp_path):
     ):
         git_ops._gc_worktrees(str(tmp_path))
 
+    mock_run.assert_not_called()
+    assert wt_dir.exists()
+
+
+def test_gc_rechecks_for_process_entering_after_checkpoint(tmp_path):
+    wt_base = tmp_path / ".worktrees"
+    wt_dir = wt_base / "ribosome-late"
+    wt_dir.mkdir(parents=True)
+    old_time = time.time() - 100000
+    os.utime(wt_dir, (old_time, old_time))
+    checkpointed = False
+
+    def checkpoint(*args, **kwargs):
+        nonlocal checkpointed
+        checkpointed = True
+
+    def live_process(path):
+        return checkpointed
+
+    with (
+        patch(
+            "mtor.worker.git_ops._worktree_has_live_process",
+            side_effect=live_process,
+        ),
+        patch(
+            "mtor.worker.git_ops._checkpoint_worktree_or_raise",
+            side_effect=checkpoint,
+        ),
+        patch("mtor.worker.git_ops._run_worker_command") as mock_run,
+    ):
+        git_ops._gc_worktrees(str(tmp_path))
+
+    assert checkpointed is True
     mock_run.assert_not_called()
     assert wt_dir.exists()

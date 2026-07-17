@@ -354,6 +354,8 @@ class TestDispatch:
         assert data["ok"] is True
         assert "workflow_id" in data["result"]
         assert data["result"]["status"] == "RUNNING"
+        kwargs = mock_client.start_workflow.await_args.kwargs
+        assert kwargs["args"][0][0]["task_id"] == kwargs["id"]
 
     def test_dispatch_has_next_actions(self):
         mock_client, _ = make_mock_client()

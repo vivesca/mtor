@@ -45,7 +45,7 @@ from mtor.worker.stall_trace import (
 from mtor.worker.chaperone_review import chaperone
 from mtor.worker.git_ops import (
     _auto_commit,
-    _checkpoint_worktree,
+    _checkpoint_worktree_or_raise,
     _cleanup_worktree,
     _create_pr_impl,
     _create_worktree,
@@ -56,7 +56,9 @@ from mtor.worker.git_ops import (
     _git_pull_ff_only,
     _git_snapshot,
     _main_checkout_state,
+    _remove_worktree_if_inactive,
     _reap_landed_branches,
+    _worktree_process_pids,
 )
 
 TASK_QUEUE = "translation-queue"
@@ -291,10 +293,10 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """
     returncode = getattr(proc, "returncode", None)
     if isinstance(returncode, int):
+        # The leader's numeric PGID can be recycled immediately after exit.
+        # The verified completion reaper owns any surviving descendants.
         return
-    try:
-        os.killpg(proc.pid, _signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+    if not _signal_group(proc.pid, _signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
@@ -306,6 +308,215 @@ def _signal_group(pid: int, sig: int) -> bool:
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+
+
+def _process_group_has_live_members(pgid: int) -> bool:
+    """Return whether *pgid* still contains a non-zombie process."""
+    try:
+        result = _subprocess.run(
+            ["ps", "-eo", "pgid=,stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        result = None
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                member_pgid = int(parts[0])
+            except ValueError:
+                continue
+            if member_pgid == pgid and not parts[1].startswith("Z"):
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+
+
+def _process_identity(pid: int) -> str | None:
+    """Return a PID-reuse-safe start token for a live, non-zombie process."""
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            raw = proc_stat.read_text()
+            fields = raw[raw.rfind(")") + 2 :].split()
+            if fields[0].startswith("Z"):
+                return None
+            return f"linux:{fields[19]}"
+        except (OSError, IndexError):
+            return None
+    try:
+        result = _subprocess.run(
+            ["ps", "-o", "lstart=", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return None
+    line = result.stdout.strip()
+    if result.returncode != 0 or not line:
+        return None
+    tokens = line.split()
+    status = tokens[-1]
+    if status.startswith("Z"):
+        return None
+    return f"ps:{' '.join(tokens[:-1])}"
+
+
+def _descendant_process_identities(root_pid: int) -> dict[int, str]:
+    """Snapshot all current descendants of *root_pid* with start identities."""
+    try:
+        result = _subprocess.run(
+            ["ps", "-eo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return {}
+    children: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    descendants: set[int] = set()
+    pending = list(children.get(root_pid, []))
+    while pending:
+        pid = pending.pop()
+        if pid in descendants:
+            continue
+        descendants.add(pid)
+        pending.extend(children.get(pid, []))
+    return {
+        pid: identity
+        for pid in descendants
+        if (identity := _process_identity(pid)) is not None
+    }
+
+
+def _worktree_process_identities(worktree_path: str | None) -> dict[int, str]:
+    """Find live processes whose cwd or open files are inside a worktree."""
+    if not worktree_path:
+        return {}
+    pids = _worktree_process_pids(worktree_path)
+    pids.discard(os.getpid())
+    return {
+        pid: identity
+        for pid in pids
+        if (identity := _process_identity(pid)) is not None
+    }
+
+
+def _attempt_process_identities(
+    attempt_identity: str | None, proc_root: Path = Path("/proc")
+) -> dict[int, str]:
+    """Find Linux descendants by their per-activity inherited identity."""
+    if not attempt_identity or not proc_root.is_dir():
+        return {}
+    marker = f"RIBOSOME_ATTEMPT_ID={attempt_identity}".encode()
+    pids: set[int] = set()
+    for pid_dir in proc_root.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            environment = (pid_dir / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if marker in environment:
+            pids.add(int(pid_dir.name))
+    pids.discard(os.getpid())
+    return {
+        pid: identity
+        for pid in pids
+        if (identity := _process_identity(pid)) is not None
+    }
+
+
+async def _reap_detached_descendants(
+    tracked: dict[int, str],
+    worktree_path: str | None,
+    attempt_identity: str | None,
+    timeout: float = 2.0,
+) -> bool:
+    """Repeatedly kill descendants that escaped the original process group."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        worktree_processes = await asyncio.to_thread(
+            _worktree_process_identities, worktree_path
+        )
+        attempt_processes = await asyncio.to_thread(
+            _attempt_process_identities, attempt_identity
+        )
+        owned_candidates = {**tracked, **attempt_processes}
+        live_owned = {
+            pid: identity
+            for pid, identity in owned_candidates.items()
+            if await asyncio.to_thread(_process_identity, pid) == identity
+        }
+        live_worktree = {
+            pid: identity
+            for pid, identity in worktree_processes.items()
+            if await asyncio.to_thread(_process_identity, pid) == identity
+        }
+        unowned_worktree = set(live_worktree) - set(live_owned)
+        if not live_owned:
+            # Worktree use is evidence of a conflict, not authority to kill an
+            # editor, shell or indexer that does not carry this task's lineage
+            # or identity. Stop our own tree first, then block cleanup while
+            # leaving every unowned process untouched.
+            return not unowned_worktree
+        for pid in live_owned:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, _signal.SIGKILL)
+        if asyncio.get_running_loop().time() >= deadline:
+            final_live = await asyncio.to_thread(
+                lambda: {
+                    pid
+                    for pid, identity in live_owned.items()
+                    if _process_identity(pid) == identity
+                }
+            )
+            return not final_live and not unowned_worktree
+        await asyncio.sleep(0.05)
+
+
+async def _wait_for_process_group_exit(pgid: int, timeout: float = 2.0) -> bool:
+    """Wait until a process group has no member capable of further mutation."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while await asyncio.to_thread(_process_group_has_live_members, pgid):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+def _signal_verified_processes(processes: dict[int, str], sig: int) -> set[int]:
+    """Signal only PIDs whose start identity still matches the captured owner."""
+    signalled: set[int] = set()
+    for pid, identity in processes.items():
+        if _process_identity(pid) != identity:
+            continue
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        signalled.add(pid)
+    return signalled
 
 
 def _reap_orphaned_worktree_processes(repo_root: str) -> dict:
@@ -394,19 +605,105 @@ async def _graceful_kill(
 async def _graceful_kill_group(
     proc: asyncio.subprocess.Process,
     timeout: float = 5.0,
+    worktree_path: str | None = None,
+    attempt_identity: str | None = None,
 ) -> None:
-    """SIGTERM the process group, escalate to _kill_process_group on timeout."""
-    if proc.returncode is not None:
-        return
-    try:
-        os.killpg(proc.pid, _signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        _kill_process_group(proc)
+    """Stop the owned task tree without signalling a recycled historical PGID."""
+    tracked_descendants = await asyncio.to_thread(
+        _descendant_process_identities, proc.pid
+    )
+    leader_identity = await asyncio.to_thread(_process_identity, proc.pid)
+    if leader_identity is not None:
+        tracked_descendants[proc.pid] = leader_identity
+    if proc.returncode is None:
+        await asyncio.to_thread(
+            _signal_verified_processes,
+            tracked_descendants,
+            _signal.SIGTERM,
+        )
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+
+    # Once the leader exits, its numeric PGID can be recycled. Reap only the
+    # identity-snapshotted descendants and processes carrying this attempt's
+    # inherited marker; never send SIGKILL to the bare historical PGID.
+    if not await _reap_detached_descendants(
+        tracked_descendants, worktree_path, attempt_identity
+    ):
+        raise RuntimeError(f"detached descendants of {proc.pid} survived SIGKILL")
+    if proc.returncode is None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+    if not await _wait_for_process_group_exit(proc.pid):
+        raise RuntimeError(f"process group {proc.pid} survived verified reaping")
+
+
+async def _checkpoint_shutdown_worktree(
+    worktree_path: str | None,
+    workflow_id: str,
+    *,
+    task: str,
+    provider: str,
+    exit_code: int,
+) -> str | None:
+    """Persist dirty work after any cancelled activity attempt."""
+    if not worktree_path:
+        return None
+    return await asyncio.to_thread(
+        _checkpoint_worktree_or_raise,
+        str(worktree_path),
+        workflow_id,
+        task=task,
+        provider=provider,
+        exit_code=exit_code,
+    )
+
+
+def _checkpoint_uncommitted_worktree(
+    worktree_path: str | None,
+    workflow_id: str,
+    *,
+    auto_committed: bool,
+    task: str,
+    provider: str,
+    exit_code: int,
+) -> str | None:
+    """Preserve dirty work whenever auto-commit did not create a commit."""
+    if not worktree_path or auto_committed:
+        return None
+    return _checkpoint_worktree_or_raise(
+        str(worktree_path),
+        workflow_id,
+        task=task,
+        provider=provider,
+        exit_code=exit_code,
+    )
+
+
+async def _prepare_cancelled_retry(
+    proc: asyncio.subprocess.Process,
+    worktree_path: str | None,
+    workflow_id: str,
+    *,
+    task: str,
+    provider: str,
+    attempt_identity: str | None = None,
+) -> bool:
+    """Reap and checkpoint a cancelled attempt; report whether shutdown retries."""
+    await _graceful_kill_group(
+        proc,
+        worktree_path=worktree_path,
+        attempt_identity=attempt_identity,
+    )
+    shutdown_requested = _worker_shutdown_requested()
+    await _checkpoint_shutdown_worktree(
+        worktree_path,
+        workflow_id,
+        task=task,
+        provider=provider,
+        exit_code=proc.returncode if proc.returncode is not None else -15,
+    )
+    return shutdown_requested
 
 
 def _worker_shutdown_requested() -> bool:
@@ -823,6 +1120,7 @@ async def translate(
     workflow_id = ""
     with contextlib.suppress(RuntimeError):
         workflow_id = activity.info().workflow_id
+    attempt_identity = f"{workflow_id or 'unknown'}:{os.getpid()}:{_time.time_ns()}"
     # Match the actual ribosome effector invocation, not any process containing
     # "ribosome" in argv (e.g. rsync of ribosome-outputs/ paths). The bash effector
     # is always invoked with `--provider`, so that's the precise marker.
@@ -1034,6 +1332,7 @@ async def translate(
                     **os.environ,
                     "RIBOSOME_PROVIDER": harness or resolved_provider,
                     "RIBOSOME_TASK_ID": workflow_id,
+                    "RIBOSOME_ATTEMPT_ID": attempt_identity,
                     "HOME": str(Path.home()),
                 },
                 start_new_session=True,  # process group kill — prevents orphan ribosome processes
@@ -1113,9 +1412,30 @@ async def translate(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=10)
                 except TimeoutError:
-                    await _graceful_kill(proc)
+                    pass
+                # A wrapper can exit while background or setsid descendants
+                # remain. Reap and verify the full task tree on normal and
+                # timed-out completion before inspecting or removing work.
+                await _graceful_kill_group(
+                    proc,
+                    worktree_path=worktree_path,
+                    attempt_identity=attempt_identity,
+                )
             except TimeoutError:
-                await _graceful_kill(proc)
+                await _graceful_kill_group(
+                    proc,
+                    worktree_path=worktree_path,
+                    attempt_identity=attempt_identity,
+                )
+                await asyncio.to_thread(
+                    _checkpoint_uncommitted_worktree,
+                    worktree_path,
+                    workflow_id or wf_id,
+                    auto_committed=False,
+                    task=task,
+                    provider=resolved_provider,
+                    exit_code=-1,
+                )
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         asyncio.gather(
@@ -1145,12 +1465,20 @@ async def translate(
                 # Temporal cancelled the activity (stall-detect kill, workflow
                 # cancel, or worker graceful shutdown). Kill the subprocess
                 # tree either way.
-                await _graceful_kill_group(proc)
-                if _worker_shutdown_requested():
+                if await _prepare_cancelled_retry(
+                    proc,
+                    worktree_path,
+                    workflow_id or wf_id,
+                    task=task,
+                    provider=resolved_provider,
+                    attempt_identity=attempt_identity,
+                ):
                     # Worker is draining (systemd stop / rictor deploy) and the
-                    # graceful window expired. Re-raise so Temporal retries the
-                    # attempt on the restarted worker instead of recording a
-                    # spurious failure result.
+                    # graceful window expired. Preserve dirty work before
+                    # re-raising: retry setup force-removes the prior worktree,
+                    # so this is the final safe checkpoint boundary.
+                    # Re-raise so Temporal retries the attempt on the restarted
+                    # worker instead of recording a spurious failure result.
                     raise
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -1235,17 +1563,20 @@ async def translate(
         # Read-only modes (scout/research) are protected by _mode_allows_auto_commit.
         if work_dir and _mode_allows_auto_commit(mode):
             auto_committed = _auto_commit(str(work_dir), wf_id)
+        # A successful subprocess can still leave dirty work when auto-commit
+        # fails. Preserve it before every later force-remove, not only on a
+        # nonzero process exit.
+        _checkpoint_uncommitted_worktree(
+            worktree_path,
+            workflow_id or wf_id,
+            auto_committed=auto_committed,
+            task=task,
+            provider=resolved_provider,
+            exit_code=rc,
+        )
         if rc != 0 and worktree_path and not auto_committed:
-            # Salvage before _cleanup_worktree resets the tree. On signal
-            # deaths (rc < 0: SIGKILL, OOM, collateral pkill) the wrapper's
-            # own stash-checkpoint never ran — this is the only salvage path.
-            _checkpoint_worktree(
-                str(worktree_path),
-                workflow_id or wf_id,
-                task=task,
-                provider=resolved_provider,
-                exit_code=rc,
-            )
+            # The checkpoint above is now durable, so failed-run cleanup may
+            # reset the worktree before the retry or operator review.
             _cleanup_worktree(str(worktree_path))
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
@@ -1457,13 +1788,14 @@ async def translate(
                         timeout=60,
                         cwd=repo_root,
                     )
-                    with contextlib.suppress(Exception):
-                        _subprocess.run(
-                            ["git", "worktree", "remove", "--force", worktree_path],
-                            capture_output=True,
-                            timeout=10,
-                            cwd=repo_root,
+                    try:
+                        await asyncio.to_thread(
+                            _remove_worktree_if_inactive,
+                            repo_root,
+                            worktree_path,
                         )
+                    except RuntimeError as exc:
+                        print(f"[cleanup] preserving worktree: {exc}", file=sys.stderr)
                 _ee_stdout = stdout[:1000]
                 if _verifier_cmd:
                     _ee_stdout = f"{_ee_stdout}\n\n[auto-verify] {_verifier_cmd}\n{_verifier_tail}"
@@ -1545,13 +1877,14 @@ async def translate(
     # Just clean up the worktree; keep the branch for review-gated merge.
     merged = False
     if worktree_path:
-        with contextlib.suppress(Exception):
-            _subprocess.run(
-                ["git", "worktree", "remove", "--force", worktree_path],
-                capture_output=True,
-                timeout=10,
-                cwd=repo_root,
+        try:
+            await asyncio.to_thread(
+                _remove_worktree_if_inactive,
+                repo_root,
+                worktree_path,
             )
+        except RuntimeError as exc:
+            print(f"[cleanup] preserving worktree: {exc}", file=sys.stderr)
         if is_incomplete:
             print(
                 f"INCOMPLETE: branch {branch_name} preserved ({commit_count} commits)",

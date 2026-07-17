@@ -1,5 +1,7 @@
 """Tests for PlanWorkflow pure functions and workflow logic."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from mtor.worker.plan_workflow import find_ready_specs, PlanWorkflow
@@ -115,6 +117,21 @@ class TestPlanWorkflow:
         assert wf._pending == set()
         assert wf._results == {}
         assert wf._specs == []
+
+    @pytest.mark.anyio
+    async def test_child_spec_carries_its_workflow_identity(self):
+        wf = PlanWorkflow()
+        execute = AsyncMock(return_value={"succeeded": 1})
+        with patch(
+            "mtor.worker.plan_workflow.workflow.execute_child_workflow", execute
+        ):
+            await wf._execute_child(
+                {"name": "alpha", "task": "do alpha", "provider": "zhipu"}
+            )
+
+        kwargs = execute.await_args.kwargs
+        assert kwargs["id"] == "plan-child-alpha"
+        assert kwargs["args"][0][0]["task_id"] == kwargs["id"]
 
     @pytest.mark.anyio
     async def test_spec_completed_signal_adds_to_completed(self):
