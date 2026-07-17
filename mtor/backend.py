@@ -1,8 +1,8 @@
 """Durable-backend boundary for operator lifecycle commands.
 
 Temporal remains the only enabled backend. The adapter gives core commands a
-backend-neutral surface; legacy visibility operations remain explicitly
-Temporal-specific until later migration slices.
+backend-neutral lifecycle surface and structured visibility reads; mutation-
+coupled and diagnostic visibility remain Temporal-specific for later slices.
 """
 
 from __future__ import annotations
@@ -10,12 +10,16 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 
 DEFAULT_BACKEND = "temporal"
 SUPPORTED_BACKENDS = frozenset({DEFAULT_BACKEND})
+VISIBILITY_METADATA_KEYS = frozenset(
+    {"mtor_provider", "mtor_verdict", "mtor_mode", "mtor_spec", "mtor_risk"}
+)
 
 
 class BackendConfigurationError(RuntimeError):
@@ -65,13 +69,23 @@ class Submission:
 
 
 @dataclass(frozen=True)
+class VisibilityQuery:
+    """Backend-neutral conjunction used by workflow list and count reads."""
+
+    status: str | None = None
+    started_after: datetime | None = None
+    metadata: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkflowSnapshot:
     """Normalized lifecycle state returned to operator commands."""
 
     task_id: str
     status: str
-    start_time: Any = None
-    close_time: Any = None
+    start_time: datetime | None = None
+    close_time: datetime | None = None
+    metadata: tuple[tuple[str, str], ...] = ()
 
 
 @runtime_checkable
@@ -83,6 +97,12 @@ class DurableBackend(Protocol):
     async def submit(self, request: Submission) -> str: ...
 
     async def inspect(self, task_id: str) -> WorkflowSnapshot: ...
+
+    async def list_workflows(
+        self, query: VisibilityQuery, *, limit: int | None = None
+    ) -> tuple[WorkflowSnapshot, ...]: ...
+
+    async def count_workflows(self, query: VisibilityQuery) -> int: ...
 
     async def result(self, task_id: str) -> Any: ...
 
@@ -102,6 +122,53 @@ class TemporalBackend(BackendAdapter):
 
     def __init__(self, native_client: Any) -> None:
         self.native_client = native_client
+
+    @staticmethod
+    def _metadata(execution: Any) -> tuple[tuple[str, str], ...]:
+        def _normalize(items: Any) -> tuple[tuple[str, str], ...]:
+            normalized: dict[str, str] = {}
+            for key, value in items:
+                try:
+                    name = getattr(key, "name", None) or str(key)
+                    if name not in VISIBILITY_METADATA_KEYS:
+                        continue
+                    if isinstance(value, (list, tuple)):
+                        value = value[0] if value else ""
+                    normalized[name] = "" if value is None else str(value)
+                except Exception:
+                    continue
+            return tuple(sorted(normalized.items()))
+
+        typed = getattr(execution, "typed_search_attributes", None)
+        if typed:
+            try:
+                normalized = _normalize((pair.key, pair.value) for pair in typed)
+                if normalized:
+                    return normalized
+            except Exception:
+                pass
+
+        attributes = getattr(execution, "search_attributes", None)
+        if attributes:
+            try:
+                return _normalize(attributes.items())
+            except Exception:
+                pass
+        return ()
+
+    @classmethod
+    def _snapshot(cls, execution: Any, *, task_id: str) -> WorkflowSnapshot:
+        status_obj = getattr(execution, "status", None)
+        status = getattr(status_obj, "name", None)
+        if not status and isinstance(status_obj, str):
+            status = status_obj
+        return WorkflowSnapshot(
+            task_id=task_id,
+            status=status or "UNKNOWN",
+            start_time=getattr(execution, "start_time", None),
+            close_time=getattr(execution, "close_time", None),
+            metadata=cls._metadata(execution),
+        )
 
     async def submit(self, request: Submission) -> str:
         from temporalio.common import (
@@ -133,14 +200,27 @@ class TemporalBackend(BackendAdapter):
     async def inspect(self, task_id: str) -> WorkflowSnapshot:
         handle = self.native_client.get_workflow_handle(task_id)
         description = await handle.describe()
-        status_obj = getattr(description, "status", None)
-        status = getattr(status_obj, "name", None) or "UNKNOWN"
-        return WorkflowSnapshot(
-            task_id=task_id,
-            status=status,
-            start_time=getattr(description, "start_time", None),
-            close_time=getattr(description, "close_time", None),
+        return self._snapshot(description, task_id=task_id)
+
+    async def list_workflows(
+        self, query: VisibilityQuery, *, limit: int | None = None
+    ) -> tuple[WorkflowSnapshot, ...]:
+        if limit is not None and limit <= 0:
+            raise ValueError("visibility limit must be positive")
+
+        snapshots: list[WorkflowSnapshot] = []
+        temporal_query = _temporal_visibility_query(query)
+        async for execution in self.native_client.list_workflows(query=temporal_query):
+            snapshots.append(self._snapshot(execution, task_id=execution.id))
+            if limit is not None and len(snapshots) >= limit:
+                break
+        return tuple(snapshots)
+
+    async def count_workflows(self, query: VisibilityQuery) -> int:
+        result = await self.native_client.count_workflows(
+            query=_temporal_visibility_query(query)
         )
+        return int(getattr(result, "count", result))
 
     async def result(self, task_id: str) -> Any:
         handle = self.native_client.get_workflow_handle(task_id)
@@ -164,6 +244,45 @@ class TemporalBackend(BackendAdapter):
             await handle.cancel()
             return
         raise ValueError(f"unsupported stop mode: {mode!r}")
+
+
+def _temporal_visibility_query(query: VisibilityQuery) -> str | None:
+    """Compile one structured visibility query to Temporal SQL syntax."""
+    parts: list[str] = []
+    if query.status:
+        status_values = {
+            "RUNNING": "Running",
+            "COMPLETED": "Completed",
+            "FAILED": "Failed",
+            "CANCELED": "Canceled",
+            "TERMINATED": "Terminated",
+            "CONTINUED_AS_NEW": "ContinuedAsNew",
+            "TIMED_OUT": "TimedOut",
+        }
+        normalized = query.status.strip().upper()
+        try:
+            temporal_status = status_values[normalized]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported visibility status: {query.status!r}"
+            ) from exc
+        parts.append(f"ExecutionStatus = '{temporal_status}'")
+
+    if query.started_after is not None:
+        started_after = query.started_after
+        if started_after.tzinfo is None:
+            started_after = started_after.replace(tzinfo=UTC)
+        started_after = started_after.astimezone(UTC)
+        parts.append(f"StartTime > '{started_after.strftime('%Y-%m-%dT%H:%M:%SZ')}'")
+
+    for key, value in query.metadata:
+        if key not in VISIBILITY_METADATA_KEYS:
+            raise ValueError(f"unsupported visibility metadata key: {key!r}")
+        if "'" in value:
+            raise ValueError("visibility metadata values cannot contain a quote")
+        parts.append(f"{key} = '{value}'")
+
+    return " AND ".join(parts) or None
 
 
 def _coerce_temporal_client_for_compatibility(client: Any) -> TemporalBackend:

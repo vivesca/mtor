@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mtor.backend import TemporalBackend
+
 
 async def _instant_sleep(_delay: float) -> None:
     return None
@@ -71,7 +73,11 @@ def mock_client_completed():
 
 def test_wait_returns_when_completed(mock_client_completed):
     from mtor import cli
-    with patch.object(cli, "_get_client", return_value=(mock_client_completed, None)):
+    with patch.object(
+        cli,
+        "_get_backend",
+        return_value=(TemporalBackend(mock_client_completed), None),
+    ):
         with patch("asyncio.sleep", side_effect=_instant_sleep):
             envelope, exit_code = _capture_envelope(cli.wait, "wf-test", interval=2)
     assert exit_code == 0
@@ -93,7 +99,9 @@ def test_wait_returns_on_failed_immediately():
     client = MagicMock()
     client.get_workflow_handle.return_value = handle
     from mtor import cli
-    with patch.object(cli, "_get_client", return_value=(client, None)):
+    with patch.object(
+        cli, "_get_backend", return_value=(TemporalBackend(client), None)
+    ):
         envelope, exit_code = _capture_envelope(cli.wait, "wf-failed", interval=2)
     # FAILED is not approved, _err path may or may not fire depending on verdict logic;
     # the contract is: status=FAILED present in envelope, exit_code != 5 (timeout).
@@ -113,7 +121,9 @@ def test_wait_timeout_returns_error_envelope():
     from mtor import cli
     # Patch asyncio.sleep to be instant; patch time.time to advance past timeout
     times = iter([0.0, 0.0, 100.0, 200.0])
-    with patch.object(cli, "_get_client", return_value=(client, None)):
+    with patch.object(
+        cli, "_get_backend", return_value=(TemporalBackend(client), None)
+    ):
         with patch("time.time", side_effect=lambda: next(times)):
             with patch("asyncio.sleep", side_effect=_instant_sleep):
                 envelope, exit_code = _capture_envelope(cli.wait, "wf-stuck", timeout=10, interval=2)
@@ -139,7 +149,7 @@ def test_wait_interval_too_high_rejected():
 
 def test_wait_unreachable_temporal_returns_error():
     from mtor import cli
-    with patch.object(cli, "_get_client", return_value=(None, "connection refused")):
+    with patch.object(cli, "_get_backend", return_value=(None, "connection refused")):
         envelope, exit_code = _capture_envelope(cli.wait, "wf-x")
     assert exit_code == 3
     assert envelope.get("error", {}).get("code") == "TEMPORAL_UNREACHABLE"

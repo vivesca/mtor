@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mtor.backend import TemporalBackend
 from mtor.doctor import (
     ProbeResult,
     _probe_provider,
@@ -23,14 +24,14 @@ integration = pytest.mark.skipif(
 class TestCheckTemporalReachableSuccess(unittest.TestCase):
     """Test successful Temporal connection check."""
 
-    @patch("mtor.doctor._get_client")
-    def test_check_temporal_reachable_success(self, mock_get_client):
+    @patch("mtor.doctor._get_backend")
+    def test_check_temporal_reachable_success(self, mock_get_backend):
         """Test when Temporal is reachable."""
         from mtor.doctor import doctor
         from mtor.infra import HealthReport
 
         mock_client = MagicMock()
-        mock_get_client.return_value = (mock_client, None)
+        mock_get_backend.return_value = (TemporalBackend(mock_client), None)
 
         with patch("mtor.doctor.WORKER_HOST", "test-worker"):
             with patch("mtor.doctor.TEMPORAL_HOST", "localhost:7233"):
@@ -86,18 +87,21 @@ class TestCheckTemporalReachableSuccess(unittest.TestCase):
                                                             mock_exit.assert_not_called()
 
         # Verify client was requested
-        mock_get_client.assert_called_once()
+        mock_get_backend.assert_called_once()
 
 
 class TestCheckTemporalUnreachable(unittest.TestCase):
     """Test when Temporal is unreachable."""
 
-    @patch("mtor.doctor._get_client")
-    def test_check_temporal_unreachable(self, mock_get_client):
+    @patch("mtor.doctor._get_backend")
+    def test_check_temporal_unreachable(self, mock_get_backend):
         """Test when Temporal cannot be reached."""
         from mtor.doctor import doctor
 
-        mock_get_client.return_value = (None, ConnectionError("Connection refused"))
+        mock_get_backend.return_value = (
+            None,
+            ConnectionError("Connection refused"),
+        )
 
         with patch("mtor.doctor.WORKER_HOST", "test-worker"):
             with patch("mtor.doctor.TEMPORAL_HOST", "localhost:7233"):
@@ -147,8 +151,8 @@ class TestCheckTemporalUnreachable(unittest.TestCase):
 class TestCheckWorkerAlive(unittest.TestCase):
     """Test worker alive check."""
 
-    @patch("mtor.doctor._get_client")
-    def test_check_worker_alive(self, mock_get_client):
+    @patch("mtor.doctor._get_backend")
+    def test_check_worker_alive(self, mock_get_backend):
         """Test worker liveness probe."""
         from mtor.doctor import doctor
         from mtor.infra import HealthReport
@@ -162,7 +166,7 @@ class TestCheckWorkerAlive(unittest.TestCase):
 
         mock_client.list_workflows = mock_list
 
-        mock_get_client.return_value = (mock_client, None)
+        mock_get_backend.return_value = (TemporalBackend(mock_client), None)
 
         with patch("mtor.doctor.WORKER_HOST", "test-worker"):
             with patch("mtor.doctor.TEMPORAL_HOST", "localhost:7233"):
@@ -376,7 +380,9 @@ class TestReconcileRunningWorkflows(unittest.TestCase):
 
         with patch("mtor.doctor.subprocess.run", side_effect=_fake_run):
             with patch("mtor.doctor.WORKER_HOST", "ganglion"):
-                classifications = reconcile_running_workflows(client)
+                classifications = reconcile_running_workflows(
+                    TemporalBackend(client)
+                )
 
         by_id = {c["workflow_id"]: c for c in classifications}
 
@@ -412,7 +418,10 @@ def test_doctor_fails_when_rictor_topology_fails():
             yield object()
 
     with (
-        patch("mtor.doctor._get_client", return_value=(Client(), None)),
+        patch(
+            "mtor.doctor._get_backend",
+            return_value=(TemporalBackend(Client()), None),
+        ),
         patch("mtor.doctor.COACHING_PATH", None),
         patch("mtor.doctor.WORKER_HOST", "ganglion"),
         patch(
@@ -460,7 +469,10 @@ def test_doctor_env_enables_opencode_runtime_probe():
 
     with (
         patch.dict("os.environ", {"MTOR_PROBE_OPENCODE": "1"}),
-        patch("mtor.doctor._get_client", return_value=(Client(), None)),
+        patch(
+            "mtor.doctor._get_backend",
+            return_value=(TemporalBackend(Client()), None),
+        ),
         patch("mtor.doctor.COACHING_PATH", None),
         patch("mtor.doctor.WORKER_HOST", "ganglion"),
         patch(
@@ -547,7 +559,10 @@ def test_doctor_uses_worker_admission_instead_of_temporal_visibility():
     }
 
     with (
-        patch("mtor.doctor._get_client", return_value=(client, None)),
+        patch(
+            "mtor.doctor._get_backend",
+            return_value=(TemporalBackend(client), None),
+        ),
         patch("mtor.doctor.probe_worker_admission", return_value=admission),
         patch("mtor.doctor.COACHING_PATH", None),
         patch("mtor.doctor.WORKER_HOST", "test-worker"),

@@ -40,6 +40,7 @@ from mtor import (
     WORKER_HOST,
     WORKER_LOG_DIR,
 )
+from mtor.client import _get_backend as _connect_backend
 from mtor.client import _get_client as _legacy_get_client
 from mtor.client import (
     _pending_activity_records,
@@ -50,6 +51,7 @@ from mtor.backend import (
     BackendConfigurationError,
     Decision,
     StopMode,
+    VisibilityQuery,
     _coerce_temporal_client_for_compatibility,
     selected_backend_name,
 )
@@ -121,6 +123,12 @@ def _get_client():
     """Keep legacy CLI paths fail-closed until they join the backend seam."""
     _require_backend_configuration("mtor")
     return _legacy_get_client()
+
+
+def _get_backend():
+    """Connect through the selected backend for migrated operator paths."""
+    _require_backend_configuration("mtor")
+    return _connect_backend()
 
 
 # ---------------------------------------------------------------------------
@@ -1685,7 +1693,7 @@ def dossier(workflow_id: str) -> None:
     """
     cmd = f"mtor dossier {workflow_id}"
 
-    client, err = _get_client()
+    backend, err = _get_backend()
     if err:
         sys.exit(
             _err(
@@ -1701,17 +1709,15 @@ def dossier(workflow_id: str) -> None:
     try:
 
         async def _dossier():
-            handle = client.get_workflow_handle(workflow_id)
-            desc = await handle.describe()
+            snapshot = await backend.inspect(workflow_id)
             wf_result = None
-            status_name = desc.status.name if desc.status else "UNKNOWN"
-            if status_name != "RUNNING":
+            if snapshot.status != "RUNNING":
                 with contextlib.suppress(Exception):
-                    wf_result = await handle.result()
-            return desc, wf_result
+                    wf_result = await backend.result(workflow_id)
+            return snapshot, wf_result
 
-        desc, wf_result = asyncio.run(_dossier())
-        status_val = desc.status.name if desc.status else "UNKNOWN"
+        snapshot, wf_result = asyncio.run(_dossier())
+        status_val = snapshot.status
         task_result = (
             _extract_first_result(wf_result) if isinstance(wf_result, dict) else None
         )
@@ -1798,7 +1804,7 @@ def wait(
             )
         )
 
-    client, err = _get_client()
+    backend, err = _get_backend()
     if err:
         sys.exit(
             _err(
@@ -1819,31 +1825,34 @@ def wait(
 
         async def _wait_loop():
             nonlocal polls
-            handle = client.get_workflow_handle(workflow_id)
             while True:
-                desc = await handle.describe()
+                snapshot = await backend.inspect(workflow_id)
                 polls += 1
-                status_val = desc.status.name if desc.status else "UNKNOWN"
+                status_val = snapshot.status
                 if status_val not in running_states:
                     wf_result_local = None
                     if status_val == "COMPLETED":
                         try:
-                            wf_result_local = await handle.result()
+                            wf_result_local = await backend.result(workflow_id)
                         except Exception:
                             wf_result_local = None
-                    return desc, status_val, False, wf_result_local
+                    return snapshot, status_val, False, wf_result_local
                 if time.time() - start_wall >= timeout:
-                    return desc, status_val, True, None
+                    return snapshot, status_val, True, None
                 await asyncio.sleep(interval)
 
-        desc, final_status, timed_out, wf_result = asyncio.run(_wait_loop())
+        snapshot, final_status, timed_out, wf_result = asyncio.run(_wait_loop())
         waited = round(time.time() - start_wall, 1)
 
         result_payload: dict[str, Any] = {
             "workflow_id": workflow_id,
             "status": final_status,
-            "start_time": desc.start_time.isoformat() if desc.start_time else None,
-            "close_time": desc.close_time.isoformat() if desc.close_time else None,
+            "start_time": snapshot.start_time.isoformat()
+            if snapshot.start_time
+            else None,
+            "close_time": snapshot.close_time.isoformat()
+            if snapshot.close_time
+            else None,
             "waited_seconds": waited,
             "polls": polls,
             "timed_out": timed_out,
@@ -3322,7 +3331,7 @@ def stats() -> None:
     """Show dispatch statistics: today's verdicts, running count, weekly totals."""
     from datetime import datetime, timedelta, timezone
 
-    client, err = _get_client()
+    backend, err = _get_backend()
     if err:
         sys.exit(
             _err(
@@ -3334,22 +3343,26 @@ def stats() -> None:
             )
         )
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = now - timedelta(days=7)
 
-    async def _count(query: str) -> int:
-        result = await client.count_workflows(query=query)
-        return int(getattr(result, "count", result))
+    async def _count(query: VisibilityQuery) -> int:
+        return await backend.count_workflows(query)
 
     counts: dict[str, int] = {}
     queries = {
-        "running": "ExecutionStatus = 'Running'",
-        "today_total": f"StartTime > '{today}'",
-        "today_completed": f"StartTime > '{today}' AND ExecutionStatus = 'Completed'",
-        "week_total": f"StartTime > '{week_ago}'",
-        "week_completed": f"StartTime > '{week_ago}' AND ExecutionStatus = 'Completed'",
+        "running": VisibilityQuery(status="RUNNING"),
+        "today_total": VisibilityQuery(started_after=today),
+        "today_completed": VisibilityQuery(
+            status="COMPLETED",
+            started_after=today,
+        ),
+        "week_total": VisibilityQuery(started_after=week_ago),
+        "week_completed": VisibilityQuery(
+            status="COMPLETED",
+            started_after=week_ago,
+        ),
     }
 
     for name, query in queries.items():
@@ -4079,7 +4092,7 @@ def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
             )
         )
 
-    client, err = _get_client()
+    backend, err = _get_backend()
     if err:
         sys.exit(
             _err(
@@ -4092,17 +4105,17 @@ def _query_watch_workflow(cmd: str, workflow_id: str | None) -> None:
         )
 
     async def _query():
-        handle = client.get_workflow_handle(workflow_id)
-        desc = await handle.describe()
+        snapshot = await backend.inspect(workflow_id)
         result = None
-        status_name = desc.status.name if desc.status else "UNKNOWN"
-        if status_name == "COMPLETED":
+        if snapshot.status == "COMPLETED":
             with contextlib.suppress(Exception):
-                result = await handle.result()
+                result = await backend.result(workflow_id)
         return {
             "workflow_id": workflow_id,
-            "status": status_name,
-            "start_time": desc.start_time.isoformat() if desc.start_time else None,
+            "status": snapshot.status,
+            "start_time": snapshot.start_time.isoformat()
+            if snapshot.start_time
+            else None,
             "result": result,
         }
 

@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mtor import TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKFLOW_TYPE
+from mtor.backend import TemporalBackend
 from mtor.cli import app
 
 # ---------------------------------------------------------------------------
@@ -27,9 +28,9 @@ from mtor.cli import app
 
 _CLIENT_PATCH_TARGETS = [
     "mtor.cli._get_client",
-    "mtor.doctor._get_client",
     "mtor.dispatch._get_client",
 ]
+_BACKEND_PATCH_TARGETS = ["mtor.cli._get_backend", "mtor.doctor._get_backend"]
 
 
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
@@ -161,6 +162,10 @@ def _patch_client(mock_client):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(mock_client, None)))
+    for target in _BACKEND_PATCH_TARGETS:
+        stack.enter_context(
+            patch(target, return_value=(TemporalBackend(mock_client), None))
+        )
     stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
     stack.enter_context(patch("mtor.cli._check_dedup_only", return_value=None))
     stack.enter_context(patch("mtor.cli._record_dispatch"))
@@ -171,6 +176,8 @@ def _patch_client(mock_client):
 def _patch_client_error(error_msg="Connection refused"):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
+        stack.enter_context(patch(target, return_value=(None, error_msg)))
+    for target in _BACKEND_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(None, error_msg)))
     stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
     stack.enter_context(patch("mtor.cli._check_dedup_only", return_value=None))

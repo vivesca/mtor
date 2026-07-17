@@ -6,11 +6,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 
+def _get_backend():
+    """Connect to the selected durable backend."""
+    from mtor.backend import connect_backend
+
+    return connect_backend()
+
+
 def _get_client():
     """Return the raw Temporal client for explicitly unmigrated legacy paths."""
-    from mtor.backend import TemporalBackend, connect_backend
+    from mtor.backend import TemporalBackend
 
-    backend, error = connect_backend()
+    backend, error = _get_backend()
     if error or backend is None:
         return None, error
     if not isinstance(backend, TemporalBackend):

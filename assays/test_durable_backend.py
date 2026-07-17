@@ -137,6 +137,12 @@ def test_compatibility_wrapper_rejects_marked_non_temporal_backend() -> None:
         async def inspect(self, task_id):
             return None
 
+        async def list_workflows(self, query, *, limit=None):
+            return ()
+
+        async def count_workflows(self, query):
+            return 0
+
         async def result(self, task_id):
             return None
 

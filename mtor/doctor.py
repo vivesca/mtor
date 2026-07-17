@@ -16,8 +16,14 @@ from dataclasses import dataclass
 from porin import action as _action
 
 from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
-from mtor.client import _get_client
-from mtor.envelope import _ok
+from mtor.backend import (
+    BackendConfigurationError,
+    DurableBackend,
+    VisibilityQuery,
+    selected_backend_name,
+)
+from mtor.client import _get_backend
+from mtor.envelope import _err, _ok
 from mtor.infra import probe_worker_admission
 
 HEARTBEAT_DIR = "~/germline/loci/ribosome-heartbeats"
@@ -606,11 +612,11 @@ def _get_provider_module():
     return _providers_module
 
 
-def reconcile_running_workflows(client) -> list[dict]:
+def reconcile_running_workflows(backend: DurableBackend) -> list[dict]:
     """Classify RUNNING workflows by heartbeat freshness.
 
     Args:
-        client: Connected Temporal client.
+        backend: Connected durable backend.
 
     Returns:
         List of dicts with workflow_id, classification, last_heartbeat_age_s,
@@ -619,17 +625,14 @@ def reconcile_running_workflows(client) -> list[dict]:
     import asyncio
 
     async def _list_running():
-        results = []
-        async for wf in client.list_workflows(query="ExecutionStatus = 'Running'"):
-            results.append(wf)
-        return results
+        return await backend.list_workflows(VisibilityQuery(status="RUNNING"))
 
     running = asyncio.run(_list_running())
     now = time.time()
     classifications = []
 
     for wf in running:
-        wf_id = wf.id
+        wf_id = wf.task_id
         heartbeat_path = f"{HEARTBEAT_DIR}/{wf_id}"
         try:
             stat_result = subprocess.run(
@@ -677,12 +680,25 @@ def reconcile_running_workflows(client) -> list[dict]:
 def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
     """Health check: Temporal reachability, worker liveness, provider info."""
     cmd = "mtor doctor"
+    try:
+        selected_backend_name()
+    except BackendConfigurationError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "BACKEND_UNSUPPORTED",
+                "Set MTOR_DURABLE_BACKEND=temporal for this build",
+                exit_code=3,
+            )
+        )
+
     checks = []
     all_ok = True
     probe_opencode = probe_opencode or os.environ.get("MTOR_PROBE_OPENCODE") == "1"
 
     # Check 1: Temporal server reachable
-    client, err = _get_client()
+    backend, err = _get_backend()
     temporal_ok = err is None
     if not temporal_ok:
         all_ok = False
@@ -1097,9 +1113,9 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
             )
 
     # Reconciliation: classify RUNNING workflows by heartbeat freshness
-    if reconcile and temporal_ok and client is not None:
+    if reconcile and temporal_ok and backend is not None:
         try:
-            classifications = reconcile_running_workflows(client)
+            classifications = reconcile_running_workflows(backend)
             result["reconciliation"] = {
                 "workflows": classifications,
                 "count": len(classifications),

@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mtor
+from mtor.backend import TemporalBackend
 from mtor.cli import app
 
 
@@ -81,9 +82,9 @@ def make_mock_client():
 
 _CLIENT_PATCH_TARGETS = [
     "mtor.cli._get_client",
-    "mtor.doctor._get_client",
     "mtor.dispatch._get_client",
 ]
+_BACKEND_PATCH_TARGETS = ["mtor.cli._get_backend", "mtor.doctor._get_backend"]
 
 
 def _patch_client(mock_client):
@@ -91,6 +92,10 @@ def _patch_client(mock_client):
     stack = ExitStack()
     for target in _CLIENT_PATCH_TARGETS:
         stack.enter_context(patch(target, return_value=(mock_client, None)))
+    for target in _BACKEND_PATCH_TARGETS:
+        stack.enter_context(
+            patch(target, return_value=(TemporalBackend(mock_client), None))
+        )
     stack.enter_context(patch("mtor.cli._check_dedup", return_value=None))
     return stack
 
