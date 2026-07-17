@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mtor.cli import app
 
 
@@ -68,6 +70,7 @@ SERVICE_SYSTEM_MTOR_ABSENT = (
     "__MTOR_WORKER_SYSTEM__\n"
 )
 WORKER_ROOT = "123 77 op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker\n"
+DEPLOY_SHA = "dddddddd11111111222222223333333344444444"
 
 
 def invoke(args: list[str] | None = None) -> tuple[int, dict]:
@@ -554,6 +557,80 @@ class TestCheckHealth:
         assert "aaaaaaaa" in str(head_check["detail"])
         assert "bbbbbbbb" in str(head_check["detail"])
 
+    def test_check_health_accepts_worker_descendant_of_deployed_sha(self, tmp_path):
+        """Deploy health is pinned to the deployed SHA, not moving local HEAD."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+        worker_sha = "eeeeeeee11111111222222223333333344444444"
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock(returncode=0, stderr="", stdout="")
+            joined = " ".join(cmd)
+            if "git rev-parse HEAD" in joined:
+                result.stdout = f"{worker_sha}\n"
+            elif "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(
+                worker_host="remote-test-host",
+                repo_dir=str(tmp_path),
+                remote_repo_dir="/home/vivesca/code/mtor",
+                expected_sha=DEPLOY_SHA,
+            )
+
+        head_check = next(c for c in report.checks if c["name"] == "worker_repo_head")
+        assert head_check["ok"] is True
+        assert DEPLOY_SHA[:8] in str(head_check["detail"])
+        assert worker_sha[:8] in str(head_check["detail"])
+        assert ["git", "rev-parse", "HEAD"] not in calls
+
+    def test_check_health_rejects_worker_missing_deployed_sha(self, tmp_path):
+        """Deploy health fails when the worker does not contain the pinned SHA."""
+        from mtor.infra import check_health
+
+        (tmp_path / ".git").mkdir()
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock(returncode=0, stderr="", stdout="")
+            joined = " ".join(cmd)
+            if "git rev-parse HEAD" in joined:
+                result.stdout = "eeeeeeee11111111222222223333333344444444\n"
+            elif "git merge-base --is-ancestor" in joined:
+                result.returncode = 1
+            elif "echo ok" in joined:
+                result.stdout = "ok\n"
+            elif "df -h" in joined:
+                result.stdout = "42%\n"
+            elif "systemctl --user show mtor-worker.service" in joined:
+                result.stdout = SERVICE_OK
+            elif "ps -eo" in joined:
+                result.stdout = WORKER_ROOT
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            report = check_health(
+                worker_host="remote-test-host",
+                repo_dir=str(tmp_path),
+                remote_repo_dir="/home/vivesca/code/mtor",
+                expected_sha=DEPLOY_SHA,
+            )
+
+        head_check = next(c for c in report.checks if c["name"] == "worker_repo_head")
+        assert report.ok is False
+        assert head_check["ok"] is False
+        assert "does not contain" in str(head_check["detail"])
+
 
 # ---------------------------------------------------------------------------
 # deploy tests
@@ -562,6 +639,16 @@ class TestCheckHealth:
 
 class TestDeploy:
     """Tests for infra deploy function and CLI command."""
+
+    def setup_method(self):
+        """Keep legacy deploy fakes focused on post-resolution subprocesses."""
+        self._sha_patcher = patch(
+            "mtor.infra._resolve_deploy_sha", return_value=DEPLOY_SHA
+        )
+        self._sha_patcher.start()
+
+    def teardown_method(self):
+        self._sha_patcher.stop()
 
     def test_test_infra_deploy_syncs_code(self):
         """deploy runs push, merge, restart, health-check steps."""
@@ -593,6 +680,8 @@ class TestDeploy:
         step_names = [s["step"] for s in result.steps]
         assert "push" in step_names
         assert "merge" in step_names
+        assert "verify_worker_head" in step_names
+        assert "sync_environment" in step_names
         assert "restart" in step_names
         assert "health_check" in step_names
         assert step_names.count("orphan_cleanup") == 2
@@ -719,10 +808,13 @@ class TestDeploy:
         assert "merge failed" in result.error
 
     def test_deploy_health_uses_remote_repo_head_check(self):
-        """deploy passes local and worker repo paths into check_health."""
+        """deploy pins publication and health to one immutable commit."""
         from mtor.infra import HealthReport, deploy
 
+        calls = []
+
         def fake_run(cmd, **kwargs):
+            calls.append(cmd)
             result = MagicMock()
             result.returncode = 0
             result.stdout = ""
@@ -745,6 +837,94 @@ class TestDeploy:
             worker_host="test-host",
             repo_dir="/Users/terry/code/mtor",
             remote_repo_dir="/home/vivesca/code/mtor",
+            expected_sha=DEPLOY_SHA,
+        )
+        assert [
+            "git",
+            "push",
+            "origin",
+            f"{DEPLOY_SHA}:refs/heads/main",
+        ] in calls
+
+    def test_deploy_fails_before_restart_when_worker_lacks_sha(self):
+        """deploy never restarts a checkout that lacks the published commit."""
+        from mtor.infra import deploy
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            if "git merge-base --is-ancestor" in " ".join(cmd):
+                result.returncode = 1
+            return result
+
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+        ):
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is False
+        assert "does not contain deployed SHA" in str(result.error)
+        assert result.steps[-1]["step"] == "verify_worker_head"
+        assert result.steps[-1]["attempts"] == 3
+        assert not any(
+            cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]
+            for cmd in calls
+        )
+
+    def test_deploy_syncs_frozen_environment_before_restart(self):
+        """deploy refreshes generated entry points before restarting the worker."""
+        from mtor.infra import HealthReport, deploy
+
+        events = []
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            joined = " ".join(cmd)
+            if "uv sync --frozen" in joined:
+                events.append("sync")
+            elif cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]:
+                events.append("restart")
+            return result
+
+        with (
+            patch("mtor.infra.subprocess.run", side_effect=fake_run),
+            patch("mtor.infra.time.sleep"),
+            patch(
+                "mtor.infra.check_health",
+                return_value=HealthReport(ok=True, checks=[]),
+            ),
+        ):
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is True
+        assert events == ["sync", "restart"]
+
+    def test_deploy_fails_before_restart_when_environment_sync_fails(self):
+        """deploy leaves the service untouched when frozen reconciliation fails."""
+        from mtor.infra import deploy
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            if "uv sync --frozen" in " ".join(cmd):
+                result.returncode = 1
+                result.stderr = "lock mismatch"
+            return result
+
+        with patch("mtor.infra.subprocess.run", side_effect=fake_run):
+            result = deploy(worker_host="test-host", repo_dir="/fake/repo")
+
+        assert result.healthy is False
+        assert "environment sync failed" in str(result.error)
+        assert result.steps[-1] == {"step": "sync_environment", "ok": False}
+        assert not any(
+            cmd == ["ssh", "test-host", "systemctl --user restart mtor-worker"]
+            for cmd in calls
         )
 
     def test_deploy_records_orphan_cleanup_after_restart(self):
@@ -1086,6 +1266,32 @@ class TestClean:
 
 class TestInfraModule:
     """Basic module-level sanity tests."""
+
+    def test_resolve_deploy_sha_captures_verified_commit(self):
+        from mtor.infra import _resolve_deploy_sha
+
+        result = MagicMock(returncode=0, stdout=f"{DEPLOY_SHA}\n", stderr="")
+        with patch("mtor.infra.subprocess.run", return_value=result) as run:
+            resolved = _resolve_deploy_sha("/fake/repo")
+
+        assert resolved == DEPLOY_SHA
+        run.assert_called_once_with(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd="/fake/repo",
+        )
+
+    def test_resolve_deploy_sha_rejects_empty_git_result(self):
+        from mtor.infra import _resolve_deploy_sha
+
+        result = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("mtor.infra.subprocess.run", return_value=result),
+            pytest.raises(RuntimeError, match="empty commit"),
+        ):
+            _resolve_deploy_sha("/fake/repo")
 
     def test_check_health_is_importable(self):
         from mtor.infra import check_health

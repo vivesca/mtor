@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mtor.backend import (
+    BackendAdapter,
     BackendConfigurationError,
     Decision,
     StopMode,
@@ -126,8 +127,8 @@ def test_factory_rejects_non_adapter_result(monkeypatch) -> None:
     assert error == "factory for 'dbos' returned an invalid backend adapter"
 
 
-def test_compatibility_wrapper_rejects_structural_non_temporal_backend() -> None:
-    class StructuralBackend:
+def test_compatibility_wrapper_rejects_marked_non_temporal_backend() -> None:
+    class StructuralBackend(BackendAdapter):
         name = "dbos"
 
         async def submit(self, request):
@@ -147,6 +148,15 @@ def test_compatibility_wrapper_rejects_structural_non_temporal_backend() -> None
 
     with pytest.raises(TypeError, match="cannot treat 'dbos' backend"):
         _coerce_temporal_client_for_compatibility(StructuralBackend())
+
+
+def test_compatibility_wrapper_accepts_raw_temporal_mock() -> None:
+    native_client = MagicMock()
+    native_client.start_workflow = AsyncMock()
+
+    backend = _coerce_temporal_client_for_compatibility(native_client)
+
+    assert backend.native_client is native_client
 
 
 def test_temporal_adapter_preserves_lifecycle_contract() -> None:

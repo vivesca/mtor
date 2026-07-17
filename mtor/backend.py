@@ -170,7 +170,7 @@ def _coerce_temporal_client_for_compatibility(client: Any) -> TemporalBackend:
     """Wrap legacy raw Temporal clients while their call sites are migrated."""
     if isinstance(client, TemporalBackend):
         return client
-    if isinstance(client, BackendAdapter) or isinstance(client, DurableBackend):
+    if isinstance(client, BackendAdapter):
         raise TypeError(f"cannot treat {client.name!r} backend as a Temporal client")
     return TemporalBackend(client)
 
