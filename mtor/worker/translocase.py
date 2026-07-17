@@ -2057,5 +2057,10 @@ async def main() -> None:
             await stop_task
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Synchronously adapt the async worker for console-script entry points."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
