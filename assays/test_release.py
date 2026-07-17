@@ -2,6 +2,7 @@
 
 Spec: ~/epigenome/chromatin/loci/plans/mtor-pypi-release-workflow.md
 """
+
 from __future__ import annotations
 
 import io
@@ -61,7 +62,9 @@ def test_release_refuses_dirty_repo(tmp_path: Path, monkeypatch):
     def fake_run(args: list[str], **kwargs):
         calls.append(args)
         if args == ["git", "status", "--porcelain"]:
-            return subprocess.CompletedProcess(args, 0, stdout=" M mtor/cli.py\n", stderr="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout=" M mtor/cli.py\n", stderr=""
+            )
         raise AssertionError(f"Unexpected subprocess call: {args}")
 
     monkeypatch.setattr("mtor.cli.subprocess.run", fake_run)
@@ -93,13 +96,17 @@ def test_release_bumps_version(tmp_path: Path, monkeypatch):
     assert data["result"]["version"] == "0.7.5"
     assert data["result"]["tag"] == "v0.7.5"
     assert data["result"]["next_step"] == "ganglion: uv tool upgrade mtor"
-    assert 'version = "0.7.5"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'VERSION = "0.7.5"' in (tmp_path / "mtor" / "__init__.py").read_text(encoding="utf-8")
+    assert 'version = "0.7.5"' in (tmp_path / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert 'VERSION = "0.7.5"' in (tmp_path / "mtor" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
     assert calls == [
         ["git", "status", "--porcelain"],
         ["git", "add", "pyproject.toml", "mtor/__init__.py"],
         ["git", "commit", "-m", "chore: release v0.7.5"],
-        ["git", "tag", "v0.7.5"],
+        ["git", "tag", "-a", "--no-sign", "v0.7.5", "-m", "release v0.7.5"],
         ["git", "push", "origin", "v0.7.5"],
         ["uv", "build"],
         ["uv", "publish"],
