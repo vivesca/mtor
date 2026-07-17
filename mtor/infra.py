@@ -820,17 +820,12 @@ def deploy(
     verify = None
     for attempt in range(1, merge_attempts + 1):
         merge = subprocess.run(
-            [
-                "ssh",
+            _host_command(
                 host,
-                "bash",
-                "-lc",
-                (
-                    f"set -e; cd {shlex.quote(remote_repo)}; "
-                    "git fetch origin main; "
-                    "git merge --ff-only origin/main"
-                ),
-            ],
+                f"set -e; cd {shlex.quote(remote_repo)}; "
+                "git fetch origin main; "
+                "git merge --ff-only origin/main",
+            ),
             capture_output=True,
             text=True,
             timeout=30,
@@ -843,17 +838,12 @@ def deploy(
                 error=f"merge failed: {merge.stderr.strip()[:200]}",
             )
         verify = subprocess.run(
-            [
-                "ssh",
+            _host_command(
                 host,
-                "bash",
-                "-lc",
-                (
-                    f"cd {shlex.quote(remote_repo)} && "
-                    "git merge-base --is-ancestor "
-                    f"{shlex.quote(deployed_sha)} HEAD"
-                ),
-            ],
+                f"cd {shlex.quote(remote_repo)} && "
+                "git merge-base --is-ancestor "
+                f"{shlex.quote(deployed_sha)} HEAD",
+            ),
             capture_output=True,
             text=True,
             timeout=10,
@@ -887,13 +877,10 @@ def deploy(
     # Step 4: source merges do not refresh generated console entry points.
     # Reconcile from the reviewed lock before touching the running service.
     sync = subprocess.run(
-        [
-            "ssh",
+        _host_command(
             host,
-            "bash",
-            "-lc",
             f"set -e; cd {shlex.quote(remote_repo)}; uv sync --frozen",
-        ],
+        ),
         capture_output=True,
         text=True,
         timeout=300,

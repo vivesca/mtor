@@ -774,10 +774,13 @@ class TestDeploy:
 
         assert result.healthy is True
         merge_cmd = next(
-            cmd for cmd in calls if cmd[:2] == ["ssh", "test-host"] and "bash" in cmd
+            cmd
+            for cmd in calls
+            if cmd[:2] == ["ssh", "test-host"] and "git fetch origin main" in cmd[-1]
         )
         assert "cd /home/vivesca/code/mtor" in merge_cmd[-1]
         assert "/Users/terry/code/mtor" not in merge_cmd[-1]
+        assert len(merge_cmd) == 3
 
     def test_deploy_fails_closed_on_worker_merge_error(self):
         """deploy does not report healthy when the worker merge fails."""
@@ -845,6 +848,21 @@ class TestDeploy:
             "origin",
             f"{DEPLOY_SHA}:refs/heads/main",
         ] in calls
+        checkout_commands = [
+            cmd
+            for cmd in calls
+            if cmd[:2] == ["ssh", "test-host"]
+            and any(
+                operation in cmd[-1]
+                for operation in (
+                    "git fetch origin main",
+                    "git merge-base --is-ancestor",
+                    "uv sync --frozen",
+                )
+            )
+        ]
+        assert len(checkout_commands) == 3
+        assert all(len(cmd) == 3 for cmd in checkout_commands)
 
     def test_deploy_fails_before_restart_when_worker_lacks_sha(self):
         """deploy never restarts a checkout that lacks the published commit."""
