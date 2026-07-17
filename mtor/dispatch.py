@@ -26,7 +26,11 @@ from mtor import (
     WORKFLOW_TYPE,
 )
 from mtor.client import _get_client
-from mtor.infra import _count_active_ribosomes, restart_worker
+from mtor.infra import (
+    _count_active_ribosomes,
+    probe_worker_admission,
+    restart_worker,
+)
 from mtor.dedup import (
     DEFAULT_STATE_PATH,
     DEFAULT_WINDOW_S,
@@ -831,6 +835,61 @@ def _worker_load_plan(count_running: Callable[[], int] | None = None) -> dict:
     return {"running": running, "ok": True, "detail": detail}
 
 
+def _require_worker_admission(cmd: str) -> dict[str, object]:
+    """Fail closed unless the authoritative worker can accept new work."""
+    admission = probe_worker_admission(WORKER_HOST)
+    if admission.get("ok"):
+        return admission
+
+    state = str(admission.get("state", "unknown"))
+    status_command = (
+        f"ssh {WORKER_HOST} 'systemctl --user show mtor-worker.service "
+        "--property=ActiveState,SubState,MainPID --no-pager'"
+    )
+    if state == "deactivating":
+        code = "WORKER_DRAINING"
+        message = (
+            f"Worker is draining and cannot accept new work: {admission['detail']}"
+        )
+        fix = "Wait for the worker drain to finish, then retry dispatch."
+        actions = [_action(status_command, "Check whether the drain has finished")]
+    elif state == "inactive":
+        code = "WORKER_INACTIVE"
+        message = (
+            f"Worker is inactive and cannot accept new work: {admission['detail']}"
+        )
+        start_command = (
+            f"ssh {WORKER_HOST} 'systemctl --user start mtor-worker.service'"
+        )
+        fix = f"Start the worker: {start_command}"
+        actions = [
+            _action(start_command, "Start the worker"),
+            _action(status_command, "Verify the worker is active"),
+        ]
+    elif state == "failed":
+        code = "WORKER_FAILED"
+        message = f"Worker service has failed: {admission['detail']}"
+        recover_command = (
+            f"ssh {WORKER_HOST} 'systemctl --user reset-failed "
+            "mtor-worker.service && systemctl --user start mtor-worker.service'"
+        )
+        fix = f"Reset and start the worker: {recover_command}"
+        actions = [
+            _action(recover_command, "Reset and start the worker"),
+            _action(status_command, "Verify the worker is active"),
+        ]
+    else:
+        code = "WORKER_STATE_UNKNOWN"
+        message = f"Worker admission state is unknown: {admission['detail']}"
+        fix = "Run mtor doctor and inspect the worker service before retrying."
+        actions = [
+            _action("mtor doctor", "Diagnose worker health"),
+            _action(status_command, "Inspect the worker service state"),
+        ]
+
+    sys.exit(_err(cmd, message, code, fix, actions, exit_code=1))
+
+
 def _search_attr_preview(
     *,
     provider: str,
@@ -1211,6 +1270,10 @@ def _dispatch_prompt(
         if parsed_repo is not None:
             preflight_repo = str(parsed_repo)
 
+    # Temporal accepts workflows even when no worker is polling. Gate before
+    # any SHA auto-deploy so a draining or stopped worker is not mutated.
+    _require_worker_admission(cmd)
+
     # SHA gate — auto-deploy if worker is out of sync
     # Scout/research are read-only — worker code version doesn't matter
     if spec_mode not in ("scout", "research"):
@@ -1323,7 +1386,8 @@ def _dispatch_prompt(
         if spec_path:
             search_attrs.append(
                 SearchAttributePair(
-                    SearchAttributeKey.for_keyword("mtor_spec"), str(spec_path)
+                    SearchAttributeKey.for_keyword("mtor_spec"),
+                    str(spec_path.expanduser().resolve()),
                 )
             )
 
@@ -1339,6 +1403,8 @@ def _dispatch_prompt(
             )
             return handle.id
 
+        # Close the race with a worker drain that began during preflight.
+        _require_worker_admission(cmd)
         started_id = asyncio.run(_start())
 
         # Update spec file frontmatter if --spec was provided
@@ -1523,11 +1589,11 @@ def spec_gate_path_warnings(spec_path: Path) -> list[str]:
 
     from mtor.worker.chaperone_review import (
         _normalize_task_path,
-        _task_file_paths,
+        _requested_task_paths,
     )
 
     warnings: list[str] = []
-    for path in sorted(_task_file_paths(prompt)):
+    for path in sorted(_requested_task_paths(prompt)):
         norm = _normalize_task_path(path)
         if not norm:
             continue
@@ -1540,10 +1606,8 @@ def spec_gate_path_warnings(spec_path: Path) -> list[str]:
         )
         if not in_scope:
             warnings.append(
-                f"spec mentions '{norm}' outside scope — if it will not appear "
-                "in the diff, the verdict gate flags target_file_missing; "
-                "write the literal as a string concatenation in the spec body "
-                "(see memory mark mtor-gate-safe-spec-authoring)"
+                f"spec requests mutation of '{norm}' outside scope — either add "
+                "it to scope or remove the mutation instruction"
             )
     return warnings
 

@@ -18,6 +18,7 @@ from porin import action as _action
 from mtor import COACHING_PATH, TASK_QUEUE, TEMPORAL_HOST, VERSION, WORKER_HOST
 from mtor.client import _get_client
 from mtor.envelope import _ok
+from mtor.infra import probe_worker_admission
 
 HEARTBEAT_DIR = "~/germline/loci/ribosome-heartbeats"
 HEARTBEAT_STALE_THRESHOLD = 120
@@ -35,6 +36,51 @@ _OPENCODE_EXPECTED_SMALL_MODEL = "zhipuai-coding-plan/glm-4.5-air"
 PROVIDER_MODELS = {
     "zhipu": "glm-5.2",
 }
+
+
+def _worker_remediation(admission: dict, host: str) -> dict[str, object]:
+    """Return state-specific recovery guidance for a failed health report."""
+    state = admission.get("state", "unknown")
+    status_command = (
+        f"ssh {host} 'systemctl --user show mtor-worker.service "
+        "--property=ActiveState,SubState,MainPID --no-pager'"
+    )
+    if state == "deactivating":
+        return {
+            "fix": "Wait for the worker drain to finish before retrying; do not queue another restart.",
+            "next_actions": [
+                _action(status_command, "Check whether the drain has finished")
+            ],
+        }
+    if state == "inactive":
+        command = f"ssh {host} 'systemctl --user start mtor-worker.service'"
+        return {
+            "fix": f"Start mtor-worker: {command}",
+            "next_actions": [_action(command, "Start the worker")],
+        }
+    if state == "failed":
+        command = (
+            f"ssh {host} 'systemctl --user reset-failed mtor-worker.service "
+            "&& systemctl --user start mtor-worker.service'"
+        )
+        return {
+            "fix": f"Reset the failed unit and start mtor-worker: {command}",
+            "next_actions": [_action(command, "Reset and start the worker")],
+        }
+    if state == "active":
+        return {
+            "fix": "Review the failed health checks and rerun mtor doctor.",
+            "next_actions": [
+                _action("mtor rictor check", "Inspect infrastructure health")
+            ],
+        }
+    return {
+        "fix": "Diagnose the unknown worker state before retrying.",
+        "next_actions": [
+            _action("mtor rictor check", "Diagnose worker infrastructure"),
+            _action(status_command, "Inspect the worker service state"),
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -668,28 +714,12 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
         }
     )
 
-    # Check 3: Worker alive (query for recent RUNNING workflows as a proxy)
-    worker_ok = False
-    worker_detail = "Skipped (Temporal unreachable)"
-    if temporal_ok and client is not None:
-        try:
-            import asyncio
-
-            async def _probe():
-                count = 0
-                async for _ in client.list_workflows():
-                    count += 1
-                    if count >= 1:
-                        break
-                return count
-
-            asyncio.run(_probe())
-            worker_ok = True
-            worker_detail = "Worker service responsive (list_workflows succeeded)"
-        except Exception as probe_exc:
-            worker_detail = f"Worker probe failed: {probe_exc}"
-            all_ok = False
-    else:
+    # Check 3: Worker admission. Temporal visibility belongs to the server and
+    # remains reachable while its worker is draining, so inspect systemd.
+    worker_admission = probe_worker_admission(WORKER_HOST)
+    worker_ok = bool(worker_admission.get("ok"))
+    worker_detail = str(worker_admission.get("detail", "Worker state unavailable"))
+    if not worker_ok:
         all_ok = False
 
     checks.append(
@@ -761,6 +791,7 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
         "temporal_reachable": temporal_ok,
         "temporal_host": TEMPORAL_HOST,
         "worker_alive": worker_ok,
+        "worker_admission": worker_admission,
         "task_queue": TASK_QUEUE,
         "checks": checks,
         "rictor_checks": result_rictor_checks,
@@ -1084,6 +1115,7 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
     if all_ok:
         _ok(cmd, result, [], version=VERSION)
     else:
+        remediation = _worker_remediation(worker_admission, WORKER_HOST)
         payload = {
             "ok": False,
             "command": cmd,
@@ -1091,18 +1123,9 @@ def doctor(*, reconcile: bool = False, probe_opencode: bool = False) -> None:
                 "message": "One or more health checks failed",
                 "code": "HEALTH_CHECK_FAILED",
             },
-            "fix": f"Start mtor worker: ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
+            "fix": remediation["fix"],
             "result": result,
-            "next_actions": [
-                _action(
-                    f"ssh {WORKER_HOST} 'systemctl --user status mtor-worker'",
-                    "Check worker service status",
-                ),
-                _action(
-                    f"ssh {WORKER_HOST} 'systemctl --user start mtor-worker'",
-                    "Start the worker",
-                ),
-            ],
+            "next_actions": remediation["next_actions"],
         }
         sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()

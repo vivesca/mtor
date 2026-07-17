@@ -698,7 +698,7 @@ tree.add_command(
             "name": "--dir",
             "type": "string",
             "required": False,
-            "default": "~/epigenome/chromatin/loci/plans/",
+            "default": "~/chromatin/loci/plans/",
             "description": "Directory containing spec .md files",
         },
         {

@@ -495,7 +495,93 @@ def test_doctor_env_enables_opencode_runtime_probe():
         patch("sys.stderr.write"),
         patch("sys.stdout.write"),
     ):
-
         doctor()
 
     runtime_probe.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("state", "fix_fragment", "action_fragment"),
+    [
+        ("deactivating", "drain", "systemctl --user show"),
+        ("inactive", "start mtor-worker", "systemctl --user start"),
+        ("failed", "reset-failed", "systemctl --user reset-failed"),
+        ("unknown", "diagnose", "mtor rictor check"),
+    ],
+)
+def test_worker_remediation_is_state_specific(state, fix_fragment, action_fragment):
+    from mtor.doctor import _worker_remediation
+
+    admission = {
+        "ok": False,
+        "state": state,
+        "active_state": state,
+        "sub_state": "unknown",
+        "main_pid": 0,
+        "detail": f"worker state is {state}",
+    }
+
+    remediation = _worker_remediation(admission, "test-worker")
+
+    assert fix_fragment in remediation["fix"].lower()
+    assert any(
+        action_fragment in action["command"] for action in remediation["next_actions"]
+    )
+
+
+def test_doctor_uses_worker_admission_instead_of_temporal_visibility():
+    from mtor.doctor import doctor
+    from mtor.infra import HealthReport
+
+    client = MagicMock()
+    client.list_workflows = MagicMock(
+        side_effect=AssertionError("Temporal visibility is not worker liveness")
+    )
+    admission = {
+        "ok": False,
+        "state": "deactivating",
+        "active_state": "deactivating",
+        "sub_state": "stop-sigterm",
+        "main_pid": 123,
+        "detail": "mtor-worker.service is deactivating/stop-sigterm",
+    }
+
+    with (
+        patch("mtor.doctor._get_client", return_value=(client, None)),
+        patch("mtor.doctor.probe_worker_admission", return_value=admission),
+        patch("mtor.doctor.COACHING_PATH", None),
+        patch("mtor.doctor.WORKER_HOST", "test-worker"),
+        patch(
+            "mtor.doctor._check_coding_plan_lane",
+            return_value={"name": "coding_plan_lane", "ok": True, "detail": "ok"},
+        ),
+        patch(
+            "mtor.doctor._check_opencode_config_file",
+            return_value={"name": "opencode_config_local", "ok": True, "detail": "ok"},
+        ),
+        patch(
+            "mtor.doctor._check_worker_opencode_config",
+            return_value={"name": "opencode_config_worker", "ok": True, "detail": "ok"},
+        ),
+        patch("mtor.doctor._get_provider_module", return_value=None),
+        patch("mtor.infra.check_health", return_value=HealthReport(ok=True, checks=[])),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        ),
+        patch("sys.stderr.write"),
+        patch("sys.stdout.write") as stdout_write,
+        pytest.raises(SystemExit) as exc,
+    ):
+        doctor()
+
+    assert exc.value.code == 3
+    payload = json.loads(stdout_write.call_args.args[0])
+    assert payload["result"]["worker_alive"] is False
+    worker_check = next(
+        check
+        for check in payload["result"]["checks"]
+        if check["name"] == "worker_alive"
+    )
+    assert worker_check["detail"] == admission["detail"]
+    assert "drain" in payload["fix"].lower()

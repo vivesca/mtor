@@ -12,7 +12,7 @@ from mtor.rptor import CANONICAL_STATUSES
 
 VALID_STATUSES = CANONICAL_STATUSES
 REQUIRED_FIELDS = {"status"}
-DEFAULT_SPEC_DIR = Path("~/epigenome/chromatin/loci/plans/")
+DEFAULT_SPEC_DIR = Path("~/chromatin/loci/plans/")
 
 
 def _frontmatter_keys(text: str) -> set[str]:
@@ -54,7 +54,9 @@ def _validate_one_spec(spec: dict[str, Any], spec_names: set[str]) -> list[str]:
         status = str(spec.get("status", ""))
         if status not in VALID_STATUSES:
             allowed = ", ".join(sorted(VALID_STATUSES))
-            errors.append(f"{path}: invalid status '{status}' (expected one of: {allowed})")
+            errors.append(
+                f"{path}: invalid status '{status}' (expected one of: {allowed})"
+            )
 
     if str(spec.get("status", "")) in {"ready", "dispatched"}:
         for dep in _normalize_list(spec.get("depends_on", [])):
@@ -108,13 +110,14 @@ def update_spec_status(
     status: str,
     workflow_id: str | None = None,
     verdict: str | None = None,
+    audit_reason: str | None = None,
     clear_workflow_id: bool = False,
 ) -> None:
     """Parse YAML frontmatter via regex, update status and metadata fields.
 
     - Split on ``---`` delimiters (first two occurrences)
     - Replace ``status:`` line value
-    - Append or replace ``workflow_id``, ``dispatched_at``, ``completed_at``, ``verdict``
+    - Append or replace lifecycle metadata fields
     - Expand ``~`` via ``Path.expanduser()``
     - If file missing or no frontmatter: warn to stderr, don't raise
     - Preserve markdown body below frontmatter unchanged
@@ -164,7 +167,7 @@ def update_spec_status(
         frontmatter = _set_field(frontmatter, "dispatched_at", now_iso)
 
     # Set completed_at
-    if status in ("completed", "done", "approved", "rejected"):
+    if status in ("completed", "done", "approved", "rejected", "failed"):
         now_iso = datetime.now(UTC).isoformat()
         frontmatter = _set_field(frontmatter, "completed_at", now_iso)
 
@@ -182,6 +185,9 @@ def update_spec_status(
     # Set verdict
     if verdict is not None:
         frontmatter = _set_field(frontmatter, "verdict", verdict)
+
+    if audit_reason is not None:
+        frontmatter = _set_field(frontmatter, "audit_reason", audit_reason)
 
     # Reassemble: preserve body exactly (including leading newline if present)
     new_text = f"---\n{frontmatter}\n---\n{body}"
@@ -259,7 +265,9 @@ depends_on: []
     # Always include exclude: label + defaults (merge user values)
     default_excludes = ["genome.md", "uv.lock"]
     user_excludes = list(exclude) if exclude else []
-    all_excludes = user_excludes + [d for d in default_excludes if d not in user_excludes]
+    all_excludes = user_excludes + [
+        d for d in default_excludes if d not in user_excludes
+    ]
     lines.append("exclude:")
     for item in all_excludes:
         lines.append(f"  - {item}")

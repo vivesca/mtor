@@ -9,7 +9,7 @@ from typing import Any
 
 from mtor.client import _get_client
 from mtor.spec import update_spec_status
-from mtor.rptor import scan_specs
+from mtor.rptor import parse_spec, scan_specs
 
 ACCEPTED_VERDICTS = {"accepted", "approved", "approved_with_flags", "early_exit_clean"}
 
@@ -189,6 +189,7 @@ def reconcile_spec(
         workflow_id = str(spec.get("workflow_id", "") or "")
         if not workflow_id:
             return result
+        verdict = ""
 
         latest = workflow_description
         if latest is None:
@@ -242,7 +243,12 @@ def reconcile_spec(
             if new_status == "ready":
                 update_spec_status(spec_path, new_status, clear_workflow_id=True)
             else:
-                update_spec_status(spec_path, new_status)
+                update_spec_status(
+                    spec_path,
+                    new_status,
+                    verdict=verdict or None,
+                    audit_reason=result["reason"] if new_status == "failed" else None,
+                )
 
     elif status == "done":
         # Check if "Files to edit" section exists in body
@@ -296,6 +302,69 @@ def reconcile_spec(
             pass
 
     return result
+
+
+def reconcile_workflow_specs(
+    executions: list[Any],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Reconcile the exact spec paths carried by workflow search attributes.
+
+    The path recorded in ``mtor_spec`` is authoritative. This avoids scanning a
+    historical default directory and also supports specs dispatched from an
+    explicit directory. A stale workflow cannot overwrite a newer dispatch of
+    the same spec because its workflow ID must still match the frontmatter.
+    """
+    fixed: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    correct = 0
+    seen: set[Path] = set()
+
+    for execution in executions:
+        workflow_id = str(getattr(execution, "id", "") or "")
+        raw_path = _search_attr_value(execution, "mtor_spec")
+        if not workflow_id or not raw_path:
+            continue
+        spec_path = Path(raw_path).expanduser()
+        if spec_path in seen:
+            continue
+        seen.add(spec_path)
+        if not spec_path.is_file():
+            skipped.append({"workflow_id": workflow_id, "reason": "spec_not_found"})
+            continue
+        try:
+            spec = parse_spec(spec_path)
+        except (OSError, ValueError):
+            skipped.append({"workflow_id": workflow_id, "reason": "spec_invalid"})
+            continue
+        if str(spec.get("workflow_id", "") or "") != workflow_id:
+            skipped.append({"workflow_id": workflow_id, "reason": "workflow_mismatch"})
+            continue
+
+        result = reconcile_spec(
+            spec,
+            dry_run=dry_run,
+            workflow_description=execution,
+        )
+        if result["changed"]:
+            fixed.append(
+                {
+                    "name": result["name"],
+                    "was": result["was"],
+                    "now": result["now"],
+                    "reason": result["reason"],
+                }
+            )
+        else:
+            correct += 1
+
+    return {
+        "scanned": len(seen),
+        "fixed": fixed,
+        "correct": correct,
+        "skipped": skipped,
+        "dry_run": dry_run,
+    }
 
 
 def reconcile_all(

@@ -57,7 +57,6 @@ _ERROR_PATTERNS = _re.compile(
 )
 
 
-
 def _is_blocking_review_flag(flag: str) -> bool:
     """Return True for flags unsafe enough to block an automatic merge."""
     if flag == "no_commit_on_success":
@@ -99,11 +98,20 @@ _TEST_PASSED = _re.compile(
     _re.IGNORECASE,
 )
 _REFLEX_BAN_PATTERNS: tuple[tuple[str, _re.Pattern[str]], ...] = (
-    ("inline_bypass", _re.compile(r"#\s*(?:noqa|type:\s*ignore|pragma:\s*no\s*cover)\b")),
+    (
+        "inline_bypass",
+        _re.compile(r"#\s*(?:noqa|type:\s*ignore|pragma:\s*no\s*cover)\b"),
+    ),
     ("todo_marker", _re.compile(r"#\s*(?:TODO|FIXME)\b", _re.IGNORECASE)),
-    ("typing_optional", _re.compile(r"\b(?:from\s+typing\s+import\s+Optional|Optional\[)")),
+    (
+        "typing_optional",
+        _re.compile(r"\b(?:from\s+typing\s+import\s+Optional|Optional\[)"),
+    ),
     ("os_path_join", _re.compile(r"\bos\.path\.join\(")),
-    ("per_class_logger", _re.compile(r"self\.logger\s*=\s*logging\.getLogger\(__name__\)")),
+    (
+        "per_class_logger",
+        _re.compile(r"self\.logger\s*=\s*logging\.getLogger\(__name__\)"),
+    ),
     # Promoted 2026-06-06 from the (formerly non-blocking) narration warning to a
     # diff-scoped blocking gate. A hardcoded macOS/linux home path in *committed*
     # code breaks portability across hosts (genome: "Never hardcode paths").
@@ -127,7 +135,9 @@ def _changed_paths_from_stat(stat_text: str) -> list[str]:
 
 def _task_file_paths(task: str) -> set[str]:
     """Extract likely file paths mentioned in task text."""
-    paths = set(_re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)(?!\w|\.\w)", task))
+    paths = set(
+        _re.findall(r"[\w./~-]+\.(?:py|sh|toml|md|yaml|yml|json)(?!\w|\.\w)", task)
+    )
     return {path for path in paths if not path.startswith("http") and len(path) > 4}
 
 
@@ -153,6 +163,63 @@ def _negated_task_paths(task: str) -> set[str]:
     for span in _NEGATION_SPAN.findall(task):
         negated |= _task_file_paths(span)
     return negated
+
+
+_IGNORED_TASK_LINE_PREFIXES = (
+    "run:",
+    "verify test functions:",
+    "canonical repository:",
+    "do not modify:",
+)
+_MUTATION_INTENT = _re.compile(
+    r"\b(?:add(?:ing)?(?:\s+to)?|chang(?:e|ing)|creat(?:e|ing)|edit(?:ing)?|"
+    r"fix(?:ing)?|implement(?:ing)?|modif(?:y|ying)|patch(?:ing)?|rewrite|"
+    r"rewriting|touch(?:ing)?|updat(?:e|ing)|writ(?:e|ing))\b",
+    _re.IGNORECASE,
+)
+_READ_ONLY_INTENT = _re.compile(
+    r"\b(?:compare|inspect|read|reference|review|run|test|verify)\b",
+    _re.IGNORECASE,
+)
+_PASSIVE_MUTATION_INTENT = _re.compile(
+    r"^.{0,80}\b(?:must|needs?\s+to|should|will)?\s*(?:be\s+)?"
+    r"(?:changed|created|edited|fixed|implemented|modified|patched|rewritten|"
+    r"touched|updated|written)\b",
+    _re.IGNORECASE,
+)
+
+
+def _requested_task_paths(task: str) -> set[str]:
+    """Return paths that the task positively asks the worker to mutate.
+
+    Paths in verifier commands, repository context, and exclusion clauses are
+    evidence or constraints rather than requested artifacts. Mutation intent
+    is associated with each path locally so a verb elsewhere in the prompt
+    cannot turn every mentioned file into a required diff target.
+    """
+    requested: set[str] = set()
+    for raw_line in task.splitlines():
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line or line.lower().startswith(_IGNORED_TASK_LINE_PREFIXES):
+            continue
+
+        positive_line = _NEGATION_SPAN.sub("", line)
+        for path in _task_file_paths(positive_line):
+            match = _re.search(_re.escape(path), positive_line)
+            if match is None:
+                continue
+            before = positive_line[: match.start()]
+            after = positive_line[match.end() :]
+            mutation_matches = list(_MUTATION_INTENT.finditer(before))
+            read_only_matches = list(_READ_ONLY_INTENT.finditer(before))
+            last_mutation = mutation_matches[-1].start() if mutation_matches else -1
+            last_read_only = read_only_matches[-1].start() if read_only_matches else -1
+            mutation_precedes_path = (
+                last_mutation > last_read_only and match.start() - last_mutation <= 180
+            )
+            if mutation_precedes_path or _PASSIVE_MUTATION_INTENT.search(after):
+                requested.add(path)
+    return requested
 
 
 def _detected_test_commands(output: str) -> list[str]:
@@ -200,7 +267,9 @@ def _dupe_future_in_diff(patch_text: str) -> bool:
         if line.startswith("+") and not line.startswith("+++"):
             match = _FUTURE_IMPORT.search(line[1:])
             if match:
-                per_file[current].extend(name.strip() for name in match.group(1).split(","))
+                per_file[current].extend(
+                    name.strip() for name in match.group(1).split(",")
+                )
     return any(len(names) != len(set(names)) for names in per_file.values())
 
 
@@ -212,7 +281,10 @@ def _reflex_ban_flags(patch_text: str) -> list[str]:
         if pattern.search(added):
             flags.append(f"reflex_ban:{name}")
 
-    if _re.search(r"except\s+Exception\s*:\s*\n\s*(?:pass|(?:self\.)?logger\.|logging\.|print\()", added):
+    if _re.search(
+        r"except\s+Exception\s*:\s*\n\s*(?:pass|(?:self\.)?logger\.|logging\.|print\()",
+        added,
+    ):
         flags.append("reflex_ban:broad_exception_swallow")
 
     # Per-file duplicate __future__ import in the committed diff (blocking).
@@ -271,7 +343,9 @@ def _build_completion_dossier(
         "workflow_id": workflow_id,
         "repo_root": result.get("repo_root", ""),
         "base_sha": result.get("base_sha", ""),
-        "requested_provider": result.get("requested_provider", result.get("provider", "")),
+        "requested_provider": result.get(
+            "requested_provider", result.get("provider", "")
+        ),
         "resolved_provider": result.get("provider", ""),
         "attempted_providers": result.get("attempted_providers", []),
         "mode": result.get("mode", "build"),
@@ -310,7 +384,6 @@ def _build_completion_dossier(
     }
 
 
-
 @activity.defn
 async def chaperone(result: dict) -> dict:
     """Review a ribosome task result for quality signals.
@@ -333,11 +406,17 @@ async def chaperone(result: dict) -> dict:
     # actual committed diff (added lines). Either one carrying a destructive
     # shell command is a hard reject downstream — see the verdict guard below.
     _post_diff_obj = result.get("post_diff", {})
-    _scan_patch = _post_diff_obj.get("patch", "") if isinstance(_post_diff_obj, dict) else ""
+    _scan_patch = (
+        _post_diff_obj.get("patch", "") if isinstance(_post_diff_obj, dict) else ""
+    )
     destruction_hits = _DESTRUCTION_PATTERNS.findall(combined)
-    destruction_hits += _DESTRUCTION_SHELL_PATTERNS.findall(_added_patch_lines(_scan_patch))
+    destruction_hits += _DESTRUCTION_SHELL_PATTERNS.findall(
+        _added_patch_lines(_scan_patch)
+    )
     if destruction_hits:
-        flags.append(f"destruction: {', '.join(list(dict.fromkeys(destruction_hits))[:3])}")
+        flags.append(
+            f"destruction: {', '.join(list(dict.fromkeys(destruction_hits))[:3])}"
+        )
 
     error_hits = _ERROR_PATTERNS.findall(combined)
     if error_hits:
@@ -384,7 +463,11 @@ async def chaperone(result: dict) -> dict:
     if post_stat_text:
         for line in post_stat_text.splitlines():
             fname = line.strip().split("|")[0].strip() if "|" in line else line.strip()
-            if fname.startswith("assays/") and fname.count("/") > 1 and "test_" in fname:
+            if (
+                fname.startswith("assays/")
+                and fname.count("/") > 1
+                and "test_" in fname
+            ):
                 flags.append(f"nested_test_file: {fname}")
 
     # Primary diff evidence: commits list, patch content, or stat — any of these
@@ -411,20 +494,15 @@ async def chaperone(result: dict) -> dict:
 
     changed_paths = _changed_paths_from_stat(post_stat_text)
 
-    # Extract ALL file paths mentioned in the task and check if they appear in the diff.
-    # Catches "task mentions dispatch.py but diff only touches cli.py" mismatches.
-    task_files = _task_file_paths(task)
-    negated_task_paths = {
-        _normalize_task_path(path) for path in _negated_task_paths(task)
-    }
+    # Extract only paths the task positively asks the worker to mutate. Literal
+    # verifier paths and exclusions must not become phantom artifact targets.
+    task_files = _requested_task_paths(task)
     missing_requested_paths: list[str] = []
     if task_files and exit_code == 0 and post_stat_text:
         diff_files = set(changed_paths)
 
         for task_file in task_files:
             norm = _normalize_task_path(task_file)
-            if norm in negated_task_paths:
-                continue
             if (
                 norm
                 # Path-segment match, not unbounded substring: requested
@@ -432,13 +510,7 @@ async def chaperone(result: dict) -> dict:
                 # `legacy_api.py` (review-gate-4). Either the diff path equals
                 # the requested path, or the requested path is a trailing path
                 # segment of it (preceded by `/`).
-                and not any(
-                    df == norm or df.endswith("/" + norm) for df in diff_files
-                )
-                and any(
-                    kw in task.lower()
-                    for kw in ["modify", "edit", "change", "add to", "update", "fix", "create"]
-                )
+                and not any(df == norm or df.endswith("/" + norm) for df in diff_files)
             ):
                 missing_requested_paths.append(norm)
                 flags.append(f"target_file_missing: {norm}")
@@ -447,7 +519,9 @@ async def chaperone(result: dict) -> dict:
     post_diff = result.get("post_diff", {})
     pre_numstat = pre_diff.get("numstat", "") if isinstance(pre_diff, dict) else ""
     post_numstat = post_diff.get("numstat", "") if isinstance(post_diff, dict) else ""
-    post_stat = post_diff.get("stat", "") if isinstance(post_diff, dict) else str(post_diff)
+    post_stat = (
+        post_diff.get("stat", "") if isinstance(post_diff, dict) else str(post_diff)
+    )
 
     if post_numstat and post_numstat != pre_numstat:
         # Compute overall net additions from numstat to detect false-positive
@@ -483,17 +557,22 @@ async def chaperone(result: dict) -> dict:
                     pass
 
     # Determine verdict: incomplete when work was done but process failed
+    result_mode = result.get("mode", "build")
+    read_only_mode = result_mode in ("scout", "research")
     if exit_code != 0 and commit_count > 0:
         verdict = "incomplete"
         approved = False
     else:
-        result_mode = result.get("mode", "build")
-        if result_mode == "scout":
-            # Scout tasks don't produce commits — different approval criteria
-            approved = exit_code == 0 and not any(f.startswith("destruction") for f in flags)
-            # Don't flag no_commit_on_success or empty_stdout_on_success for scout
+        if read_only_mode:
+            # Read-only tasks don't produce commits — different approval criteria.
+            approved = exit_code == 0 and not any(
+                f.startswith("destruction") for f in flags
+            )
+            # Do not require artifact evidence from scout/research work.
             flags = [
-                f for f in flags if f not in ("no_commit_on_success", "empty_stdout_on_success")
+                f
+                for f in flags
+                if f not in ("no_commit_on_success", "empty_stdout_on_success")
             ]
         else:
             approved = exit_code == 0 and not any(
@@ -521,7 +600,7 @@ async def chaperone(result: dict) -> dict:
     # Major deductions
     if exit_code != 0:
         score -= 40
-    if not post_stat_text.strip():
+    if not post_stat_text.strip() and not read_only_mode:
         score -= 30  # no changes
     if any(f.startswith("destruction") for f in flags):
         score -= 50
@@ -537,21 +616,35 @@ async def chaperone(result: dict) -> dict:
         score -= 10
 
     # Bonuses
-    if commit_count > 0 and exit_code == 0:
+    if commit_count > 0 and exit_code == 0 and not read_only_mode:
         score += 10  # actually committed
     if any("test" in f.lower() for f in post_stat_text.splitlines()):
         score += 5  # includes test files
 
     # Fallback diff bonus: main..HEAD was empty but base_sha..HEAD captured work
-    if isinstance(post_diff, dict) and post_diff.get("fallback") and post_stat_text.strip():
+    if (
+        isinstance(post_diff, dict)
+        and post_diff.get("fallback")
+        and post_stat_text.strip()
+    ):
         score += 10
 
     score = max(0, min(100, score))
+    if not read_only_mode and not has_primary_evidence:
+        score = 0
+    elif verdict == "rejected":
+        score = min(score, 40)
+    elif verdict == "incomplete":
+        score = min(score, 60)
 
     requeue_prompt = ""
     if verdict in ("rejected", "incomplete") and any("thin_output" in f for f in flags):
-        requeue_prompt = task[:200] + " -- Be thorough. Read files before editing. Show your work."
-    elif verdict in ("rejected", "incomplete") and any("file_shrunk" in f for f in flags):
+        requeue_prompt = (
+            task[:200] + " -- Be thorough. Read files before editing. Show your work."
+        )
+    elif verdict in ("rejected", "incomplete") and any(
+        "file_shrunk" in f for f in flags
+    ):
         requeue_prompt = (
             task[:200]
             + " -- IMPORTANT: Read the entire file before modifying. Preserve ALL existing content."
@@ -562,7 +655,8 @@ async def chaperone(result: dict) -> dict:
     if detected_commands:
         verification_status = "passed" if _TEST_PASSED.search(combined) else "detected"
     blocking_flags = [
-        flag for flag in flags
+        flag
+        for flag in flags
         if flag.startswith("exit_code=") or _is_blocking_review_flag(flag)
     ]
     warnings = [flag for flag in flags if flag not in blocking_flags]
@@ -593,7 +687,9 @@ async def chaperone(result: dict) -> dict:
             "detected_commands": detected_commands,
         },
         "scope": {
-            "requested_paths": sorted(_normalize_task_path(path) for path in task_files),
+            "requested_paths": sorted(
+                _normalize_task_path(path) for path in task_files
+            ),
             "changed_paths": changed_paths,
             "missing_requested_paths": sorted(set(missing_requested_paths)),
         },

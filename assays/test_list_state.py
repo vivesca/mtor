@@ -122,7 +122,9 @@ class TestListExecutionState:
 
     def test_completed_workflows_unchanged(self):
         """COMPLETED workflows don't get execution_state field."""
-        client = _client_for(_execution("wf-complete", "COMPLETED"))
+        execution = _execution("wf-complete", "COMPLETED")
+        execution.search_attributes = {"mtor_verdict": ["rejected"]}
+        client = _client_for(execution)
 
         with patch("mtor.cli._get_client", return_value=(client, None)), \
              patch("mtor.cli.load_triage", return_value={}):
@@ -131,6 +133,7 @@ class TestListExecutionState:
         assert exit_code == 0
         workflow = data["result"]["workflows"][0]
         assert "execution_state" not in workflow
+        assert workflow["operator_state"] == "failed_review"
 
     def test_terminated_workflows_unchanged(self):
         """TERMINATED workflows don't get execution_state field."""
@@ -143,3 +146,4 @@ class TestListExecutionState:
         assert exit_code == 0
         workflow = data["result"]["workflows"][0]
         assert "execution_state" not in workflow
+        assert workflow["operator_state"] == "terminated"

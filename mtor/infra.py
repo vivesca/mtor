@@ -56,6 +56,80 @@ def _parse_systemctl_show(output: str) -> dict[str, str]:
     return values
 
 
+def probe_worker_admission(worker_host: str | None = None) -> dict[str, object]:
+    """Return whether the authoritative worker service can accept new work.
+
+    Temporal remains reachable while its worker is stopping, so server
+    connectivity is not an admission signal. Fail closed unless systemd
+    reports the user-scoped unit as active/running with a positive MainPID.
+    """
+    host = worker_host or WORKER_HOST
+    command = (
+        "systemctl --user show mtor-worker.service "
+        "--property=ActiveState,SubState,MainPID --no-pager"
+    )
+    try:
+        result = subprocess.run(
+            _host_command(host, command),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {
+            "ok": False,
+            "state": "unknown",
+            "active_state": "unknown",
+            "sub_state": "unknown",
+            "main_pid": 0,
+            "detail": f"Worker service state unavailable: {exc}",
+        }
+
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "systemctl show failed").strip()
+        return {
+            "ok": False,
+            "state": "unknown",
+            "active_state": "unknown",
+            "sub_state": "unknown",
+            "main_pid": 0,
+            "detail": f"Worker service state unavailable: {error[:200]}",
+        }
+
+    unit = _parse_systemctl_show(result.stdout)
+    active_state = unit.get("ActiveState", "unknown")
+    sub_state = unit.get("SubState", "unknown")
+    try:
+        main_pid = int(unit.get("MainPID", "0"))
+    except ValueError:
+        main_pid = 0
+
+    ok = active_state == "active" and sub_state == "running" and main_pid > 0
+    if ok:
+        state = "active"
+    elif active_state in {"deactivating", "inactive", "failed"}:
+        state = active_state
+    else:
+        state = "unknown"
+
+    return {
+        "ok": ok,
+        "state": state,
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "main_pid": main_pid,
+        "detail": (
+            f"mtor-worker.service is active/running with MainPID={main_pid}"
+            if ok
+            else (
+                "mtor-worker.service is not accepting work "
+                f"(ActiveState={active_state}, SubState={sub_state}, "
+                f"MainPID={main_pid})"
+            )
+        ),
+    }
+
+
 def _split_marked_sections(output: str) -> dict[str, str]:
     """Split marker-delimited command output into named sections."""
     sections: dict[str, list[str]] = {}

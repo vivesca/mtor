@@ -1100,13 +1100,9 @@ def list_cmd(
         reconciliation: dict[str, Any] | None = None
         if executions:
             with contextlib.suppress(Exception):
-                from mtor.reconcile import reconcile_all
+                from mtor.reconcile import reconcile_workflow_specs
 
-                reconciliation = reconcile_all(
-                    DEFAULT_SPEC_DIR.expanduser(),
-                    client=client,
-                    workflow_descriptions={ex.id: ex for ex in executions},
-                )
+                reconciliation = reconcile_workflow_specs(executions)
 
         # Load triage state
         triage = load_triage()
@@ -1146,6 +1142,7 @@ def list_cmd(
             if verdict_filter and sa_verdict != verdict_filter:
                 continue
 
+            operator_verdict = sa_verdict
             is_reviewed = wf_id in reviewed_set
             is_archived = wf_id in archived_set
 
@@ -1173,6 +1170,14 @@ def list_cmd(
                 "provider": sa_provider,
                 "start_time": start_time,
                 "close_time": close_time,
+                "operator_state": _operator_state(
+                    status_val,
+                    {
+                        "verdict": (
+                            operator_verdict if operator_verdict != "\u2014" else None
+                        )
+                    },
+                ),
             }
             if wf_id in execution_states:
                 workflow_result.update(execution_states[wf_id])
@@ -1257,6 +1262,7 @@ def status(workflow_id: str, short: bool = False) -> None:
         result_payload: dict[str, Any] = {
             "workflow_id": workflow_id,
             "status": status_val,
+            "temporal_status": status_val,
             "start_time": start_time,
             "close_time": close_time,
         }
@@ -1293,6 +1299,7 @@ def status(workflow_id: str, short: bool = False) -> None:
         if workflow_id in vo:
             result_payload["verdict"] = vo[workflow_id]
         result_payload["operator_state"] = _operator_state(status_val, result_payload)
+        result_payload["outcome"] = result_payload["operator_state"]
 
         # RUNNING workflows: attach heartbeat-derived liveness from the worker log tail.
         # Fetch failures degrade to {"state": "unknown", ...} and never break status.
@@ -1341,7 +1348,7 @@ def status(workflow_id: str, short: bool = False) -> None:
             result_payload["failure_reason"] = failure_reason
 
         if short:
-            status_field = result_payload.get("status", "?")
+            status_field = str(result_payload.get("operator_state", "?")).upper()
             success_field = result_payload.get("success", "—")
             if success_field is None:
                 success_field = "—"
@@ -2080,7 +2087,8 @@ def logs(
             )
         )
 
-    # Try local file first (avoids SSH round-trip); fetch + cache if missing.
+    # Refresh remote logs into the local cache on every explicit read. Running
+    # logs grow, so an existing cache is a snapshot, not proof of freshness.
     # Remote worker paths such as /home/vivesca/... are not valid local cache
     # roots unless this CLI is itself running as that worker home.
     local_path = Path(log_path)
@@ -2089,15 +2097,38 @@ def logs(
         and str(local_path).startswith("/home/vivesca/")
         and Path.home() == Path("/home/vivesca")
     )
-    if (
+    remote_worker_path = (
         local_path.is_absolute()
         and str(local_path).startswith("/home/vivesca/")
         and not worker_path_is_local
-    ):
+    )
+    log_source = "local"
+    log_stale = False
+    if remote_worker_path:
         local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_path = local_path.with_name(f".{local_path.name}.{os.getpid()}.refresh")
+        refresh_path.unlink(missing_ok=True)
+        try:
+            refresh = subprocess.run(
+                ["scp", f"{WORKER_HOST}:{log_path}", str(refresh_path)],
+                capture_output=True,
+                timeout=15,
+            )
+            if refresh.returncode == 0 and refresh_path.is_file():
+                refresh_path.replace(local_path)
+                log_source = "remote_refresh"
+            else:
+                log_source = "cache_fallback"
+                log_stale = True
+        except (subprocess.TimeoutExpired, OSError):
+            log_source = "cache_fallback"
+            log_stale = True
+        finally:
+            refresh_path.unlink(missing_ok=True)
     elif not local_path.is_absolute():
         local_path = Path.home() / log_path.lstrip("~/")
-    if not local_path.exists():
+    if not local_path.exists() and not remote_worker_path:
         # Fetch single file from worker host into local mirror
         local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
         local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2115,6 +2146,8 @@ def logs(
                 "lines": log_lines,
                 "log_path": str(local_path),
                 "truncated": len(log_lines) == lines,
+                "source": log_source,
+                "stale": log_stale,
             },
             [
                 _action(f"mtor status {workflow_id}", "Check workflow status"),
@@ -2170,6 +2203,8 @@ def logs(
                 "lines": log_lines,
                 "log_path": log_path,
                 "truncated": len(log_lines) == lines,
+                "source": "remote_tail",
+                "stale": False,
             },
             [
                 _action(f"mtor status {workflow_id}", "Check workflow status"),
@@ -3694,9 +3729,7 @@ def init(
 @app.command(name="rptor")
 def rptor(
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
-        "~/epigenome/chromatin/loci/plans/"
-    ),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_SPEC_DIR,
     pending: Annotated[bool, Parameter(name=["--pending"])] = False,
     audit: Annotated[bool, Parameter(name=["--audit"])] = False,
     strict: Annotated[bool, Parameter(name=["--strict"])] = False,
@@ -3780,9 +3813,7 @@ def rptor(
 def rptor_done(
     name: str,
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
-        "~/epigenome/chromatin/loci/plans/"
-    ),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_SPEC_DIR,
 ) -> None:
     """Mark a spec as done."""
     cmd = f"mtor rptor done {name}"
@@ -4201,9 +4232,7 @@ def _select_dispatch_candidates(
 @app.command(name="dispatch-all")
 def dispatch_all(
     *,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
-        "~/epigenome/chromatin/loci/plans/"
-    ),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_SPEC_DIR,
     provider: Annotated[str, Parameter(name=["-p", "--provider"])] = "zhipu",
     dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
     limit: Annotated[int, Parameter(name=["--limit"])] = 0,
@@ -4395,9 +4424,7 @@ def setup_search_attrs() -> None:
 def reconcile(
     *,
     dry_run: Annotated[bool, Parameter(name=["--dry-run"])] = False,
-    dir: Annotated[Path, Parameter(name=["--dir"])] = Path(
-        "~/epigenome/chromatin/loci/plans/"
-    ),
+    dir: Annotated[Path, Parameter(name=["--dir"])] = DEFAULT_SPEC_DIR,
 ) -> None:
     """Reconcile spec status with reality — fix stale frontmatter based on Temporal and git.
 

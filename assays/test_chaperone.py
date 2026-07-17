@@ -38,7 +38,13 @@ def _make_result(
         "stderr": stderr,
         "task": task,
         "provider": provider,
-        "post_diff": post_diff or {"stat": " foo.py | 10 ++++\n", "numstat": "10\t0\tfoo.py", "commits": ["abc1234 feat: add foo"], "commit_count": 1},
+        "post_diff": post_diff
+        or {
+            "stat": " foo.py | 10 ++++\n",
+            "numstat": "10\t0\tfoo.py",
+            "commits": ["abc1234 feat: add foo"],
+            "commit_count": 1,
+        },
         "pre_diff": pre_diff or {"stat": "", "numstat": ""},
         "branch_name": branch_name,
         "cost_info": "",
@@ -99,7 +105,12 @@ class TestVerdictBasics:
         """exit!=0 but has commits = incomplete, not rejected."""
         result = _make_result(
             exit_code=1,
-            post_diff={"stat": " foo.py | 5 +++\n", "numstat": "5\t0\tfoo.py", "commits": ["abc feat"], "commit_count": 1},
+            post_diff={
+                "stat": " foo.py | 5 +++\n",
+                "numstat": "5\t0\tfoo.py",
+                "commits": ["abc feat"],
+                "commit_count": 1,
+            },
             branch_name="ribosome-123456",
         )
         review = _run(chaperone(result))
@@ -219,7 +230,9 @@ class TestPromotedChecks:
         assert "py2_except_syntax" in review["flags"]
 
     def test_dupe_future_import_flagged(self):
-        result = _make_result(stdout="from __future__ import annotations\nfrom __future__ import annotations")
+        result = _make_result(
+            stdout="from __future__ import annotations\nfrom __future__ import annotations"
+        )
         review = _run(chaperone(result))
         assert any("dupe_future_import" in f for f in review["flags"])
 
@@ -359,7 +372,12 @@ class TestFileShrinkage:
 
     def test_file_shrunk_flagged(self):
         result = _make_result(
-            post_diff={"stat": " foo.py | 50 +----\n", "numstat": "2\t48\tfoo.py", "commits": ["a fix"], "commit_count": 1},
+            post_diff={
+                "stat": " foo.py | 50 +----\n",
+                "numstat": "2\t48\tfoo.py",
+                "commits": ["a fix"],
+                "commit_count": 1,
+            },
             pre_diff={"stat": "", "numstat": "0\t0\tfoo.py"},
         )
         review = _run(chaperone(result))
@@ -369,7 +387,12 @@ class TestFileShrinkage:
 
     def test_pure_deletion_flagged(self):
         result = _make_result(
-            post_diff={"stat": " foo.py | 10 ------\n", "numstat": "0\t10\tfoo.py", "commits": ["a fix"], "commit_count": 1},
+            post_diff={
+                "stat": " foo.py | 10 ------\n",
+                "numstat": "0\t10\tfoo.py",
+                "commits": ["a fix"],
+                "commit_count": 1,
+            },
             pre_diff={"stat": "", "numstat": ""},
         )
         review = _run(chaperone(result))
@@ -402,14 +425,24 @@ class TestNestedTestFiles:
 
     def test_nested_test_file_flagged(self):
         result = _make_result(
-            post_diff={"stat": " assays/sub/test_foo.py | 10 ++++\n", "numstat": "10\t0\tassays/sub/test_foo.py", "commits": ["a"], "commit_count": 1},
+            post_diff={
+                "stat": " assays/sub/test_foo.py | 10 ++++\n",
+                "numstat": "10\t0\tassays/sub/test_foo.py",
+                "commits": ["a"],
+                "commit_count": 1,
+            },
         )
         review = _run(chaperone(result))
         assert any("nested_test_file" in f for f in review["flags"])
 
     def test_flat_test_file_ok(self):
         result = _make_result(
-            post_diff={"stat": " assays/test_foo.py | 10 ++++\n", "numstat": "10\t0\tassays/test_foo.py", "commits": ["a"], "commit_count": 1},
+            post_diff={
+                "stat": " assays/test_foo.py | 10 ++++\n",
+                "numstat": "10\t0\tassays/test_foo.py",
+                "commits": ["a"],
+                "commit_count": 1,
+            },
         )
         review = _run(chaperone(result))
         assert not any("nested_test_file" in f for f in review["flags"])
@@ -451,7 +484,44 @@ class TestSatisfaction:
             post_diff={"stat": "", "numstat": "", "commits": [], "commit_count": 0}
         )
         review = _run(chaperone(result))
-        assert review["satisfaction"] <= 70
+        assert review["satisfaction"] == 0
+
+    def test_rejected_artifact_score_is_capped(self):
+        result = _make_result(
+            task="Modify expected.py to add the behavior.",
+            post_diff={
+                "stat": " other.py | 5 +++++\n",
+                "numstat": "5\t0\tother.py",
+                "commits": ["abc1234 edit other"],
+                "commit_count": 1,
+            },
+        )
+
+        review = _run(chaperone(result))
+
+        assert review["verdict"] == "rejected"
+        assert review["satisfaction"] <= 40
+
+    def test_incomplete_artifact_score_is_capped(self):
+        result = _make_result(exit_code=1, branch_name="ribosome/incomplete")
+
+        review = _run(chaperone(result))
+
+        assert review["verdict"] == "incomplete"
+        assert review["satisfaction"] <= 60
+
+    @pytest.mark.parametrize("mode", ["scout", "research"])
+    def test_read_only_mode_without_artifact_is_not_penalized(self, mode):
+        result = _make_result(
+            stdout="Read-only analysis completed with several concrete findings.",
+            post_diff={"stat": "", "numstat": "", "commits": [], "commit_count": 0},
+        )
+        result["mode"] = mode
+
+        review = _run(chaperone(result))
+
+        assert review["verdict"] == "approved"
+        assert review["satisfaction"] == 100
 
     def test_test_satisfaction_bonus_for_fallback_diff(self):
         """Fallback diff should receive a satisfaction bonus.
@@ -482,7 +552,12 @@ class TestRequeuePrompt:
         result = _make_result(
             task="Build the complete user management system with roles and permissions and admin dashboard and role hierarchy and audit logging system",
             stdout="ok",  # thin
-            post_diff={"stat": " admin.py | 5 +++\n", "numstat": "5\t0\tadmin.py", "commits": ["a"], "commit_count": 1},
+            post_diff={
+                "stat": " admin.py | 5 +++\n",
+                "numstat": "5\t0\tadmin.py",
+                "commits": ["a"],
+                "commit_count": 1,
+            },
         )
         review = _run(chaperone(result))
         # thin_output on rejected → requeue. But if approved despite flag, no requeue needed.
@@ -492,7 +567,12 @@ class TestRequeuePrompt:
     def test_file_shrunk_generates_requeue(self):
         result = _make_result(
             task="Add logging to worker.py",
-            post_diff={"stat": " worker.py | 50 +---\n", "numstat": "2\t48\tworker.py", "commits": ["a"], "commit_count": 1},
+            post_diff={
+                "stat": " worker.py | 50 +---\n",
+                "numstat": "2\t48\tworker.py",
+                "commits": ["a"],
+                "commit_count": 1,
+            },
             pre_diff={"stat": "", "numstat": ""},
         )
         review = _run(chaperone(result))
@@ -575,7 +655,10 @@ class TestCompletionEvidence:
 
         evidence = review["completion_evidence"]
         assert evidence["execution"]["provider"] == "zhipu"
-        assert evidence["execution"]["output_path"] == "/home/vivesca/code/mtor/logs/wf.jsonl"
+        assert (
+            evidence["execution"]["output_path"]
+            == "/home/vivesca/code/mtor/logs/wf.jsonl"
+        )
         assert evidence["artifact"]["commit_count"] == 1
         assert evidence["artifact"]["has_patch"] is True
         assert evidence["artifact"]["patch_bytes"] > 0
@@ -660,7 +743,9 @@ class TestCompletionEvidence:
 
     def test_workflow_result_writes_completion_dossier(self, tmp_path, monkeypatch):
         workflow_id = "ribosome-glm51-dossier-test"
-        monkeypatch.setattr(chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers")
+        monkeypatch.setattr(
+            chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers"
+        )
         result = _make_result(
             task="Update mtor/worker/chaperone_review.py",
             post_diff={
@@ -672,14 +757,16 @@ class TestCompletionEvidence:
             },
             branch_name="ribosome/dossier",
         )
-        result.update({
-            "workflow_id": workflow_id,
-            "repo_root": "/home/vivesca/code/mtor",
-            "base_sha": "base123",
-            "requested_provider": "zhipu",
-            "attempted_providers": ["zhipu"],
-            "output_path": "/home/vivesca/germline/loci/ribosome-outputs/wf.txt",
-        })
+        result.update(
+            {
+                "workflow_id": workflow_id,
+                "repo_root": "/home/vivesca/code/mtor",
+                "base_sha": "base123",
+                "requested_provider": "zhipu",
+                "attempted_providers": ["zhipu"],
+                "output_path": "/home/vivesca/germline/loci/ribosome-outputs/wf.txt",
+            }
+        )
 
         review = _run(chaperone(result))
 
@@ -692,18 +779,26 @@ class TestCompletionEvidence:
         assert dossier["repo_root"] == "/home/vivesca/code/mtor"
         assert dossier["base_sha"] == "base123"
         assert dossier["artifact"]["commit_count"] == 1
-        assert dossier["artifact"]["changed_paths"] == ["mtor/worker/chaperone_review.py"]
+        assert dossier["artifact"]["changed_paths"] == [
+            "mtor/worker/chaperone_review.py"
+        ]
         assert dossier["review"]["verdict"] == "approved"
 
-    def test_dossier_distinguishes_requested_and_resolved_provider(self, tmp_path, monkeypatch):
+    def test_dossier_distinguishes_requested_and_resolved_provider(
+        self, tmp_path, monkeypatch
+    ):
         workflow_id = "ribosome-provider-fallback-test"
-        monkeypatch.setattr(chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers")
+        monkeypatch.setattr(
+            chaperone_review, "DOSSIER_DIR", tmp_path / "ribosome-dossiers"
+        )
         result = _make_result(provider="gemini")
-        result.update({
-            "workflow_id": workflow_id,
-            "requested_provider": "zhipu",
-            "attempted_providers": ["gemini"],
-        })
+        result.update(
+            {
+                "workflow_id": workflow_id,
+                "requested_provider": "zhipu",
+                "attempted_providers": ["gemini"],
+            }
+        )
 
         review = _run(chaperone(result))
 

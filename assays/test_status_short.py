@@ -67,6 +67,27 @@ def test_short_format_pipe_separated():
     assert re.match(r"^[A-Z_]+ \| .+ \| .+ \| .*$", line), f"unexpected format: {line}"
 
 
+def test_short_completed_rejected_uses_operator_state():
+    from mtor import cli
+
+    client = _make_client(
+        "COMPLETED",
+        {
+            "results": [
+                {
+                    "success": True,
+                    "exit_code": 0,
+                    "review": {"verdict": "rejected", "flags": ["no_commit_on_success"]},
+                }
+            ]
+        },
+    )
+    with patch.object(cli, "_get_client", return_value=(client, None)):
+        out, _ = _capture(cli.status, "wf-x", short=True)
+
+    assert out.startswith("FAILED_REVIEW | True | rejected |")
+
+
 def test_short_uses_em_dash_for_missing_verdict():
     from mtor import cli
     client = _make_client("RUNNING")
@@ -99,6 +120,8 @@ def test_default_envelope_unchanged_when_short_absent():
     assert parsed.get("ok") is True
     assert parsed.get("result", {}).get("workflow_id") == "wf-x"
     assert parsed.get("result", {}).get("status") == "COMPLETED"
+    assert parsed.get("result", {}).get("temporal_status") == "COMPLETED"
+    assert parsed.get("result", {}).get("outcome") == "approved"
 
 
 def test_short_does_not_apply_to_error_path():

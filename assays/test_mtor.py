@@ -241,9 +241,9 @@ class TestBareInvocation:
             "mtor schema",
         ]:
             first_word = expected.split()[0]
-            assert any(cmd["name"].startswith(first_word) for cmd in data["result"]["commands"]), (
-                f"Command starting with '{first_word}' not found in tree"
-            )
+            assert any(
+                cmd["name"].startswith(first_word) for cmd in data["result"]["commands"]
+            ), f"Command starting with '{first_word}' not found in tree"
 
     def test_self_discovery_lists_all_commands(self):
         """Bare mtor output includes scout, research, scan, auto."""
@@ -366,11 +366,13 @@ class TestDispatch:
     def test_dispatch_harness_passes_to_workflow_spec(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke([
-                "Make assays/test_harness_routing.py pass",
-                "--harness",
-                "goose",
-            ])
+            exit_code, data = invoke(
+                [
+                    "Make assays/test_harness_routing.py pass",
+                    "--harness",
+                    "goose",
+                ]
+            )
 
         assert exit_code == 0
         assert data["ok"] is True
@@ -382,11 +384,13 @@ class TestDispatch:
     def test_dispatch_opencode_harness_passes_to_workflow_spec(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke([
-                "Make assays/test_harness_routing.py pass",
-                "--harness",
-                "opencode",
-            ])
+            exit_code, data = invoke(
+                [
+                    "Make assays/test_harness_routing.py pass",
+                    "--harness",
+                    "opencode",
+                ]
+            )
 
         assert exit_code == 0
         assert data["ok"] is True
@@ -410,11 +414,13 @@ class TestDispatch:
     def test_dispatch_unknown_harness_fails_before_temporal(self):
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke([
-                "Make assays/test_harness_routing.py pass",
-                "--harness",
-                "not-a-harness",
-            ])
+            exit_code, data = invoke(
+                [
+                    "Make assays/test_harness_routing.py pass",
+                    "--harness",
+                    "not-a-harness",
+                ]
+            )
 
         assert exit_code == 2
         assert data["ok"] is False
@@ -524,13 +530,17 @@ class TestStatus:
         # Set up a COMPLETED workflow with rejected verdict and error
         desc = mock_handle.describe.return_value
         desc.status.name = "COMPLETED"
-        mock_handle.result = AsyncMock(return_value={
-            "results": [{
-                "exit_code": 1,
-                "review": {"verdict": "rejected"},
-                "error": "Build failed: syntax error at line 42",
-            }]
-        })
+        mock_handle.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "exit_code": 1,
+                        "review": {"verdict": "rejected"},
+                        "error": "Build failed: syntax error at line 42",
+                    }
+                ]
+            }
+        )
         with _patch_client(mock_client):
             _, data = invoke(["status", "ribosome-test1234"])
         assert data["ok"] is True
@@ -607,7 +617,9 @@ class TestStatus:
         assert "mtor cancel ribosome-test1234" not in commands
         assert "mtor review ribosome-test1234" in commands
 
-    def test_status_includes_cached_log_path_when_output_path_missing(self, tmp_path, monkeypatch):
+    def test_status_includes_cached_log_path_when_output_path_missing(
+        self, tmp_path, monkeypatch
+    ):
         """Status should point at a cached log when Temporal did not preserve output_path."""
         workflow_id = "ribosome-glm51-status-output-f87f040a-6a07bd75"
         cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
@@ -636,7 +648,9 @@ class TestStatus:
         assert data["result"]["output_path"] == ""
         assert data["result"]["cached_log_path"] == str(cache_path)
 
-    def test_status_prefers_remote_output_path_over_cached_log_path(self, tmp_path, monkeypatch):
+    def test_status_prefers_remote_output_path_over_cached_log_path(
+        self, tmp_path, monkeypatch
+    ):
         """Remote output_path remains authoritative when both remote and cached paths exist."""
         workflow_id = "ribosome-glm51-status-output-f87f040a-6a07bd75"
         remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.jsonl"
@@ -755,7 +769,9 @@ class TestTrace:
         assert result["review"]["completion_evidence"] == evidence
         assert result["review"]["completion_dossier"] == dossier
         assert result["review"]["dossier_path"].endswith("ribosome-test1234.json")
-        assert result["diagnosis"] == "workflow completed and review approved the artifact"
+        assert (
+            result["diagnosis"] == "workflow completed and review approved the artifact"
+        )
         assert result["next_action"]["command"] == "mtor review ribosome-test1234"
 
     def test_trace_completed_rejected_includes_failure_diagnosis(self):
@@ -788,7 +804,10 @@ class TestTrace:
         assert result["operator_state"] == "failed_review"
         assert result["review"]["flags"] == ["no_commit_on_success"]
         assert "no_commit_on_success" in result["failure_reason"]
-        assert result["diagnosis"] == "workflow process completed but chaperone review rejected the artifact"
+        assert (
+            result["diagnosis"]
+            == "workflow process completed but chaperone review rejected the artifact"
+        )
 
     def test_trace_running_includes_heartbeat_and_active_log_hint(self):
         from datetime import UTC, datetime
@@ -811,8 +830,14 @@ class TestTrace:
         ]
         mock_handle.result = AsyncMock(return_value={})
 
-        with _patch_client(mock_client), \
-             patch.object(_cli, "_active_log_entries", return_value=[{"filename": "ribosome-test1234.log"}]):
+        with (
+            _patch_client(mock_client),
+            patch.object(
+                _cli,
+                "_active_log_entries",
+                return_value=[{"filename": "ribosome-test1234.log"}],
+            ),
+        ):
             exit_code, data = invoke(["trace", "ribosome-test1234"])
 
         assert exit_code == 0
@@ -828,7 +853,9 @@ class TestTrace:
         desc.status.name = "FAILED"
         desc.search_attributes = {}
         desc.pending_activities = []
-        mock_handle.result = AsyncMock(side_effect=Exception("activity translate failed: boom"))
+        mock_handle.result = AsyncMock(
+            side_effect=Exception("activity translate failed: boom")
+        )
 
         with _patch_client(mock_client):
             exit_code, data = invoke(["trace", "ribosome-test1234"])
@@ -848,10 +875,31 @@ class TestTrace:
         cache_dir.mkdir(parents=True)
         cache_file = cache_dir / f"{workflow_id}.jsonl"
         events = [
-            {"type": "dispatch", "workflow_id": workflow_id, "timestamp": "2026-05-27T10:00:00Z"},
-            {"type": "provider_selected", "workflow_id": workflow_id, "provider": "zhipu", "timestamp": "2026-05-27T10:00:01Z"},
-            {"type": "subprocess_started", "workflow_id": workflow_id, "pid": 12345, "attempt": 1, "timestamp": "2026-05-27T10:00:02Z"},
-            {"type": "subprocess_exited", "workflow_id": workflow_id, "exit_code": 0, "duration_seconds": 42.5, "timestamp": "2026-05-27T10:00:44Z"},
+            {
+                "type": "dispatch",
+                "workflow_id": workflow_id,
+                "timestamp": "2026-05-27T10:00:00Z",
+            },
+            {
+                "type": "provider_selected",
+                "workflow_id": workflow_id,
+                "provider": "zhipu",
+                "timestamp": "2026-05-27T10:00:01Z",
+            },
+            {
+                "type": "subprocess_started",
+                "workflow_id": workflow_id,
+                "pid": 12345,
+                "attempt": 1,
+                "timestamp": "2026-05-27T10:00:02Z",
+            },
+            {
+                "type": "subprocess_exited",
+                "workflow_id": workflow_id,
+                "exit_code": 0,
+                "duration_seconds": 42.5,
+                "timestamp": "2026-05-27T10:00:44Z",
+            },
         ]
         cache_file.write_text("\n".join(_json.dumps(e) for e in events))
 
@@ -885,7 +933,9 @@ class TestTrace:
         assert result["lifecycle_events"][2]["pid"] == 12345
         assert result["lifecycle_events"][3]["duration_seconds"] == 42.5
 
-    def test_trace_lifecycle_events_filter_sensitive_fields(self, tmp_path, monkeypatch):
+    def test_trace_lifecycle_events_filter_sensitive_fields(
+        self, tmp_path, monkeypatch
+    ):
         """lifecycle_events strips task, prompt, stdout, stderr, output, tail, diff."""
         import json as _json
 
@@ -935,7 +985,9 @@ class TestTrace:
         assert le["exit_code"] == 1
         assert le["duration_seconds"] == 30.0
 
-    def test_trace_lifecycle_events_ignore_invalid_json_lines(self, tmp_path, monkeypatch):
+    def test_trace_lifecycle_events_ignore_invalid_json_lines(
+        self, tmp_path, monkeypatch
+    ):
         """Invalid JSON lines are silently skipped; trace does not fail."""
         import json as _json
 
@@ -947,7 +999,9 @@ class TestTrace:
             _json.dumps({"type": "dispatch", "workflow_id": workflow_id}),
             "not valid json{",
             "",
-            _json.dumps({"type": "subprocess_started", "workflow_id": workflow_id, "pid": 99}),
+            _json.dumps(
+                {"type": "subprocess_started", "workflow_id": workflow_id, "pid": 99}
+            ),
             "{broken",
         ]
         cache_file.write_text("\n".join(lines))
@@ -990,7 +1044,11 @@ class TestTrace:
         # Create an older .jsonl with lifecycle events
         jsonl_file = cache_dir / f"{workflow_id}.jsonl"
         events = [
-            {"type": "dispatch", "workflow_id": workflow_id, "timestamp": "2026-05-27T10:00:00Z"},
+            {
+                "type": "dispatch",
+                "workflow_id": workflow_id,
+                "timestamp": "2026-05-27T10:00:00Z",
+            },
             {"type": "provider_selected", "provider": "zhipu"},
         ]
         jsonl_file.write_text("\n".join(_json.dumps(e) for e in events))
@@ -999,7 +1057,9 @@ class TestTrace:
         log_file = cache_dir / f"{workflow_id}.log"
         log_file.write_text("operator log line 1\noperator log line 2\n")
         # Make the .log newer than the .jsonl
-        os.utime(log_file, (log_file.stat().st_mtime + 100, log_file.stat().st_mtime + 100))
+        os.utime(
+            log_file, (log_file.stat().st_mtime + 100, log_file.stat().st_mtime + 100)
+        )
 
         mock_client, mock_handle = make_mock_client()
         desc = mock_handle.describe.return_value
@@ -1084,7 +1144,10 @@ class TestDossier:
                 "output_path": "/home/vivesca/outputs/ribosome-test1234.txt",
                 "cached_log_path": "/home/vivesca/.cache/mtor/logs/ribosome-test1234.jsonl",
             },
-            "verification": {"status": "passed", "detected_commands": ["uv run pytest"]},
+            "verification": {
+                "status": "passed",
+                "detected_commands": ["uv run pytest"],
+            },
             "review": {
                 "approved": True,
                 "verdict": "approved_with_flags",
@@ -1181,7 +1244,10 @@ class TestDossier:
 
     def test_dossier_partial_dossier_falls_back_to_review(self):
         """A dossier missing nested sections does not crash; falls back gracefully."""
-        partial = {"workflow_id": "ribosome-test1234", "operator": {"state": "incomplete"}}
+        partial = {
+            "workflow_id": "ribosome-test1234",
+            "operator": {"state": "incomplete"},
+        }
         mock_client, mock_handle = make_mock_client()
         mock_handle.result = AsyncMock(
             return_value={
@@ -1224,15 +1290,21 @@ class TestDossier:
                     {
                         "exit_code": 0,
                         "success": True,
-                        "review": {"verdict": "rejected", "completion_dossier": dossier},
+                        "review": {
+                            "verdict": "rejected",
+                            "completion_dossier": dossier,
+                        },
                     }
                 ]
             }
         )
 
-        with _patch_client(mock_client), patch(
-            "mtor.cli.get_verdict_overrides",
-            return_value={"ribosome-test1234": "false_positive"},
+        with (
+            _patch_client(mock_client),
+            patch(
+                "mtor.cli.get_verdict_overrides",
+                return_value={"ribosome-test1234": "false_positive"},
+            ),
         ):
             exit_code, data = invoke(["dossier", "ribosome-test1234"])
 
@@ -1286,7 +1358,9 @@ class TestCancel:
     def test_cancel_already_cancelled_is_ok(self):
         """Cancelling an already-cancelled workflow = idempotent success."""
         mock_client, mock_handle = make_mock_client()
-        mock_handle.terminate = AsyncMock(side_effect=Exception("workflow already cancelled"))
+        mock_handle.terminate = AsyncMock(
+            side_effect=Exception("workflow already cancelled")
+        )
         with _patch_client(mock_client):
             exit_code, data = invoke(["cancel", "ribosome-done1234"])
         assert exit_code == 0
@@ -1329,8 +1403,10 @@ class TestDoctor:
 
     def test_doctor_warns_localhost_worker_host(self):
         """worker_host check fails when MTOR_WORKER_HOST is localhost."""
-        with _patch_client_error("Connection refused"), \
-             patch("mtor.doctor.WORKER_HOST", "localhost"):
+        with (
+            _patch_client_error("Connection refused"),
+            patch("mtor.doctor.WORKER_HOST", "localhost"),
+        ):
             _, data = invoke(["tsc"])
         checks = data["result"]["checks"]
         wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
@@ -1341,8 +1417,7 @@ class TestDoctor:
     def test_doctor_ok_with_real_worker_host(self):
         """worker_host check passes when MTOR_WORKER_HOST is a real hostname."""
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), \
-             patch("mtor.doctor.WORKER_HOST", "ganglion"):
+        with _patch_client(mock_client), patch("mtor.doctor.WORKER_HOST", "ganglion"):
             _, data = invoke(["tsc"])
         checks = data["result"]["checks"]
         wh_check = next((c for c in checks if c["name"] == "worker_host"), None)
@@ -1604,7 +1679,13 @@ class TestStats:
         assert exit_code == 0
         assert data["ok"] is True
         counts = data["result"]["counts"]
-        for key in ("running", "today_total", "today_completed", "week_total", "week_completed"):
+        for key in (
+            "running",
+            "today_total",
+            "today_completed",
+            "week_total",
+            "week_completed",
+        ):
             assert key in counts, f"Missing key: {key}"
 
     def test_stats_temporal_unreachable(self):
@@ -1760,9 +1841,7 @@ class TestCheckpoints:
             result.returncode = 0
             result.stderr = ""
             if cmd[0] == "ssh" and "ls -1" in cmd[-1]:
-                result.stdout = (
-                    "/home/vivesca/.local/share/vivesca/ribosome-checkpoints/remote-1.json\n"
-                )
+                result.stdout = "/home/vivesca/.local/share/vivesca/ribosome-checkpoints/remote-1.json\n"
             elif cmd[0] == "ssh" and "cat " in cmd[-1]:
                 result.stdout = _json.dumps(remote_cp)
             else:
@@ -1810,7 +1889,9 @@ class TestCheckpoints:
         assert data["result"]["malformed_count"] == 1
         assert "bad.json" in data["result"]["malformed_files"]
 
-    def test_checkpoints_no_malformed_fields_when_all_valid(self, tmp_path, monkeypatch):
+    def test_checkpoints_no_malformed_fields_when_all_valid(
+        self, tmp_path, monkeypatch
+    ):
         """When all checkpoint files are valid, malformed fields are absent."""
         import json as _json
 
@@ -1825,7 +1906,9 @@ class TestCheckpoints:
 
 
 class TestLogs:
-    def test_logs_caches_remote_worker_path_under_home_cache(self, tmp_path, monkeypatch):
+    def test_logs_caches_remote_worker_path_under_home_cache(
+        self, tmp_path, monkeypatch
+    ):
         """Remote /home/vivesca log paths are fetched into a local cache."""
         import mtor.cli as _cli
 
@@ -1850,16 +1933,94 @@ class TestLogs:
             return result
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
             exit_code, data = invoke(["logs", workflow_id])
 
         assert exit_code == 0
         assert data["ok"] is True
         log_path = Path(data["result"]["log_path"])
-        assert log_path == tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
+        assert (
+            log_path == tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.jsonl"
+        )
         assert data["result"]["lines"] == ['{"workflow_id": "wf", "provider": "zhipu"}']
+        assert data["result"]["source"] == "remote_refresh"
+        assert data["result"]["stale"] is False
 
-    def test_logs_running_workflow_does_not_wait_for_result(self, tmp_path, monkeypatch):
+    def test_logs_refreshes_existing_remote_cache(self, tmp_path, monkeypatch):
+        """An explicit logs read refreshes a cache that predates remote completion."""
+        import mtor.cli as _cli
+
+        workflow_id = "ribosome-glm52-refresh-existing-cache"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.log"
+        cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.log"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text("stale line\n")
+
+        mock_client, wf_handle = make_mock_client()
+        wf_handle.result = AsyncMock(
+            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            if cmd and cmd[0] == "scp":
+                Path(cmd[-1]).write_text("fresh line\n")
+            return result
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
+            exit_code, data = invoke(["logs", workflow_id])
+
+        assert exit_code == 0
+        assert data["result"]["lines"] == ["fresh line"]
+        assert data["result"]["source"] == "remote_refresh"
+        assert data["result"]["stale"] is False
+        assert cache_path.read_text() == "fresh line\n"
+
+    def test_logs_failed_refresh_preserves_cache_and_marks_stale(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed refresh never truncates the last usable cached snapshot."""
+        import mtor.cli as _cli
+
+        workflow_id = "ribosome-glm52-refresh-failure"
+        remote_path = f"/home/vivesca/code/mtor/logs/{workflow_id}.log"
+        cache_path = tmp_path / ".cache" / "mtor" / "logs" / f"{workflow_id}.log"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text("last usable line\n")
+
+        mock_client, wf_handle = make_mock_client()
+        wf_handle.result = AsyncMock(
+            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "scp":
+                return MagicMock(returncode=1, stdout="", stderr="network down")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
+            exit_code, data = invoke(["logs", workflow_id])
+
+        assert exit_code == 0
+        assert data["result"]["lines"] == ["last usable line"]
+        assert data["result"]["source"] == "cache_fallback"
+        assert data["result"]["stale"] is True
+        assert cache_path.read_text() == "last usable line\n"
+
+    def test_logs_running_workflow_does_not_wait_for_result(
+        self, tmp_path, monkeypatch
+    ):
         """Live workflows must use log discovery instead of blocking on result()."""
         import mtor.cli as _cli
 
@@ -1882,7 +2043,10 @@ class TestLogs:
             return result
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
             exit_code, data = invoke(["logs", workflow_id])
 
         assert exit_code == 0
@@ -1915,7 +2079,10 @@ class TestLogs:
             return result
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
             exit_code, data = invoke(["logs", workflow_id, "--lines", "2"])
 
         assert exit_code == 0
@@ -1942,7 +2109,10 @@ class TestLogs:
             result.stderr = ""
             return result
 
-        with _patch_client(mock_client), patch.object(_cli.subprocess, "run", side_effect=fake_run):
+        with (
+            _patch_client(mock_client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
             exit_code, data = invoke(["logs", "wf-missing-log"])
 
         assert exit_code == 4
@@ -1960,8 +2130,10 @@ class TestScoutMode:
     def test_scout_command_dispatches(self):
         """Verify --wait triggers polling (mock the poll loop)."""
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), \
-             patch("mtor.cli._wait_and_print_logs", return_value=0) as mock_wait:
+        with (
+            _patch_client(mock_client),
+            patch("mtor.cli._wait_and_print_logs", return_value=0) as mock_wait,
+        ):
             captured = io.StringIO()
             old_stdout = sys.stdout
             exit_code = 0
@@ -2014,7 +2186,9 @@ class TestScoutMode:
         """Scout command accepts --provider flag."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke(["scout", "--no-wait", "-p", "droid", "Explore codebase"])
+            exit_code, data = invoke(
+                ["scout", "--no-wait", "-p", "droid", "Explore codebase"]
+            )
         assert exit_code == 0
         assert data["ok"] is True
         call_kwargs = mock_client.start_workflow.call_args.kwargs
@@ -2049,8 +2223,10 @@ class TestScoutMode:
     def test_scout_wait_timeout(self):
         """Verify timeout exits 124."""
         mock_client, _ = make_mock_client()
-        with _patch_client(mock_client), \
-             patch("mtor.cli._wait_and_print_logs", return_value=124) as mock_wait:
+        with (
+            _patch_client(mock_client),
+            patch("mtor.cli._wait_and_print_logs", return_value=124) as mock_wait,
+        ):
             captured = io.StringIO()
             old_stdout = sys.stdout
             exit_code = 0
@@ -2082,8 +2258,7 @@ class TestScoutMode:
         with _patch_client(mock_client):
             _, data = invoke(["scout", "--no-wait", "Check imports"])
         logs_actions = [
-            na for na in data["next_actions"]
-            if "mtor logs" in na.get("command", "")
+            na for na in data["next_actions"] if "mtor logs" in na.get("command", "")
         ]
         assert len(logs_actions) == 1, (
             f"Expected exactly 1 mtor logs action, got {len(logs_actions)}: {logs_actions}"
@@ -2215,7 +2390,9 @@ class TestArchive:
         assert data["ok"] is True
         assert "wf-never-reviewed" in data["result"]["archived"]
 
-    def test_archive_result_reports_only_target_when_existing_archive_present(self, tmp_path, monkeypatch):
+    def test_archive_result_reports_only_target_when_existing_archive_present(
+        self, tmp_path, monkeypatch
+    ):
         """Archiving a single target returns only that target, not the full historical archive."""
         import mtor.triage as triage_mod
 
@@ -2240,6 +2417,7 @@ class TestListTriage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         mock_client, _ = make_mock_client()
+
         # Override list_workflows to return two workflows
         async def _fake_list_two(query=None):
             for wf_id in ["wf-visible", "wf-hidden"]:
@@ -2248,9 +2426,13 @@ class TestListTriage:
                 execution.status = MagicMock()
                 execution.status.name = "COMPLETED"
                 execution.start_time = MagicMock()
-                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.start_time.isoformat.return_value = (
+                    "2026-04-06T00:00:00+00:00"
+                )
                 execution.close_time = MagicMock()
-                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                execution.close_time.isoformat.return_value = (
+                    "2026-04-06T00:01:00+00:00"
+                )
                 yield execution
 
         mock_client.list_workflows = _fake_list_two
@@ -2269,6 +2451,7 @@ class TestListTriage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         mock_client, _ = make_mock_client()
+
         # Return a single workflow
         async def _fake_list_reviewed(query=None):
             execution = MagicMock()
@@ -2296,6 +2479,7 @@ class TestListTriage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         mock_client, _ = make_mock_client()
+
         async def _fake_list_pending(query=None):
             for wf_id in ["wf-pending", "wf-reviewed", "wf-archived"]:
                 execution = MagicMock()
@@ -2303,9 +2487,13 @@ class TestListTriage:
                 execution.status = MagicMock()
                 execution.status.name = "COMPLETED"
                 execution.start_time = MagicMock()
-                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.start_time.isoformat.return_value = (
+                    "2026-04-06T00:00:00+00:00"
+                )
                 execution.close_time = MagicMock()
-                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                execution.close_time.isoformat.return_value = (
+                    "2026-04-06T00:01:00+00:00"
+                )
                 yield execution
 
         mock_client.list_workflows = _fake_list_pending
@@ -2326,6 +2514,7 @@ class TestListTriage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         mock_client, _ = make_mock_client()
+
         async def _fake_list_all(query=None):
             for wf_id in ["wf-visible", "wf-archived"]:
                 execution = MagicMock()
@@ -2333,9 +2522,13 @@ class TestListTriage:
                 execution.status = MagicMock()
                 execution.status.name = "COMPLETED"
                 execution.start_time = MagicMock()
-                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.start_time.isoformat.return_value = (
+                    "2026-04-06T00:00:00+00:00"
+                )
                 execution.close_time = MagicMock()
-                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                execution.close_time.isoformat.return_value = (
+                    "2026-04-06T00:01:00+00:00"
+                )
                 yield execution
 
         mock_client.list_workflows = _fake_list_all
@@ -2354,6 +2547,7 @@ class TestListTriage:
 
         monkeypatch.setattr(triage_mod, "TRIAGE_PATH", tmp_path / "triage.json")
         mock_client, _ = make_mock_client()
+
         async def _fake_list_counts(query=None):
             for wf_id in ["wf-pending", "wf-reviewed"]:
                 execution = MagicMock()
@@ -2361,9 +2555,13 @@ class TestListTriage:
                 execution.status = MagicMock()
                 execution.status.name = "COMPLETED"
                 execution.start_time = MagicMock()
-                execution.start_time.isoformat.return_value = "2026-04-06T00:00:00+00:00"
+                execution.start_time.isoformat.return_value = (
+                    "2026-04-06T00:00:00+00:00"
+                )
                 execution.close_time = MagicMock()
-                execution.close_time.isoformat.return_value = "2026-04-06T00:01:00+00:00"
+                execution.close_time.isoformat.return_value = (
+                    "2026-04-06T00:01:00+00:00"
+                )
                 yield execution
 
         mock_client.list_workflows = _fake_list_counts
@@ -2423,7 +2621,9 @@ class SpecFlagDispatchExamples:
 
     def test_spec_flag_preserves_body(self, tmp_path):
         """Markdown body below frontmatter is preserved unchanged."""
-        body = "\n# Task\nDo something important.\n\n## Steps\n1. Step one\n2. Step two\n"
+        body = (
+            "\n# Task\nDo something important.\n\n## Steps\n1. Step one\n2. Step two\n"
+        )
         spec_file = tmp_path / "plan.md"
         spec_file.write_text(f"---\nstatus: ready\n---{body}")
         mock_client, _ = make_mock_client()
@@ -2665,13 +2865,7 @@ class TestSpecStatusHelpers:
         from mtor.spec import update_spec_status
 
         spec_file = tmp_path / "plan.md"
-        spec_file.write_text(
-            "---\n"
-            "status: ready\n"
-            "---\n"
-            "# Task\n"
-            "Do the thing.\n"
-        )
+        spec_file.write_text("---\nstatus: ready\n---\n# Task\nDo the thing.\n")
         update_spec_status(spec_file, "dispatched", workflow_id="wf-123")
         updated = spec_file.read_text()
         assert "status: dispatched" in updated
@@ -2735,13 +2929,7 @@ class TestSpecStatusHelpers:
         from mtor.spec import update_spec_status
 
         spec_file = tmp_path / "plan.md"
-        spec_file.write_text(
-            "---\n"
-            "status: ready\n"
-            "workflow_id: wf-old\n"
-            "---\n"
-            "# Task\n"
-        )
+        spec_file.write_text("---\nstatus: ready\nworkflow_id: wf-old\n---\n# Task\n")
         update_spec_status(spec_file, "dispatched", workflow_id="wf-new")
         updated = spec_file.read_text()
         assert "workflow_id: wf-new" in updated
@@ -2761,10 +2949,13 @@ class TestSpecStatusHelpers:
         )
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
-            exit_code, data = invoke([
-                "Make assays/test_feature.py pass",
-                "--spec", str(spec_file),
-            ])
+            exit_code, data = invoke(
+                [
+                    "Make assays/test_feature.py pass",
+                    "--spec",
+                    str(spec_file),
+                ]
+            )
         assert exit_code == 0
         assert data["ok"] is True
         assert "spec" in data["result"]
@@ -2789,10 +2980,17 @@ class TestDedup:
         from mtor.dedup import check_duplicate, record_dispatch
 
         state_file = tmp_path / "dedup.json"
-        assert check_duplicate("Make assays/test_foo.py pass", window=300, state_path=state_file) is None
+        assert (
+            check_duplicate(
+                "Make assays/test_foo.py pass", window=300, state_path=state_file
+            )
+            is None
+        )
         record_dispatch("Make assays/test_foo.py pass", state_path=state_file)
 
-        result2 = check_duplicate("Make assays/test_foo.py pass", window=300, state_path=state_file)
+        result2 = check_duplicate(
+            "Make assays/test_foo.py pass", window=300, state_path=state_file
+        )
         assert result2 is not None
 
     def test_test_dedup_allows_after_window(self, tmp_path):
@@ -2810,7 +3008,9 @@ class TestDedup:
             state[k] = state[k] - 600  # 10 minutes ago
         state_file.write_text(json.dumps(state))
 
-        result = check_duplicate("Make assays/test_bar.py pass", window=300, state_path=state_file)
+        result = check_duplicate(
+            "Make assays/test_bar.py pass", window=300, state_path=state_file
+        )
         assert result is None
 
     def test_test_dedup_different_prompts_pass(self, tmp_path):
@@ -2820,7 +3020,9 @@ class TestDedup:
         state_file = tmp_path / "dedup.json"
         record_dispatch("Make assays/test_alpha.py pass", state_path=state_file)
 
-        result = check_duplicate("Make assays/test_beta.py pass", window=300, state_path=state_file)
+        result = check_duplicate(
+            "Make assays/test_beta.py pass", window=300, state_path=state_file
+        )
         assert result is None
 
     def test_dedup_spec_path_identity(self, tmp_path):
@@ -2830,31 +3032,51 @@ class TestDedup:
         from mtor.dedup import check_duplicate, record_dispatch
 
         state_file = tmp_path / "dedup.json"
-        record_dispatch("Implement feature X", spec_path=Path("/plans/spec-a.md"), state_path=state_file)
+        record_dispatch(
+            "Implement feature X",
+            spec_path=Path("/plans/spec-a.md"),
+            state_path=state_file,
+        )
 
-        result2 = check_duplicate("Implement feature X", spec_path=Path("/plans/spec-b.md"), window=300, state_path=state_file)
+        result2 = check_duplicate(
+            "Implement feature X",
+            spec_path=Path("/plans/spec-b.md"),
+            window=300,
+            state_path=state_file,
+        )
         assert result2 is None
 
         # But same prompt + same spec_path → blocked
-        record_dispatch("Implement feature X", spec_path=Path("/plans/spec-b.md"), state_path=state_file)
-        result3 = check_duplicate("Implement feature X", spec_path=Path("/plans/spec-a.md"), window=300, state_path=state_file)
+        record_dispatch(
+            "Implement feature X",
+            spec_path=Path("/plans/spec-b.md"),
+            state_path=state_file,
+        )
+        result3 = check_duplicate(
+            "Implement feature X",
+            spec_path=Path("/plans/spec-a.md"),
+            window=300,
+            state_path=state_file,
+        )
         assert result3 is not None
 
 
 def test_workflow_summary_preserves_capability_gate_diagnostics():
     from mtor.worker.workflow import _summarize_workflow_result
 
-    summary = _summarize_workflow_result({
-        "task": "blocked task",
-        "provider": "zhipu",
-        "success": False,
-        "exit_code": -1,
-        "mode": "build",
-        "stderr": "CAPABILITY_GATE: blocked keyword",
-        "gate": "capability",
-        "blocked_keyword": "danger",
-        "review": {"approved": False},
-    })
+    summary = _summarize_workflow_result(
+        {
+            "task": "blocked task",
+            "provider": "zhipu",
+            "success": False,
+            "exit_code": -1,
+            "mode": "build",
+            "stderr": "CAPABILITY_GATE: blocked keyword",
+            "gate": "capability",
+            "blocked_keyword": "danger",
+            "review": {"approved": False},
+        }
+    )
 
     assert summary["stderr"] == "CAPABILITY_GATE: blocked keyword"
     assert summary["gate"] == "capability"

@@ -198,7 +198,9 @@ class TestModuleImports:
         assert TASK_QUEUE == "translation-queue"
         assert WORKFLOW_TYPE == "TranslationWorkflow"
         assert WORKER_HOST  # non-empty — "localhost" or "ganglion" depending on env
-        assert COACHING_PATH is None or COACHING_PATH.endswith("feedback_ribosome_coaching.md")
+        assert COACHING_PATH is None or COACHING_PATH.endswith(
+            "feedback_ribosome_coaching.md"
+        )
 
     def test_envelope_exports(self):
         from mtor.envelope import _err, _extract_first_result, _ok
@@ -356,12 +358,13 @@ class TestDoctorIntegration:
             assert "ok" in check
             assert "detail" in check
 
-    def test_doctor_unreachable_reports_false(self):
+    def test_doctor_reports_worker_independently_when_temporal_is_unreachable(self):
         with _patch_client_error("Connection refused"):
             _, data = invoke(["tsc"])
         result = data["result"]
         assert result["temporal_reachable"] is False
-        assert result["worker_alive"] is False
+        assert result["worker_alive"] is True
+        assert result["worker_admission"]["state"] == "active"
 
     def test_doctor_with_client_reachable(self):
         mock_client, _ = make_mock_client()
@@ -486,7 +489,9 @@ class TestFilePathPrompt:
     def test_dispatch_reads_file_as_prompt(self):
         mock_client, _ = make_mock_client()
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("Make assays/test_auth.py pass — implement authentication module with OAuth2 support")
+            f.write(
+                "Make assays/test_auth.py pass — implement authentication module with OAuth2 support"
+            )
             f.flush()
             prompt_path = f.name
 
@@ -543,13 +548,18 @@ class TestCoachingInjection:
             if isinstance(first_spec, dict):
                 task = first_spec.get("task", "")
                 # Should not contain coaching markers
-                assert "coaching" not in task.lower() or task == "Make assays/test_thing.py pass"
+                assert (
+                    "coaching" not in task.lower()
+                    or task == "Make assays/test_thing.py pass"
+                )
                 assert task == "Make assays/test_thing.py pass"
 
     def test_coaching_file_constant_path(self):
         from mtor import COACHING_PATH
 
-        assert COACHING_PATH is None or COACHING_PATH.endswith("feedback_ribosome_coaching.md")
+        assert COACHING_PATH is None or COACHING_PATH.endswith(
+            "feedback_ribosome_coaching.md"
+        )
 
 
 # ---------------------------------------------------------------------------

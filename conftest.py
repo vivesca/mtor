@@ -9,6 +9,24 @@ from mtor.worker import chaperone_review
 
 
 @pytest.fixture(autouse=True)
+def _mock_worker_admission_ready(monkeypatch):
+    """Keep unit tests hermetic unless they explicitly exercise admission."""
+
+    def ready(_host):
+        return {
+            "ok": True,
+            "state": "active",
+            "active_state": "active",
+            "sub_state": "running",
+            "main_pid": 123,
+            "detail": "mtor-worker.service is active/running with MainPID=123",
+        }
+
+    monkeypatch.setattr("mtor.dispatch.probe_worker_admission", ready)
+    monkeypatch.setattr("mtor.doctor.probe_worker_admission", ready)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_chaperone_review_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         chaperone_review,
@@ -50,13 +68,17 @@ def _block_real_ganglion_subprocess_calls(monkeypatch):
             joined_lower = command.lower()
             if "systemctl --user restart mtor-worker" in joined_lower:
                 blocked = True
-            elif joined_lower.startswith("ssh ") and WORKER_HOST.lower() in joined_lower:
+            elif (
+                joined_lower.startswith("ssh ") and WORKER_HOST.lower() in joined_lower
+            ):
                 blocked = True
         else:
             joined_lower = " ".join(str(part) for part in command).lower()
             if "systemctl --user restart mtor-worker" in joined_lower:
                 blocked = True
-            elif len(command) > 0 and command[0] == "ssh" and WORKER_HOST in command[1:]:
+            elif (
+                len(command) > 0 and command[0] == "ssh" and WORKER_HOST in command[1:]
+            ):
                 blocked = True
         if blocked:
             raise RuntimeError(

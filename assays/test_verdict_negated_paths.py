@@ -9,16 +9,17 @@ from __future__ import annotations
 
 import asyncio
 
-from mtor.worker.chaperone_review import _negated_task_paths, chaperone
+from mtor.worker.chaperone_review import (
+    _negated_task_paths,
+    _requested_task_paths,
+    chaperone,
+)
 
-# Built by concatenation so dispatch-gate path extraction never sees them
-# as literals in the spec that created this file.
-_PY = ".py"
-CLI = "mtor/cli" + _PY
-TARGET = "assays/test_mtor" + _PY
-OTHER = "assays/test_other" + _PY
-SPEC_PY = "mtor/spec" + _PY
-WATCH = "mtor/watch" + _PY
+CLI = "mtor/cli.py"
+TARGET = "assays/test_mtor.py"
+OTHER = "assays/test_other.py"
+SPEC_PY = "mtor/spec.py"
+WATCH = "mtor/watch.py"
 
 
 def _result(task: str, stat: str) -> dict:
@@ -61,3 +62,26 @@ def test_verdict_negated_task_paths_helper():
         f"Update {SPEC_PY}. Do not touch {CLI} or {WATCH}."
     )
     assert negated == {CLI, WATCH}
+
+
+def test_requested_paths_ignore_verifier_and_repository_context():
+    task = (
+        "Modify mtor/dispatch.py to add the helper.\n"
+        "Run: uv run pytest assays/test_spec_gate_path_preflight.py\n"
+        "Canonical repository: /home/vivesca/code/mtor.\n"
+        "Do NOT modify: mtor/cli.py."
+    )
+
+    assert _requested_task_paths(task) == {"mtor/dispatch.py"}
+
+
+def test_verdict_test_only_path_not_required():
+    task = (
+        "Modify mtor/dispatch.py to add the helper.\n"
+        "Run: uv run pytest assays/test_spec_gate_path_preflight.py"
+    )
+    review = asyncio.run(
+        chaperone(_result(task, " mtor/dispatch.py | 12 ++++++++++++\n"))
+    )
+
+    assert not any(f.startswith("target_file_missing") for f in review["flags"])

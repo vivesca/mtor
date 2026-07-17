@@ -14,8 +14,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mtor.spec import update_spec_status
-from mtor.reconcile import check_code_exists, reconcile_all, reconcile_spec
+from mtor.spec import DEFAULT_SPEC_DIR, update_spec_status
+from mtor.reconcile import (
+    check_code_exists,
+    reconcile_all,
+    reconcile_spec,
+    reconcile_workflow_specs,
+)
 
 integration = pytest.mark.skipif(
     not os.environ.get("MTOR_INTEGRATION"),
@@ -85,6 +90,9 @@ class TestReconcileSpecs:
         wf.status.name = status
         wf.search_attributes = {"mtor_verdict": [verdict]} if verdict else {}
         return wf
+
+    def test_default_spec_dir_uses_live_chromatin_vault(self):
+        assert DEFAULT_SPEC_DIR == Path("~/chromatin/loci/plans/")
 
     def test_completed_accepted_becomes_done(self, tmp_path: Path):
         """COMPLETED + accepted verdict → status: done."""
@@ -215,7 +223,39 @@ workflow_id: wf-12345
 
         assert result["changed"] is True
         assert result["now"] == "failed"
-        assert "status: failed" in spec_path.read_text()
+        text = spec_path.read_text()
+        assert "status: failed" in text
+        assert "verdict: rejected" in text
+        assert "completed_at:" in text
+        assert "audit_reason: workflow completed with rejected verdict" in text
+
+    def test_reconcile_workflow_specs_uses_exact_search_attribute_path(
+        self, tmp_path: Path
+    ):
+        """Workflow metadata reconciles a spec outside any default directory."""
+        spec_path = tmp_path / "outside-default" / "exact.md"
+        spec_path.parent.mkdir()
+        spec_path.write_text(
+            "---\nstatus: dispatched\nworkflow_id: wf-exact\n---\nBody\n"
+        )
+        workflow = self._workflow("COMPLETED", "rejected")
+        workflow.id = "wf-exact"
+        workflow.search_attributes["mtor_spec"] = [str(spec_path)]
+
+        result = reconcile_workflow_specs([workflow])
+
+        assert result["fixed"] == [
+            {
+                "name": "exact",
+                "was": "dispatched",
+                "now": "failed",
+                "reason": "workflow completed with rejected verdict",
+            }
+        ]
+        text = spec_path.read_text()
+        assert "status: failed" in text
+        assert "verdict: rejected" in text
+        assert "audit_reason: workflow completed with rejected verdict" in text
 
     def test_running_workflow_stays_dispatched(self, tmp_path: Path):
         """RUNNING workflow leaves the spec dispatched."""
