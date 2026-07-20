@@ -103,7 +103,8 @@ mtor deny ribosome-zhipu-abc123
 | `mtor approve <id>` | Approve a deferred task |
 | `mtor deny <id>` | Deny a deferred task |
 | `mtor doctor` | Health check |
-| `mtor deploy` | Sync + restart worker |
+| `mtor deploy` | Sync the germline content repository, then restart the worker |
+| `mtor rictor deploy` | Sync mTOR worker code, restart services, and verify health |
 | `mtor history` | Recent run history from JSONL log |
 | `mtor checkpoints` | List saved checkpoints from failed runs |
 | `mtor schema` | Emit JSON schema of all commands |

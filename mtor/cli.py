@@ -3212,7 +3212,7 @@ def publish(
 
 @app.command
 def deploy() -> None:
-    """Sync code to worker host, restart mtor worker, verify health."""
+    """Sync the germline content repository, then restart the mtor worker."""
     import time
 
     _require_backend_configuration("mtor deploy")
