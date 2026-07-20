@@ -37,7 +37,9 @@ def _make_proc() -> MagicMock:
     return proc
 
 
-def _mock_nonempty_diff(content: str = "diff --git a/foo.py b/foo.py\n+line\n") -> MagicMock:
+def _mock_nonempty_diff(
+    content: str = "diff --git a/foo.py b/foo.py\n+line\n",
+) -> MagicMock:
     r = MagicMock()
     r.stdout = content
     return r
@@ -47,20 +49,6 @@ def _mock_empty_diff() -> MagicMock:
     r = MagicMock()
     r.stdout = ""
     return r
-
-
-def _patches_for_kill_check(
-    *,
-    diff_run,
-    sleep_side_effect=None,
-    sleep_mock=None,
-    skip_stall: bool = False,
-):
-    """Common patch stack for stall checks that should NOT touch real processes.
-
-    Returns a (stack_enter_context, mock_activity) tuple suited for a ``with`` chain.
-    """
-    raise NotImplementedError  # not used; tests inline their own context managers
 
 
 class TestFrozenHashGrowingStdout:
@@ -83,18 +71,29 @@ class TestFrozenHashGrowingStdout:
                 raise asyncio.CancelledError("test limit")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_nonempty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("asyncio.sleep", side_effect=mock_sleep),
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
             try:
-                _run(_heartbeat_stall_check(
-                    proc, "/tmp/worktree", "zhipu", "test task",
-                    skip_stall=False, stdout_counter=stdout_counter,
-                ))
+                _run(
+                    _heartbeat_stall_check(
+                        proc,
+                        "/tmp/worktree",
+                        "zhipu",
+                        "test task",
+                        skip_stall=False,
+                        stdout_counter=stdout_counter,
+                    )
+                )
             except (asyncio.CancelledError, RuntimeError):
                 pass
 
@@ -110,19 +109,31 @@ class TestFrozenHashStaticStdout:
         stdout_counter = [5000]  # static — never changes
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_nonempty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", new_callable=AsyncMock),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:abc",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:abc",
+                )
+            )
 
         kill_group.assert_awaited_once()
         # Contract: the verified shutdown must receive the worktree and identity.
@@ -162,16 +173,24 @@ class TestOscillatingHashGrowingStdout:
         with (
             patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run),
             patch("mtor.worker.translocase.activity") as mock_activity,
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("asyncio.sleep", side_effect=mock_sleep),
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
             try:
-                _run(_heartbeat_stall_check(
-                    proc, "/tmp/worktree", "zhipu", "test task",
-                    skip_stall=False, stdout_counter=stdout_counter,
-                ))
+                _run(
+                    _heartbeat_stall_check(
+                        proc,
+                        "/tmp/worktree",
+                        "zhipu",
+                        "test task",
+                        skip_stall=False,
+                        stdout_counter=stdout_counter,
+                    )
+                )
             except (asyncio.CancelledError, RuntimeError):
                 pass
 
@@ -199,16 +218,25 @@ class TestOscillatingHashStaticStdout:
             patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", new_callable=AsyncMock),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:xyz",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:xyz",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -227,19 +255,30 @@ class TestBackwardCompatibleNoCounter:
         proc = _make_proc()
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_nonempty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", new_callable=AsyncMock),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:no-counter",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:no-counter",
+                )
+            )
 
         kill_group.assert_awaited_once()
         legacy_kill.assert_not_called()
@@ -272,20 +311,32 @@ class TestEmptyDiffStaticStdout:
                 raise asyncio.CancelledError("test limit")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
             try:
-                _run(_heartbeat_stall_check(
-                    proc, "/tmp/worktree", "zhipu", "test task",
-                    skip_stall=False, stdout_counter=stdout_counter,
-                    worktree_path="/tmp/worktree", attempt_identity="wf:1:patient",
-                ))
+                _run(
+                    _heartbeat_stall_check(
+                        proc,
+                        "/tmp/worktree",
+                        "zhipu",
+                        "test task",
+                        skip_stall=False,
+                        stdout_counter=stdout_counter,
+                        worktree_path="/tmp/worktree",
+                        attempt_identity="wf:1:patient",
+                    )
+                )
             except asyncio.CancelledError:
                 pass
 
@@ -312,19 +363,31 @@ class TestEmptyDiffStaticStdout:
                 raise AssertionError("empty diff stall detector waited too long")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:empty-60",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:empty-60",
+                )
+            )
 
         # 4-tick ramp-up + 60 empty ticks == kill on tick 64. Allow slack
         # but assert the patient threshold, not the old 30-tick value.
@@ -351,20 +414,32 @@ class TestEmptyDiffStaticStdout:
                 raise asyncio.CancelledError("test limit")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
             try:
-                _run(_heartbeat_stall_check(
-                    proc, "/tmp/worktree", "zhipu", "test task",
-                    skip_stall=False, stdout_counter=stdout_counter,
-                    worktree_path="/tmp/worktree", attempt_identity="wf:1:warn-only",
-                ))
+                _run(
+                    _heartbeat_stall_check(
+                        proc,
+                        "/tmp/worktree",
+                        "zhipu",
+                        "test task",
+                        skip_stall=False,
+                        stdout_counter=stdout_counter,
+                        worktree_path="/tmp/worktree",
+                        attempt_identity="wf:1:warn-only",
+                    )
+                )
             except asyncio.CancelledError:
                 pass
 
@@ -386,19 +461,30 @@ class TestEveryKillClassUsesVerifiedShutdown:
             return None
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = True
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:cancel",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:cancel",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -421,21 +507,32 @@ class TestEveryKillClassUsesVerifiedShutdown:
                 raise AssertionError("scout kill path waited too long")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=True,
-                stdout_counter=stdout_counter,
-                stderr_counter=stderr_counter,
-                worktree_path="/tmp/scout-wt", attempt_identity="wf:1:scout",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=True,
+                    stdout_counter=stdout_counter,
+                    stderr_counter=stderr_counter,
+                    worktree_path="/tmp/scout-wt",
+                    attempt_identity="wf:1:scout",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -450,19 +547,31 @@ class TestEveryKillClassUsesVerifiedShutdown:
         stdout_counter = [5000]  # static
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_nonempty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", new_callable=AsyncMock),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:frozen",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:frozen",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -489,16 +598,25 @@ class TestEveryKillClassUsesVerifiedShutdown:
             patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", new_callable=AsyncMock),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:osc",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:osc",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -520,19 +638,31 @@ class TestEveryKillClassUsesVerifiedShutdown:
                 raise AssertionError("empty-diff kill path waited too long")
 
         with (
-            patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
+            patch(
+                "mtor.worker.translocase._subprocess.run",
+                return_value=_mock_empty_diff(),
+            ),
             patch("mtor.worker.translocase.activity") as mock_activity,
             patch("asyncio.sleep", side_effect=mock_sleep),
-            patch("mtor.worker.translocase._graceful_kill_group", new=AsyncMock()) as kill_group,
+            patch(
+                "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+            ) as kill_group,
             patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
         ):
             mock_activity.is_cancelled.return_value = False
             mock_activity.heartbeat = MagicMock()
-            _run(_heartbeat_stall_check(
-                proc, "/tmp/worktree", "zhipu", "test task",
-                skip_stall=False, stdout_counter=stdout_counter,
-                worktree_path="/tmp/worktree", attempt_identity="wf:1:empty",
-            ))
+            _run(
+                _heartbeat_stall_check(
+                    proc,
+                    "/tmp/worktree",
+                    "zhipu",
+                    "test task",
+                    skip_stall=False,
+                    stdout_counter=stdout_counter,
+                    worktree_path="/tmp/worktree",
+                    attempt_identity="wf:1:empty",
+                )
+            )
 
         kill_group.assert_awaited_once()
         _assert_graceful_called_with_scope(
@@ -557,7 +687,7 @@ class TestNoKillPathCallsBareProcessGroupKill:
         source = inspect.getsource(translocase.translate)
         call_start = source.index("_heartbeat_stall_check(")
         call_end = source.index(")", call_start)
-        call_site = source[call_start:call_end + 1]
+        call_site = source[call_start : call_end + 1]
         assert "worktree_path=worktree_path" in call_site
         assert "attempt_identity=attempt_identity" in call_site
 
