@@ -353,6 +353,9 @@ class TestExtractClaudeVerificationEvidence:
             "git push --force origin main",
             "sudo apt install -y something",
             "dd if=/dev/zero of=/disk",
+            "grep -m1 'pytest passed' worker.log",
+            "rg 'uv run pytest' logs/",
+            "echo pytest",
         ]
         for i, cmd in enumerate(commands):
             records = [
@@ -389,37 +392,33 @@ class TestExtractClaudeVerificationEvidence:
     def test_preserves_invocation_order(self):
         records = []
         for i, cmd in enumerate(["pytest a", "pytest b", "pytest c"]):
-            records.append(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": f"c{i}",
-                                "name": "Bash",
-                                "input": {"command": cmd},
-                            }
-                        ]
-                    },
-                }
+            records.extend(
+                [
+                    json.loads(_assistant_tool_use(f"c{i}", cmd)),
+                    json.loads(_tool_result(f"c{i}", f"result-{i}")),
+                ]
             )
-            records.append(
-                {
-                    "type": "user",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": f"c{i}",
-                                "content": f"result-{i}",
-                            }
-                        ]
-                    },
-                }
-            )
+
         evidence = _extract_claude_verification_evidence(records)
+
         assert [cmd for cmd, _ in evidence] == ["pytest a", "pytest b", "pytest c"]
+
+    def test_bounded_window_prefers_latest_verifiers(self):
+        records = []
+        total = _CLAUDE_VERIFY_MAX_ITEMS + 2
+        for i in range(total):
+            records.extend(
+                [
+                    json.loads(_assistant_tool_use(f"c{i}", f"pytest test_{i}.py")),
+                    json.loads(_tool_result(f"c{i}", f"result-{i}")),
+                ]
+            )
+
+        evidence = _extract_claude_verification_evidence(records)
+
+        assert len(evidence) == _CLAUDE_VERIFY_MAX_ITEMS
+        assert evidence[0][0] == "pytest test_2.py"
+        assert evidence[-1][0] == f"pytest test_{total - 1}.py"
 
     def test_caps_items_at_max(self):
         records = []

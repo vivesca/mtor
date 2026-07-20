@@ -1161,7 +1161,7 @@ _CLAUDE_TOTAL_BUDGET = 3500  # entire normalized payload
 # ``go test ./...`` survives the regex (the boundary would reject the
 # leading dot in the path).
 _CLAUDE_VERIFY_COMMAND_RE = _re.compile(
-    r"\b(?:"
+    r"^(?:"
     r"uv\s+run\s+pytest|pytest|"
     r"uv\s+run\s+ruff|ruff|"
     r"uv\s+run\s+mypy|mypy|"
@@ -1284,13 +1284,17 @@ def _extract_claude_verification_evidence(
             if item_type == "tool_use" and item.get("name") == "Bash":
                 call_id = item.get("id")
                 cmd = (item.get("input") or {}).get("command")
+                cmd_clean = (
+                    _re.sub(r"^(?:cd\s+\S+\s*&&\s*)+", "", cmd).strip()
+                    if isinstance(cmd, str)
+                    else ""
+                )
                 if (
                     isinstance(call_id, str)
-                    and isinstance(cmd, str)
-                    and _CLAUDE_VERIFY_COMMAND_RE.search(cmd)
+                    and _CLAUDE_VERIFY_COMMAND_RE.search(cmd_clean)
                     and not _CLAUDE_DESTRUCTIVE_RE.search(cmd)
                 ):
-                    pending[call_id] = cmd
+                    pending[call_id] = cmd_clean
                     if call_id not in order:
                         order.append(call_id)
             elif item_type == "tool_result":
@@ -1308,15 +1312,16 @@ def _extract_claude_verification_evidence(
     for call_id in order:
         if call_id not in results:
             continue
-        cmd = pending[call_id]
-        cmd_clean = _re.sub(r"^(?:cd\s+\S+\s*&&\s*)+", "", cmd).strip()
+        cmd_clean = pending[call_id]
         if not cmd_clean:
             continue
         tail = _tail_for_claude_verify(results[call_id])
         evidence.append((cmd_clean, tail))
-        if len(evidence) >= _CLAUDE_VERIFY_MAX_ITEMS:
-            break
-    return evidence
+    # Agents commonly iterate through failing focused runs before the final
+    # green verifier. Preserve the latest bounded window so superseded setup
+    # failures do not crowd the successful final evidence out of chaperone's
+    # payload. A session whose latest run failed still remains visibly failed.
+    return evidence[-_CLAUDE_VERIFY_MAX_ITEMS:]
 
 
 def _normalize_claude_stream_json(stdout: str) -> str:
