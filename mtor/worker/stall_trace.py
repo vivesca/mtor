@@ -66,7 +66,15 @@ def _derive_trace_id(workflow_id: str) -> str:
         return ""
 
 
-def create_task_trace(task: str, provider: str, workflow_id: str = "") -> object | None:
+def create_task_trace(
+    task: str,
+    provider: str,
+    workflow_id: str = "",
+    *,
+    mode: str = "",
+    harness: str = "",
+    repo: str = "",
+) -> object | None:
     """Create a Langfuse root observation for a ribosome task execution.
 
     Returns the root agent observation, or None if Langfuse is unavailable.
@@ -88,6 +96,9 @@ def create_task_trace(task: str, provider: str, workflow_id: str = "") -> object
                 "task": task[:200],
                 "workflow_id": workflow_id,
                 "input": task,
+                "mode": mode,
+                "harness": harness or "ribosome",
+                "repo": repo,
             },
         )
     except Exception:
@@ -122,6 +133,7 @@ def finalize_trace(trace, result: dict) -> None:
                 "success": result.get("success"),
                 "stderr": result.get("stderr", ""),
                 "mode": result.get("mode", ""),
+                "harness": result.get("harness", "") or "ribosome",
                 "branch_name": result.get("branch_name", ""),
                 "merged": result.get("merged"),
                 "diff_stat": result.get("post_diff", {}).get("stat", ""),

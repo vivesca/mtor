@@ -1463,7 +1463,14 @@ async def translate(
 
     # Create Langfuse trace for this task execution (no-op if langfuse not installed)
     _log_event(workflow_id, "dispatch", task=task[:200], mode=mode)
-    _trace = create_task_trace(task, provider, workflow_id)
+    _trace = create_task_trace(
+        task,
+        provider,
+        workflow_id,
+        mode=mode,
+        harness=harness,
+        repo=repo or "",
+    )
 
     # Use structured repo parameter when provided; fall back to prompt mining.
     # Expand `~` defensively — dispatch.py already expands, but specs arriving
@@ -2210,6 +2217,7 @@ async def translate(
         "branch_name": branch_name if worktree_path else "",
         "merged": merged,
         "mode": mode,
+        "harness": harness or "ribosome",
         "main_checkout_mutated": main_checkout_mutated,
     }
     finalize_trace(_trace, _r)
