@@ -581,7 +581,21 @@ def _check_worker_sha(*, skip: bool = False, repo: str | None = None) -> bool:
 
 
 def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
-    """Return worker SHA state without deploying or restarting anything."""
+    """Return worker SHA state without deploying or restarting anything.
+
+    Predicts the same repo decision as ``_check_worker_sha``: resolves the
+    worker repo via ``_worker_addressable_repo_path(repo)`` so an explicit
+    non-germline target is probed at its own worker checkout, not germline.
+    Containment semantics match the gate — a worker HEAD that has moved past
+    local (its sync timer pulls origin every few minutes) but still contains
+    local is treated as in sync, while genuine divergence or local-ahead
+    states report that deployment would occur.
+
+    Strictly read-only: never pushes, merges, restarts, or otherwise mutates
+    either checkout. The germline checkout-hygiene probe runs only when the
+    dispatch actually targets germline; a non-germline target repo is covered
+    by the stricter ``_worker_target_repo_state`` gate.
+    """
     if skip:
         return {
             "skipped": True,
@@ -602,6 +616,14 @@ def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
         "error": "",
         "worker_checkout": {**_CHECKOUT_OK},
     }
+
+    # Resolve the same worker repo as _check_worker_sha. An explicit
+    # worker-addressable repo (under ~/code or ~/germline) is probed at its
+    # own worker checkout; anything else (None, '.' / '~' sentinels, or an
+    # unrecognised path) falls back to the germline worker dir, matching the
+    # gate's fallback behaviour.
+    worker_repo_dir = _worker_addressable_repo_path(repo) or WORKER_GERMLINE_DIR
+
     try:
         local_cmd = ["git"]
         if repo:
@@ -617,7 +639,11 @@ def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
             state["error"] = f"local git HEAD lookup failed: {local.stderr.strip()}"
             return state
         remote = subprocess.run(
-            ["ssh", WORKER_HOST, "cd ~/germline && git rev-parse HEAD"],
+            [
+                "ssh",
+                WORKER_HOST,
+                f"cd {shlex.quote(worker_repo_dir)} && git rev-parse HEAD",
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -625,15 +651,53 @@ def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
         if remote.returncode != 0:
             state["error"] = f"worker git HEAD lookup failed: {remote.stderr.strip()}"
             return state
-        state["local_sha"] = local.stdout.strip()
-        state["worker_sha"] = remote.stdout.strip()
-        state["in_sync"] = state["local_sha"] == state["worker_sha"]
-        state["auto_deploy_would_occur"] = not state["in_sync"]
 
-        checkout = _worker_checkout_state()
-        state["worker_checkout"] = checkout
-        if not checkout["ok"]:
-            state["error"] = checkout["detail"]
+        local_sha = local.stdout.strip()
+        worker_sha = remote.stdout.strip()
+        state["local_sha"] = local_sha
+        state["worker_sha"] = worker_sha
+
+        # Match the gate's containment semantics. Equal SHAs are in sync with
+        # no extra round-trip. Otherwise check whether the worker HEAD has
+        # moved past local but still CONTAINS it (worker git-sync-germline
+        # timer pulls origin every ~5 min) — pushing local in that state
+        # fails as non-fast-forward and would restart the worker for nothing,
+        # so it is effectively in sync. `git merge-base --is-ancestor` exits
+        # 0 when contained, non-zero otherwise (1 = not ancestor; 128 = local
+        # SHA not yet a worker object, e.g. local ahead with unpushed commits);
+        # both non-zero cases mean deployment would occur.
+        if local_sha == worker_sha:
+            state["in_sync"] = True
+            state["auto_deploy_would_occur"] = False
+        else:
+            contains_local = subprocess.run(
+                [
+                    "ssh",
+                    WORKER_HOST,
+                    (
+                        f"cd {shlex.quote(worker_repo_dir)} && "
+                        "git merge-base --is-ancestor "
+                        f"{shlex.quote(local_sha)} HEAD"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            contained = contains_local.returncode == 0
+            state["in_sync"] = contained
+            state["auto_deploy_would_occur"] = not contained
+
+        # Germline checkout hygiene is meaningful only for germline-targeted
+        # dispatches; a non-germline target repo is covered by the stricter
+        # _worker_target_repo_state gate, and coupling the plan to germline
+        # here would make a healthy target repo appear stale just because
+        # germline is at a different SHA.
+        if worker_repo_dir == WORKER_GERMLINE_DIR:
+            checkout = _worker_checkout_state()
+            state["worker_checkout"] = checkout
+            if not checkout["ok"]:
+                state["error"] = checkout["detail"]
     except (OSError, subprocess.TimeoutExpired) as exc:
         state["error"] = str(exc)
     return state
