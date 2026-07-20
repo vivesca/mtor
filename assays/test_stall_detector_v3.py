@@ -14,6 +14,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from langfuse import Langfuse
+from langfuse._client.span import LangfuseSpan
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mtor" / "worker"))
 
 _stall_trace_available = False
@@ -38,14 +41,31 @@ if not _stall_trace_available:
     pytestmark = pytest.mark.skip(reason="mtor.worker.stall_trace not yet available")
 
 
+def _make_client() -> MagicMock:
+    """Mock client spec'd to v4 so removed v2 attrs raise AttributeError."""
+    client = MagicMock(spec=Langfuse)
+    client.start_observation.return_value = MagicMock(spec=LangfuseSpan)
+    return client
+
+
+def _make_observation() -> MagicMock:
+    """Mock observation spec'd to v4 so removed v2 attrs raise AttributeError."""
+    obs = MagicMock(spec=LangfuseSpan)
+    obs.start_observation.return_value = MagicMock(spec=LangfuseSpan)
+    return obs
+
+
 class TestStallTraceEmission:
-    """Stall events are recorded as Langfuse spans for observability."""
+    """Stall events are recorded as Langfuse observations for observability."""
 
     @patch("mtor.worker.stall_trace.get_langfuse")
-    def test_stall_detected_emits_span(self, mock_lf):
-        """When a stall is detected, a span is added to the current trace."""
-        mock_trace = MagicMock()
-        mock_lf.return_value.trace.return_value = mock_trace
+    @patch("langfuse.Langfuse.create_trace_id", return_value="stall-trace-id")
+    def test_stall_detected_emits_span(self, _ctid, mock_lf):
+        """v4: standalone stall creates a root observation + 'stall-detected' child."""
+        client = _make_client()
+        root = _make_observation()
+        client.start_observation.return_value = root
+        mock_lf.return_value = client
 
         record_stall_event(  # type: ignore[union-attr]
             workflow_id="ribosome-glm51-sha-gate-a1b2c3d4",
@@ -54,17 +74,25 @@ class TestStallTraceEmission:
             details={"tool": "Read", "count": 4},
         )
 
-        mock_trace.span.assert_called_once()
-        call_kwargs = mock_trace.span.call_args[1]
+        # Root observation is the standalone stall trace.
+        client.start_observation.assert_called_once()
+        root_kwargs = client.start_observation.call_args[1]
+        assert root_kwargs["name"] == "stall-ribosome-glm51-sha-gate-a1b2c3d4"
+        # Child observation carries the stall details.
+        root.start_observation.assert_called_once()
+        call_kwargs = root.start_observation.call_args[1]
         assert call_kwargs["name"] == "stall-detected"
         assert call_kwargs["metadata"]["pattern"] == "repeated_action"
         assert call_kwargs["metadata"]["action"] == "warn"
 
     @patch("mtor.worker.stall_trace.get_langfuse")
-    def test_stall_kill_emits_generation(self, mock_lf):
+    @patch("langfuse.Langfuse.create_trace_id", return_value="stall-trace-id")
+    def test_stall_kill_emits_generation(self, _ctid, mock_lf):
         """Kill events include the partial stdout for debugging."""
-        mock_trace = MagicMock()
-        mock_lf.return_value.trace.return_value = mock_trace
+        client = _make_client()
+        root = _make_observation()
+        client.start_observation.return_value = root
+        mock_lf.return_value = client
 
         record_stall_event(  # type: ignore[union-attr]
             workflow_id="ribosome-glm51-sha-gate-a1b2c3d4",
@@ -73,7 +101,7 @@ class TestStallTraceEmission:
             details={"partial_stdout": "Working on file..."},
         )
 
-        call_kwargs = mock_trace.span.call_args[1]
+        call_kwargs = root.start_observation.call_args[1]
         assert call_kwargs["metadata"]["action"] == "kill"
         assert "partial_stdout" in call_kwargs["metadata"]
 
