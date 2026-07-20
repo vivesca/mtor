@@ -58,18 +58,28 @@ import mtor.worker.chaperone_review as chaperone_review  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_review_log(tmp_path, monkeypatch):
-    """Redirect the chaperone review ledger to a temp file for every test.
+    """Redirect the chaperone review ledger and telemetry for every test.
 
     chaperone() appends each review to a module-level REVIEW_LOG. Without this
     redirect those appends land in the REAL production ledger
     (~/germline/loci/ribosome-reviews.jsonl), polluting `mtor audit` and drift
     forensics with synthetic test rows. autouse means no future test can leak —
     every chaperone() call in this module writes to its own tmp_path file.
+
+    chaperone() also calls record_review_outcome() to attach scores to
+    Langfuse. The default no-op stand-in here keeps existing tests from
+    hitting the real telemetry client; the focused integration test
+    overrides it with a Mock to assert call args.
     """
     monkeypatch.setattr(
         chaperone_review,
         "REVIEW_LOG",
         tmp_path / "ribosome-reviews.jsonl",
+    )
+    monkeypatch.setattr(
+        chaperone_review,
+        "record_review_outcome",
+        lambda *args, **kwargs: None,
     )
 
 
@@ -1091,3 +1101,49 @@ class TestReviewLogIsolation:
         # The write landed in the redirected (temp) ledger instead.
         assert chaperone_review.REVIEW_LOG != prod_log
         assert chaperone_review.REVIEW_LOG.exists()
+
+
+class TestRecordReviewOutcomeWiring:
+    """Focused integration test: chaperone() calls record_review_outcome once.
+
+    The autouse _isolate_review_log fixture replaces record_review_outcome
+    with a no-op so the rest of the suite never hits Langfuse. This test
+    overrides that no-op with a Mock to assert the call shape.
+    """
+
+    def test_chaperone_calls_record_review_outcome_once_with_final_response(
+        self, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        recorder = MagicMock()
+        monkeypatch.setattr(chaperone_review, "record_review_outcome", recorder)
+
+        workflow_id = "ribosome-record-review-wiring"
+        result = _make_result(
+            task="Update mtor/worker/chaperone_review.py",
+            stdout="uv run pytest assays/test_chaperone.py -q\n42 passed",
+            post_diff={
+                "stat": " mtor/worker/chaperone_review.py | 20 ++++++\n",
+                "numstat": "20\t0\tmtor/worker/chaperone_review.py",
+                "commits": ["abc1234 wire record_review_outcome"],
+                "commit_count": 1,
+            },
+            branch_name="ribosome/record-review",
+        )
+        result["workflow_id"] = workflow_id
+
+        review = _run(chaperone(result))
+
+        # Exactly one telemetry call, from inside the activity.
+        assert recorder.call_count == 1
+        call_args = recorder.call_args
+        # First positional arg is the workflow ID.
+        assert call_args.args[0] == workflow_id
+        # Second positional arg is the final response dict.
+        passed_review = call_args.args[1]
+        # The fields passed to telemetry must match what chaperone returns.
+        assert passed_review["verdict"] == review["verdict"]
+        assert passed_review["approved"] == review["approved"]
+        assert passed_review["flags"] == review["flags"]
+        assert passed_review["satisfaction"] == review["satisfaction"]

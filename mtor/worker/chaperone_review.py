@@ -10,6 +10,8 @@ from pathlib import Path
 
 from temporalio import activity
 
+from mtor.worker.stall_trace import record_review_outcome
+
 # Path overridable via env so tests (or alternate hosts) never append to the
 # real production ledger. Tests redirect this per-call; the env fallback is a
 # belt-and-suspenders guard for any path that bypasses the monkeypatch.
@@ -751,7 +753,7 @@ async def chaperone(result: dict) -> dict:
     except OSError:
         pass
 
-    return {
+    response = {
         "approved": approved,
         "flags": flags,
         "verdict": verdict,
@@ -761,3 +763,14 @@ async def chaperone(result: dict) -> dict:
         "completion_dossier": completion_dossier,
         "dossier_path": review.get("dossier_path", ""),
     }
+
+    # Attach the final review to the workflow's Langfuse trace. Stays
+    # inside the activity implementation (no network calls from
+    # deterministic workflow code) and swallows all telemetry failures
+    # so a Langfuse outage can never affect the review result.
+    record_review_outcome(
+        str(result.get("workflow_id") or ""),
+        response,
+    )
+
+    return response
