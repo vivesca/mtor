@@ -11,12 +11,16 @@ def test_scout_cli_accepts_repo_flag():
     signature = inspect.signature(cli_module.scout)
     assert "repo" in signature.parameters
     assert signature.parameters["repo"].default is None
+    assert "harness" in signature.parameters
+    assert signature.parameters["harness"].default == ""
 
 
 def test_research_cli_accepts_repo_flag():
     signature = inspect.signature(cli_module.research)
     assert "repo" in signature.parameters
     assert signature.parameters["repo"].default is None
+    assert "harness" in signature.parameters
+    assert signature.parameters["harness"].default == ""
 
 
 def test_dispatch_repo_normalized_for_worker():

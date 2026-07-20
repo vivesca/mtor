@@ -2197,6 +2197,51 @@ class TestScoutMode:
         spec = call_kwargs["args"][0][0]
         assert spec["provider"] == "droid"
 
+    def test_scout_with_harness(self):
+        """Scout exposes the same explicit harness routing as build dispatch."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(
+                ["scout", "--no-wait", "--harness", "claude", "Explore codebase"]
+            )
+        assert exit_code == 0
+        assert data["ok"] is True
+        call_kwargs = mock_client.start_workflow.call_args.kwargs
+        spec = call_kwargs["args"][0][0]
+        assert spec["harness"] == "claude"
+        assert call_kwargs["id"].startswith("claude-")
+
+    def test_scout_unknown_harness_fails_before_temporal(self):
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(
+                ["scout", "--no-wait", "--harness", "missing", "Explore codebase"]
+            )
+        assert exit_code == 2
+        assert data["error"]["code"] == "UNKNOWN_HARNESS"
+        mock_client.start_workflow.assert_not_called()
+
+    def test_research_with_harness(self):
+        """Research can route GLM-5.2 through Claude Code explicitly."""
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            exit_code, data = invoke(
+                [
+                    "research",
+                    "--no-wait",
+                    "--harness",
+                    "claude",
+                    "Compare agent harness reliability",
+                ]
+            )
+        assert exit_code == 0
+        assert data["ok"] is True
+        call_kwargs = mock_client.start_workflow.call_args.kwargs
+        spec = call_kwargs["args"][0][0]
+        assert spec["mode"] == "research"
+        assert spec["harness"] == "claude"
+        assert call_kwargs["id"].startswith("claude-")
+
     def test_scout_defaults_provider_in_spec(self):
         """Scout command stores the resolved default provider in the workflow spec."""
         mock_client, _ = make_mock_client()

@@ -119,6 +119,23 @@ def _require_backend_configuration(cmd: str) -> None:
         )
 
 
+def _require_known_harness(cmd: str, harness: str) -> None:
+    """Reject an explicit harness before dispatching any workflow."""
+    if not harness or harness in PROVIDER_HARNESS_MAP:
+        return
+    allowed = ", ".join(sorted(PROVIDER_HARNESS_MAP))
+    sys.exit(
+        _err(
+            cmd,
+            f"Unknown harness '{harness}'",
+            "UNKNOWN_HARNESS",
+            f"Use one of: {allowed}",
+            [],
+            exit_code=2,
+        )
+    )
+
+
 def _get_client():
     """Keep legacy CLI paths fail-closed until they join the backend seam."""
     _require_backend_configuration("mtor")
@@ -2693,9 +2710,11 @@ def scout(
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 300,
     repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
+    harness: Annotated[str, Parameter(name=["--harness"])] = "",
     allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""
+    _require_known_harness("mtor scout", harness)
     workflow_id = _dispatch_prompt(
         prompt,
         provider=provider,
@@ -2704,6 +2723,7 @@ def scout(
         wait=wait,
         timeout=timeout,
         repo=repo,
+        harness=harness,
         allow_local_paths=allow_local_paths,
     )
     if wait and workflow_id:
@@ -2719,9 +2739,11 @@ def research(
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 600,
     repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
+    harness: Annotated[str, Parameter(name=["--harness"])] = "",
     allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Dispatch an external research task. Searches web, synthesizes findings."""
+    _require_known_harness("mtor research", harness)
     workflow_id = _dispatch_prompt(
         prompt,
         provider=provider,
@@ -2730,6 +2752,7 @@ def research(
         wait=wait,
         timeout=timeout,
         repo=repo,
+        harness=harness,
         allow_local_paths=allow_local_paths,
     )
     if wait and workflow_id:
