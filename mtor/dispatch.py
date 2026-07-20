@@ -617,12 +617,18 @@ def _worker_sha_plan(*, skip: bool = False, repo: str | None = None) -> dict:
         "worker_checkout": {**_CHECKOUT_OK},
     }
 
-    # Resolve the same worker repo as _check_worker_sha. An explicit
-    # worker-addressable repo (under ~/code or ~/germline) is probed at its
-    # own worker checkout; anything else (None, '.' / '~' sentinels, or an
-    # unrecognised path) falls back to the germline worker dir, matching the
-    # gate's fallback behaviour.
-    worker_repo_dir = _worker_addressable_repo_path(repo) or WORKER_GERMLINE_DIR
+    # Resolve the same worker repo as _check_worker_sha. Explicit paths outside
+    # the worker-addressable roots are rejected by the real gate, so the plan
+    # must surface the same error instead of silently describing germline.
+    resolved_worker_repo = _worker_addressable_repo_path(repo)
+    if repo and not resolved_worker_repo and str(repo).strip() not in (".", "~"):
+        state["error"] = (
+            f"repo {repo!r} is not addressable on the worker (only paths under "
+            "~/code or ~/germline are supported); re-run with --skip-sha-check "
+            "or dispatch a repo under one of those roots"
+        )
+        return state
+    worker_repo_dir = resolved_worker_repo or WORKER_GERMLINE_DIR
 
     try:
         local_cmd = ["git"]

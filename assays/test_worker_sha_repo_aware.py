@@ -292,6 +292,16 @@ class TestWorkerShaPlanRepoAware:
         # Non-germline target: germline checkout hygiene must NOT be reported.
         checkout_state.assert_not_called()
 
+    def test_unaddressable_repo_reports_same_gate_error_without_probing(self):
+        """An explicit unsupported path must not be explained as germline."""
+        with patch("mtor.dispatch.subprocess") as mock_sp:
+            plan = _worker_sha_plan(repo="~/projects/private-repo")
+
+        assert plan["in_sync"] is False
+        assert plan["auto_deploy_would_occur"] is False
+        assert "not addressable on the worker" in plan["error"]
+        mock_sp.run.assert_not_called()
+
     def test_default_repo_still_uses_germline_and_reports_checkout(self):
         """repo=None: worker probes fall back to /home/vivesca/germline and
         the germline checkout-hygiene report is still produced."""
