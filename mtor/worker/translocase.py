@@ -853,6 +853,8 @@ async def _heartbeat_stall_check(
     stderr_counter: list[int] | None = None,
     workflow_id: str = "",
     trace=None,
+    worktree_path: str | None = None,
+    attempt_identity: str | None = None,
 ) -> None:
     """Dual-signal stall detection: git diff hash + stdout byte growth.
 
@@ -862,8 +864,14 @@ async def _heartbeat_stall_check(
     changing the agent is still active.
 
     Graduated response: first stall detection logs a warning; second kills.
-    Empty-diff blindness: if diff stays empty for 20+ ticks (~10min), warn;
-    at 30+ ticks (~15min), kill.
+    Empty-diff patience: if the diff stays empty for 30+ ticks (~15min),
+    warn; at 60+ ticks (~30min) kill. The patient window tolerates silent
+    build harnesses (e.g. OpenCode) that take >15min to expose a diff.
+
+    Every termination path delegates to ``_graceful_kill_group`` so the
+    owned descendant tree is snapshotted, reaped by identity, and verified
+    gone. A bare historical-PGID signal can never kill an unrelated process
+    that recycled the leader's numeric pgid.
     """
     import hashlib
 
@@ -891,7 +899,11 @@ async def _heartbeat_stall_check(
                 f"killing process (pid={proc.pid})",
                 file=sys.stderr,
             )
-            _kill_process_group(proc)
+            await _graceful_kill_group(
+                proc,
+                worktree_path=worktree_path,
+                attempt_identity=attempt_identity,
+            )
             return
 
         # Compute diff content hash
@@ -965,7 +977,11 @@ async def _heartbeat_stall_check(
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                _kill_process_group(proc)
+                await _graceful_kill_group(
+                    proc,
+                    worktree_path=worktree_path,
+                    attempt_identity=attempt_identity,
+                )
                 return
             if no_output_ticks >= scout_no_output_warn:
                 print(
@@ -990,7 +1006,7 @@ async def _heartbeat_stall_check(
                 empty_ticks = 0  # stdout is active, agent is not stalled
                 continue
             empty_ticks += 1
-            if empty_ticks >= 30:
+            if empty_ticks >= 60:
                 if workflow_id:
                     with contextlib.suppress(Exception):
                         _log_event(
@@ -1016,9 +1032,13 @@ async def _heartbeat_stall_check(
                     f"killing process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                _kill_process_group(proc)
+                await _graceful_kill_group(
+                    proc,
+                    worktree_path=worktree_path,
+                    attempt_identity=attempt_identity,
+                )
                 return
-            if empty_ticks >= 20:
+            if empty_ticks >= 30:
                 print(
                     f"[stall-detect] empty diff + stagnant stdout warning at tick {tick} "
                     f"({empty_ticks} empty ticks, ~{empty_ticks * 30 // 60}min)",
@@ -1089,7 +1109,11 @@ async def _heartbeat_stall_check(
                     f"[stall-detect] killing stalled process (pid={proc.pid})",
                     file=sys.stderr,
                 )
-                _kill_process_group(proc)
+                await _graceful_kill_group(
+                    proc,
+                    worktree_path=worktree_path,
+                    attempt_identity=attempt_identity,
+                )
                 return
 
 
@@ -1400,6 +1424,8 @@ async def translate(
                 stderr_counter=stderr_counter,
                 workflow_id=workflow_id,
                 trace=_trace,
+                worktree_path=worktree_path,
+                attempt_identity=attempt_identity,
             )
         )
         pulse_task = asyncio.create_task(_heartbeat_pulse(f"{provider}:{task[:60]}"))
