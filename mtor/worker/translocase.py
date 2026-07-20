@@ -1132,6 +1132,247 @@ def _derive_output_tid(task_id_match, workflow_id: str) -> str:
     return f"{_time.strftime('%H%M%S')}-{os.getpid()}"
 
 
+# ---------------------------------------------------------------------------
+# Claude Code stream-json normalization
+# ---------------------------------------------------------------------------
+# The Claude harness emits a multi-megabyte newline-delimited JSON event
+# stream (``--output-format stream-json --verbose``). The ``translate()``
+# activity ships only ``stdout[:1000]`` to chaperone as the review payload
+# -- which on a real Claude session is one minified
+# ``type:"system", subtype:"init"`` record, hiding every signal chaperone
+# needs (final report, pytest invocations, pass/fail tails). The helpers
+# below project the full session into a bounded review payload so a
+# successful Claude run no longer trips ``thin_output``.
+
+# Bounds — sized so the normalized payload stays inside Temporal's review
+# envelope (the prior payload was 1000 chars). Each field has its own cap
+# so a single huge report or a single huge result tail cannot crowd out
+# the rest of the evidence.
+_CLAUDE_RESULT_BUDGET = 1200  # final ``result`` text
+_CLAUDE_VERIFY_CMD_BUDGET = 200  # per extracted verifier command
+_CLAUDE_VERIFY_RESULT_BUDGET = 400  # per extracted verifier tail
+_CLAUDE_VERIFY_MAX_ITEMS = 6  # cap on extracted verify blocks
+_CLAUDE_TOTAL_BUDGET = 3500  # entire normalized payload
+
+# Test and quality commands whose Bash invocations are safe to surface in
+# the review payload. ``arbitrary`` shell (pushes, rm, sudo, scp, ...) is
+# never copied; only these commands and bounded result tails reach
+# chaperone. ``go test`` is matched without a trailing word boundary so
+# ``go test ./...`` survives the regex (the boundary would reject the
+# leading dot in the path).
+_CLAUDE_VERIFY_COMMAND_RE = _re.compile(
+    r"\b(?:"
+    r"uv\s+run\s+pytest|pytest|"
+    r"uv\s+run\s+ruff|ruff|"
+    r"uv\s+run\s+mypy|mypy|"
+    r"npm\s+test|npm\s+run\s+test|pnpm\s+test|yarn\s+test|bun\s+test|"
+    r"cargo\s+test|"
+    r"go\s+test\b"
+    r")",
+    _re.IGNORECASE,
+)
+
+# Even when a command matches the test/quality recognizer, a destructive
+# preamble or chained operator means the line is not actually a verifier
+# run (e.g. ``rm -rf / && pytest``). Reject those so destructive shell
+# never reaches the review payload regardless of how it is wrapped.
+_CLAUDE_DESTRUCTIVE_RE = _re.compile(
+    r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b"
+    r"|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r\b"
+    r"|\bshutil\.rmtree\b"
+    r"|\bgit\s+push\s+--force\b"
+    r"|\bmkfs\b"
+    r"|\bdd\s+if="
+    r"|\bsudo\b"
+    r"|\bDROP\s+TABLE\b"
+    r"|\bDROP\s+DATABASE\b",
+    _re.IGNORECASE,
+)
+
+
+def _parse_claude_stream_records(stdout: str) -> list[dict]:
+    """Defensively split *stdout* into parsed JSON object records.
+
+    Each line is parsed independently; lines that are not JSON objects
+    (blank, prose, fragments, scalars) are skipped without aborting the
+    parse. The ribosome tee logger writes raw chunks into
+    :func:`_tee_stream`'s in-memory buffer, so the helper receives bare
+    NDJSON without any ``[stdout] `` prefix at runtime.
+    """
+    records: list[dict] = []
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def _extract_claude_final_report(records: list[dict]) -> str | None:
+    """Return the latest successful ``type=result`` ``result`` string.
+
+    Claude emits exactly one final ``type=result`` record per session,
+    but defensive code tolerates multiples. ``subtype="success"`` (or an
+    unlabeled subtype treated as success) is required; error subtypes
+    like ``error_max_tokens`` are ignored so a truncated run is never
+    projected as a completed report. An empty/whitespace ``result``
+    string is treated as missing.
+    """
+    candidate: str | None = None
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get("type") != "result":
+            continue
+        subtype = rec.get("subtype")
+        if subtype not in ("success", None):
+            continue
+        text = rec.get("result")
+        if isinstance(text, str) and text.strip():
+            candidate = text
+    return candidate
+
+
+def _tail_for_claude_verify(text: str, max_lines: int = 6) -> str:
+    """Return the bounded tail of a verification result.
+
+    pytest/ruff/mypy/cargo/go put their pass/fail summary at the end; the
+    last few lines carry ``N passed`` or ``failed:`` without dragging
+    tracebacks into the review payload.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    return "\n".join(lines[-max_lines:]).strip()
+
+
+def _extract_claude_verification_evidence(
+    records: list[dict],
+) -> list[tuple[str, str]]:
+    """Pair each test/quality Bash tool_use with its matching tool_result.
+
+    Walks *records* in order, collecting ``Bash`` tool_use commands whose
+    ``input.command`` matches :data:`_CLAUDE_VERIFY_COMMAND_RE` and the
+    first matching ``tool_result`` for each ``tool_use_id``. Returns
+    ``(command, tail)`` tuples in invocation order.
+
+    Each command has its leading ``cd <dir> && `` preamble stripped so
+    the review payload shows the actual verifier invocation, not the
+    worktree path. Arbitrary and destructive Bash commands never match
+    the recognizer and so are never surfaced.
+    """
+    pending: dict[str, str] = {}  # tool_use_id → command
+    results: dict[str, str] = {}  # tool_use_id → first result content
+    order: list[str] = []  # tool_use_ids in arrival order
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            continue
+        contents = msg.get("content")
+        if not isinstance(contents, list):
+            continue
+        for item in contents:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "tool_use" and item.get("name") == "Bash":
+                call_id = item.get("id")
+                cmd = (item.get("input") or {}).get("command")
+                if (
+                    isinstance(call_id, str)
+                    and isinstance(cmd, str)
+                    and _CLAUDE_VERIFY_COMMAND_RE.search(cmd)
+                    and not _CLAUDE_DESTRUCTIVE_RE.search(cmd)
+                ):
+                    pending[call_id] = cmd
+                    if call_id not in order:
+                        order.append(call_id)
+            elif item_type == "tool_result":
+                call_id = item.get("tool_use_id")
+                content = item.get("content")
+                if (
+                    isinstance(call_id, str)
+                    and call_id in pending
+                    and isinstance(content, str)
+                    and call_id not in results
+                ):
+                    results[call_id] = content
+
+    evidence: list[tuple[str, str]] = []
+    for call_id in order:
+        if call_id not in results:
+            continue
+        cmd = pending[call_id]
+        cmd_clean = _re.sub(r"^(?:cd\s+\S+\s*&&\s*)+", "", cmd).strip()
+        if not cmd_clean:
+            continue
+        tail = _tail_for_claude_verify(results[call_id])
+        evidence.append((cmd_clean, tail))
+        if len(evidence) >= _CLAUDE_VERIFY_MAX_ITEMS:
+            break
+    return evidence
+
+
+def _normalize_claude_stream_json(stdout: str) -> str:
+    """Project a Claude Code stream-json session into a bounded review payload.
+
+    Parses the stream defensively and assembles:
+
+    1. ``[auto-verify] <cmd>`` blocks (with bounded result tails) for
+       each detected test/quality Bash command (pytest, ruff, mypy,
+       npm/pnpm/yarn/bun test, cargo test, go test).
+    2. The final ``type=result`` record's human-readable ``result``
+       string.
+
+    Verification evidence precedes the final report so an existing
+    1,000-byte review window still sees it. Each field is bounded, and
+    the total payload is capped at :data:`_CLAUDE_TOTAL_BUDGET`.
+
+    Returns ``stdout[:1000]`` (the existing review payload) unchanged
+    when:
+
+    * *stdout* is empty (returned unchanged as ``""``),
+    * no recognizable stream-json record is present,
+    * the stream lacks a final successful ``type=result`` record, or
+    * any unexpected error occurs during parsing.
+
+    Normalization must never turn a successful ribosome run into a
+    failure: on any doubt it preserves the prior review payload.
+    """
+    if not stdout:
+        return stdout
+    try:
+        records = _parse_claude_stream_records(stdout)
+        if not records:
+            return stdout[:1000]
+        final_report = _extract_claude_final_report(records)
+        if final_report is None:
+            return stdout[:1000]
+        evidence = _extract_claude_verification_evidence(records)
+    except Exception:
+        return stdout[:1000]
+
+    sections: list[str] = []
+    for cmd, tail in evidence:
+        block = f"[auto-verify] {cmd[:_CLAUDE_VERIFY_CMD_BUDGET]}"
+        if tail:
+            block += f"\n{tail[:_CLAUDE_VERIFY_RESULT_BUDGET]}"
+        sections.append(block)
+    if final_report:
+        sections.append(final_report[:_CLAUDE_RESULT_BUDGET])
+
+    body = "\n\n".join(sections).strip()
+    if not body:
+        return stdout[:1000]
+    return body[:_CLAUDE_TOTAL_BUDGET]
+
+
 @activity.defn
 async def translate(
     task: str,
@@ -1606,6 +1847,18 @@ async def translate(
             _cleanup_worktree(str(worktree_path))
         stdout = stdout_bytes.decode(errors="replace")
         stderr = stderr_bytes.decode(errors="replace")
+        # Claude Code emits a stream-json session (one JSON record per line);
+        # normalize it into a concise review payload (verification evidence +
+        # final report) so chaperone doesn't see only the minified init
+        # record that ``stdout[:1000]`` used to capture. The helper falls
+        # back to ``stdout[:1000]`` on any doubt (no final result record,
+        # malformed stream, parse error), so non-Claude harnesses are
+        # unaffected and failures retain their original review payload.
+        _review_stdout = (
+            _normalize_claude_stream_json(stdout)
+            if harness == "claude"
+            else stdout[:1000]
+        )
 
         if _is_coaching_bloat_error(rc, stderr):
             _r = {
@@ -1822,7 +2075,7 @@ async def translate(
                         )
                     except RuntimeError as exc:
                         print(f"[cleanup] preserving worktree: {exc}", file=sys.stderr)
-                _ee_stdout = stdout[:1000]
+                _ee_stdout = _review_stdout
                 if _verifier_cmd:
                     _ee_stdout = f"{_ee_stdout}\n\n[auto-verify] {_verifier_cmd}\n{_verifier_tail}"
                 _r = {
@@ -1943,7 +2196,7 @@ async def translate(
         "requested_provider": provider,
         "attempted_providers": sorted(_attempted),
         "task": task[:200],
-        "stdout": stdout[:1000],
+        "stdout": _review_stdout,
         "stderr": stderr[:500],
         "pre_diff": pre_diff,
         "post_diff": post_diff,
