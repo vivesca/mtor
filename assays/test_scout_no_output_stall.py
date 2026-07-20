@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from mtor.worker.translocase import _heartbeat_stall_check
 
@@ -47,6 +47,10 @@ def test_scout_no_output_kills_after_window():
         patch("mtor.worker.translocase._subprocess.run", return_value=_mock_empty_diff()),
         patch("mtor.worker.translocase.activity") as mock_activity,
         patch("asyncio.sleep", side_effect=mock_sleep),
+        patch(
+            "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+        ) as kill_group,
+        patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
     ):
         mock_activity.is_cancelled.return_value = False
         mock_activity.heartbeat = MagicMock()
@@ -55,9 +59,11 @@ def test_scout_no_output_kills_after_window():
             skip_stall=True,
             stdout_counter=stdout_counter,
             stderr_counter=stderr_counter,
+            worktree_path="/tmp/worktree", attempt_identity="wf:1:scout",
         ))
 
-    proc.kill.assert_called_once()
+    kill_group.assert_awaited_once()
+    legacy_kill.assert_not_called()
 
 
 def test_scout_stdout_growth_not_killed():
@@ -162,6 +168,10 @@ def test_build_mode_frozen_static_still_kills():
         patch("mtor.worker.translocase._subprocess.run", return_value=_mock_nonempty_diff()),
         patch("mtor.worker.translocase.activity") as mock_activity,
         patch("asyncio.sleep", new_callable=MagicMock) as mock_sleep,
+        patch(
+            "mtor.worker.translocase._graceful_kill_group", new=AsyncMock()
+        ) as kill_group,
+        patch("mtor.worker.translocase._kill_process_group") as legacy_kill,
     ):
         async def instant_sleep(seconds):
             return None
@@ -173,9 +183,11 @@ def test_build_mode_frozen_static_still_kills():
             proc, "/tmp/worktree", "zhipu", "test task",
             skip_stall=False,
             stdout_counter=stdout_counter,
+            worktree_path="/tmp/worktree", attempt_identity="wf:1:frozen",
         ))
 
-    proc.kill.assert_called_once()
+    kill_group.assert_awaited_once()
+    legacy_kill.assert_not_called()
 
 
 def test_build_mode_frozen_growing_stdout_not_killed():
