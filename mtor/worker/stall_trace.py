@@ -17,6 +17,8 @@ task or review result.
 """
 
 import sys
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 
 _langfuse_client = None
@@ -274,17 +276,84 @@ def record_stall_event(
         pass  # graceful no-op
 
 
-def stall_rate(window_hours: int = 24) -> float:
-    """Fraction of recent workflows that hit stalls.
+def _window_start(window_hours: int) -> datetime | None:
+    """Return the inclusive UTC start of a positive analytics window."""
+    if window_hours <= 0:
+        return None
+    return datetime.now(timezone.utc) - timedelta(hours=window_hours)
 
-    Placeholder until Langfuse trace-history queries land: returns 0.0.
+
+def _recent_stall_observations(lf, since: datetime) -> list[object]:
+    """Fetch recent stall observations, following bounded cursor pagination."""
+    observations: list[object] = []
+    cursor = None
+    seen_cursors: set[str] = set()
+    for _ in range(100):
+        response = lf.api.observations.get_many(
+            name="stall-detected",
+            from_start_time=since,
+            fields="core,metadata",
+            limit=1000,
+            cursor=cursor,
+        )
+        observations.extend(response.data or [])
+        next_cursor = getattr(response.meta, "cursor", None)
+        if not next_cursor:
+            break
+        cursor_key = str(next_cursor)
+        if cursor_key in seen_cursors:
+            break
+        seen_cursors.add(cursor_key)
+        cursor = next_cursor
+    return observations
+
+
+def stall_rate(window_hours: int = 24) -> float:
+    """Return the fraction of recent traces that contain a stall event.
+
+    Multiple stall events in one trace count once. Analytics remain a safe
+    no-op and return 0.0 when Langfuse is unavailable or rejects the query.
     """
-    return 0.0
+    since = _window_start(window_hours)
+    lf = get_langfuse()
+    if since is None or lf is None:
+        return 0.0
+    try:
+        traces = lf.api.trace.list(
+            from_timestamp=since,
+            fields="core",
+            limit=1,
+        )
+        total_traces = int(traces.meta.total_items)
+        if total_traces <= 0:
+            return 0.0
+        stalled_trace_ids = {
+            trace_id
+            for observation in _recent_stall_observations(lf, since)
+            if (trace_id := getattr(observation, "trace_id", None))
+        }
+        return min(len(stalled_trace_ids) / total_traces, 1.0)
+    except Exception:
+        return 0.0
 
 
 def most_common_stall_pattern(window_hours: int = 24) -> str | None:
-    """Dominant stall pattern name from recent traces.
-
-    Placeholder until Langfuse trace-history queries land: returns None.
-    """
-    return None
+    """Return the dominant recent stall pattern, with deterministic ties."""
+    since = _window_start(window_hours)
+    lf = get_langfuse()
+    if since is None or lf is None:
+        return None
+    try:
+        counts: Counter[str] = Counter()
+        for observation in _recent_stall_observations(lf, since):
+            metadata = getattr(observation, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            pattern = str(metadata.get("pattern", "")).strip()
+            if pattern:
+                counts[pattern] += 1
+        if not counts:
+            return None
+        return min(counts, key=lambda pattern: (-counts[pattern], pattern))
+    except Exception:
+        return None
