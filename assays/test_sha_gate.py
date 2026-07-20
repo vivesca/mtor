@@ -444,7 +444,13 @@ class TestCheckWorkerSha:
         assert result is True
         local_call = mock_sp.run.call_args_list[0]
         cmd = local_call[0][0]
-        assert cmd == ["git", "-C", str(Path("~/code/mtor").expanduser()), "rev-parse", "HEAD"]
+        assert cmd == [
+            "git",
+            "-C",
+            str(Path("~/code/mtor").expanduser()),
+            "rev-parse",
+            "HEAD",
+        ]
 
     def test_repo_param_expands_tilde(self):
         """Tilde in repo path is expanded before passing to git -C."""
@@ -760,10 +766,16 @@ class TestWorkerCheckout:
                 MagicMock(returncode=0, stdout="deadbeef\n"),
                 MagicMock(returncode=0, stdout="deadbeef\n"),
             ]
-            plan = _worker_sha_plan(repo="/custom/repo")
+            plan = _worker_sha_plan(repo="/Users/terry/code/mtor")
         local_call = mock_sp.run.call_args_list[0]
         cmd = local_call[0][0]
-        assert cmd == ["git", "-C", "/custom/repo", "rev-parse", "HEAD"]
+        assert cmd == [
+            "git",
+            "-C",
+            "/Users/terry/code/mtor",
+            "rev-parse",
+            "HEAD",
+        ]
         assert plan["local_sha"] == "deadbeef"
         assert plan["in_sync"] is True
 
