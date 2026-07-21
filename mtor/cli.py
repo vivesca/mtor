@@ -2710,7 +2710,7 @@ def scout(
     wait: Annotated[bool, Parameter(negative="--no-wait")] = True,
     timeout: Annotated[int, Parameter(name=["--timeout"])] = 300,
     repo: Annotated[str | None, Parameter(name=["--repo", "-r"])] = None,
-    harness: Annotated[str, Parameter(name=["--harness"])] = "",
+    harness: Annotated[str, Parameter(name=["--harness"])] = "pi",
     allow_local_paths: Annotated[bool, Parameter(name=["--allow-local-paths"])] = False,
 ) -> None:
     """Dispatch a read-only analysis task. Returns findings, not code."""

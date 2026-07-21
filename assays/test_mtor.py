@@ -2243,7 +2243,7 @@ class TestScoutMode:
         assert call_kwargs["id"].startswith("claude-")
 
     def test_scout_defaults_provider_in_spec(self):
-        """Scout command stores the resolved default provider in the workflow spec."""
+        """Scout defaults to the funded provider through the Pi harness."""
         mock_client, _ = make_mock_client()
         with _patch_client(mock_client):
             exit_code, data = invoke(["scout", "--no-wait", "Explore codebase"])
@@ -2252,6 +2252,8 @@ class TestScoutMode:
         call_kwargs = mock_client.start_workflow.call_args.kwargs
         spec = call_kwargs["args"][0][0]
         assert spec["provider"] == "zhipu"
+        assert spec["harness"] == "pi"
+        assert call_kwargs["id"].startswith("pi-")
 
     def test_scout_no_experiment_flag(self):
         """Scout result does NOT have experiment flag."""

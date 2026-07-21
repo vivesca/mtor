@@ -12,7 +12,7 @@ def test_scout_cli_accepts_repo_flag():
     assert "repo" in signature.parameters
     assert signature.parameters["repo"].default is None
     assert "harness" in signature.parameters
-    assert signature.parameters["harness"].default == ""
+    assert signature.parameters["harness"].default == "pi"
 
 
 def test_research_cli_accepts_repo_flag():
