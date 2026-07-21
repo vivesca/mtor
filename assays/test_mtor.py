@@ -1740,6 +1740,54 @@ class TestStats:
         assert len(call_log) == 5
 
 
+class TestHarnessReport:
+    def test_report_uses_authoritative_snapshots_and_results(self):
+        from datetime import UTC, datetime, timedelta
+
+        from mtor.backend import WorkflowSnapshot
+
+        now = datetime.now(UTC)
+        backend = MagicMock()
+        backend.list_workflows = AsyncMock(
+            return_value=(
+                WorkflowSnapshot(
+                    task_id="pi-glm52-first-a-b",
+                    status="COMPLETED",
+                    start_time=now - timedelta(seconds=30),
+                    close_time=now,
+                    metadata=(("mtor_mode", "scout"), ("mtor_provider", "zhipu")),
+                ),
+            )
+        )
+        backend.result = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "success": True,
+                        "exit_code": 0,
+                        "task": "inspect one file",
+                        "attempted_providers": ["zhipu"],
+                        "review": {"verdict": "approved"},
+                    }
+                ]
+            }
+        )
+
+        with patch("mtor.cli._get_backend", return_value=(backend, None)):
+            exit_code, data = invoke(
+                ["harness-report", "--harness", "pi", "--min-samples", "2"]
+            )
+
+        assert exit_code == 0
+        assert data["result"]["sample_count"] == 1
+        summary = data["result"]["summaries"]["pi"]
+        assert summary["approved_count"] == 1
+        assert summary["median_duration_seconds"] == 30.0
+        assert summary["remaining_samples"] == 1
+        assert summary["decision_ready"] is False
+        backend.result.assert_awaited_once_with("pi-glm52-first-a-b")
+
+
 # ---------------------------------------------------------------------------
 # Checkpoints tests
 # ---------------------------------------------------------------------------

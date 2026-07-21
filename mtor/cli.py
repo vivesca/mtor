@@ -62,6 +62,7 @@ from mtor.dispatch import _dispatch_prompt
 from mtor.doctor import doctor as _doctor
 from mtor.envelope import _err, _extract_first_result, _ok
 from mtor.harness import PROVIDER_HARNESS_MAP
+from mtor.harness_report import harness_from_workflow_id, summarize_harness_samples
 from mtor.rptor import (
     CycleDetected,
     autotriage,
@@ -3429,6 +3430,136 @@ def stats() -> None:
             counts[name] = -1
 
     _ok("mtor stats", {"counts": counts}, version=VERSION)
+
+
+@app.command(name="harness-report")
+def harness_report(
+    *,
+    since: str = "30d",
+    mode: str = "scout",
+    provider: str = "zhipu",
+    harness: str = "",
+    min_samples: Annotated[int, Parameter(name=["--min-samples"])] = 10,
+    count: int = 100,
+) -> None:
+    """Summarize production harness outcomes from authoritative workflow results."""
+    cmd = "mtor harness-report"
+    if min_samples < 1 or count < 1 or count > 500:
+        sys.exit(
+            _err(
+                cmd,
+                "min-samples must be positive and count must be between 1 and 500",
+                "INVALID_LIMIT",
+                "Use --min-samples 10 --count 100",
+                exit_code=2,
+            )
+        )
+    try:
+        window = parse_duration(since)
+    except ValueError as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "INVALID_DURATION",
+                "Use a duration such as 24h, 7d, or 30d",
+                exit_code=2,
+            )
+        )
+
+    backend, err = _get_backend()
+    if err:
+        sys.exit(
+            _err(
+                cmd,
+                f"Cannot connect: {err}",
+                "TEMPORAL_UNREACHABLE",
+                "mtor tsc",
+                exit_code=3,
+            )
+        )
+
+    from datetime import UTC, datetime
+
+    query = VisibilityQuery(
+        started_after=datetime.now(UTC) - window,
+        metadata=tuple(
+            (key, value)
+            for key, value in (("mtor_mode", mode), ("mtor_provider", provider))
+            if value
+        ),
+    )
+
+    async def _collect() -> list[dict[str, Any]]:
+        snapshots = await backend.list_workflows(query, limit=count)
+        samples: list[dict[str, Any]] = []
+        overrides = get_verdict_overrides()
+        for snapshot in snapshots:
+            sample_harness = harness_from_workflow_id(snapshot.task_id)
+            if harness and sample_harness != harness:
+                continue
+            task_result: dict[str, Any] = {}
+            if snapshot.status == "COMPLETED":
+                with contextlib.suppress(Exception):
+                    raw_result = await backend.result(snapshot.task_id)
+                    extracted = _extract_first_result(raw_result)
+                    if isinstance(extracted, dict):
+                        task_result = extracted
+            review = task_result.get("review", {})
+            verdict = review.get("verdict") if isinstance(review, dict) else None
+            if snapshot.task_id in overrides:
+                verdict = overrides[snapshot.task_id]
+            duration_seconds = None
+            if snapshot.start_time and snapshot.close_time:
+                duration_seconds = round(
+                    (snapshot.close_time - snapshot.start_time).total_seconds(), 2
+                )
+            attempted = task_result.get("attempted_providers", [])
+            attempt_count = len(attempted) if isinstance(attempted, list) else 1
+            samples.append(
+                {
+                    "workflow_id": snapshot.task_id,
+                    "harness": sample_harness,
+                    "status": snapshot.status,
+                    "start_time": (
+                        snapshot.start_time.isoformat() if snapshot.start_time else None
+                    ),
+                    "duration_seconds": duration_seconds,
+                    "success": task_result.get("success"),
+                    "exit_code": task_result.get("exit_code"),
+                    "verdict": verdict,
+                    "attempt_count": max(1, attempt_count),
+                    "task_preview": str(task_result.get("task") or "")[:120],
+                }
+            )
+        return samples
+
+    try:
+        samples = asyncio.run(_collect())
+    except Exception as exc:
+        sys.exit(
+            _err(
+                cmd,
+                str(exc),
+                "HARNESS_REPORT_ERROR",
+                "Check Temporal server health with: mtor tsc",
+            )
+        )
+
+    summaries = summarize_harness_samples(samples, min_samples=min_samples)
+    _ok(
+        cmd,
+        {
+            "window": since,
+            "mode": mode,
+            "provider": provider,
+            "harness": harness or None,
+            "sample_count": len(samples),
+            "summaries": summaries,
+            "samples": samples,
+        },
+        version=VERSION,
+    )
 
 
 @app.command
