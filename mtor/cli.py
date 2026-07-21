@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import json
 import os
 import shlex
@@ -2166,29 +2167,50 @@ def logs(
     log_source = "local"
     log_stale = False
     if remote_worker_path:
-        local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        refresh_path = local_path.with_name(f".{local_path.name}.{os.getpid()}.refresh")
-        refresh_path.unlink(missing_ok=True)
-        try:
-            refresh = subprocess.run(
-                ["scp", f"{WORKER_HOST}:{log_path}", str(refresh_path)],
-                capture_output=True,
-                timeout=15,
+        cache_dir = Path.home() / ".cache" / "mtor" / "logs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        remote_candidates = [log_path]
+        if not log_path.endswith(".gz"):
+            remote_candidates.append(f"{log_path}.gz")
+        cache_candidates = [cache_dir / Path(path).name for path in remote_candidates]
+        refreshed = False
+        for remote_candidate, cache_candidate in zip(
+            remote_candidates, cache_candidates, strict=True
+        ):
+            refresh_path = cache_candidate.with_name(
+                f".{cache_candidate.name}.{os.getpid()}.refresh"
             )
-            if refresh.returncode == 0 and refresh_path.is_file():
-                refresh_path.replace(local_path)
-                log_source = "remote_refresh"
-            else:
-                log_source = "cache_fallback"
-                log_stale = True
-        except (subprocess.TimeoutExpired, OSError):
+            refresh_path.unlink(missing_ok=True)
+            try:
+                refresh = subprocess.run(
+                    ["scp", f"{WORKER_HOST}:{remote_candidate}", str(refresh_path)],
+                    capture_output=True,
+                    timeout=15,
+                )
+                if refresh.returncode == 0 and refresh_path.is_file():
+                    refresh_path.replace(cache_candidate)
+                    local_path = cache_candidate
+                    log_path = remote_candidate
+                    log_source = "remote_refresh"
+                    refreshed = True
+                    break
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            finally:
+                refresh_path.unlink(missing_ok=True)
+        if not refreshed:
+            local_path = next(
+                (path for path in cache_candidates if path.exists()),
+                cache_candidates[0],
+            )
             log_source = "cache_fallback"
             log_stale = True
-        finally:
-            refresh_path.unlink(missing_ok=True)
     elif not local_path.is_absolute():
         local_path = Path.home() / log_path.lstrip("~/")
+    if not local_path.exists() and local_path.suffix != ".gz":
+        compressed_path = Path(f"{local_path}.gz")
+        if compressed_path.exists():
+            local_path = compressed_path
     if not local_path.exists() and not remote_worker_path:
         # Fetch single file from worker host into local mirror
         local_path = Path.home() / ".cache" / "mtor" / "logs" / Path(log_path).name
@@ -2200,7 +2222,11 @@ def logs(
                 timeout=15,
             )
     if local_path.exists():
-        log_lines = local_path.read_text().splitlines()[-lines:]
+        if local_path.suffix == ".gz":
+            with gzip.open(local_path, "rt", errors="replace") as log_file:
+                log_lines = log_file.read().splitlines()[-lines:]
+        else:
+            log_lines = local_path.read_text(errors="replace").splitlines()[-lines:]
         _ok(
             cmd,
             {
@@ -2220,8 +2246,16 @@ def logs(
 
     # Fall back to SSH
     try:
+        raw_path = shlex.quote(log_path)
+        compressed_path = shlex.quote(f"{log_path}.gz")
+        remote_tail = (
+            f"if test -f {raw_path}; then tail -n {lines} -- {raw_path}; "
+            f"elif test -f {compressed_path}; then "
+            f"gzip -cd -- {compressed_path} | tail -n {lines}; "
+            f"else echo 'log not found: {raw_path}' >&2; exit 44; fi"
+        )
         result = subprocess.run(
-            ["ssh", WORKER_HOST, f"tail -{lines} {log_path}"],
+            ["ssh", WORKER_HOST, remote_tail],
             capture_output=True,
             text=True,
             timeout=30,

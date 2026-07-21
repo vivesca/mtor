@@ -2020,6 +2020,40 @@ class TestLogs:
         assert data["result"]["stale"] is True
         assert cache_path.read_text() == "last usable line\n"
 
+    def test_logs_reads_compressed_remote_artifact_when_raw_was_archived(
+        self, tmp_path, monkeypatch
+    ):
+        """A completed result remains readable after in-place gzip archival."""
+        import gzip as _gzip
+        import mtor.cli as _cli
+
+        workflow_id = "pi-glm52-large-output"
+        remote_path = "/home/vivesca/germline/loci/ribosome-outputs/large.txt"
+        client, handle = make_mock_client()
+        handle.result = AsyncMock(
+            return_value={"exit_code": 0, "success": True, "output_path": remote_path}
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "scp" and cmd[1].endswith(".gz"):
+                with _gzip.open(cmd[-1], "wt") as output:
+                    output.write("one\ntwo\nthree\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=1, stdout="", stderr="not found")
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        with (
+            _patch_client(client),
+            patch.object(_cli.subprocess, "run", side_effect=fake_run),
+        ):
+            exit_code, data = invoke(["logs", workflow_id, "--lines", "2"])
+
+        assert exit_code == 0
+        assert data["result"]["lines"] == ["two", "three"]
+        assert data["result"]["log_path"].endswith("large.txt.gz")
+        assert data["result"]["source"] == "remote_refresh"
+        assert data["result"]["stale"] is False
+
     def test_logs_running_workflow_does_not_wait_for_result(
         self, tmp_path, monkeypatch
     ):

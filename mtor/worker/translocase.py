@@ -65,6 +65,14 @@ RIBOSOME_SCRIPT = Path.home() / "germline" / "effectors" / "ribosome"
 OUTPUT_DIR = Path.home() / "germline" / "loci" / "ribosome-outputs"
 LOG_DIR = Path.home() / "code" / "mtor" / "logs"
 
+# A harness can emit an unbounded transcript even when the useful result is
+# tiny (a Pi JSON-mode scout produced 273 MB on 2026-07-21).  Keep enough tail
+# for final-result parsing and diagnostics, but never let one activity consume
+# the worker's memory or disk without a bound.  The tee continues draining and
+# counting every byte so subprocess liveness and telemetry remain accurate.
+_MAX_STREAM_CAPTURE_BYTES = 8 * 1024 * 1024
+_MAX_WORKFLOW_LOG_BYTES = 16 * 1024 * 1024
+
 
 def _mode_allows_auto_commit(mode: str) -> bool:
     """Return whether a translation mode may commit generated code."""
@@ -807,23 +815,65 @@ async def _tee_stream(
     log_fh,
     label: str,
     counter: list[int] | None = None,
+    *,
+    capture_limit: int = _MAX_STREAM_CAPTURE_BYTES,
+    log_counter: list[int] | None = None,
+    log_limit: int = _MAX_WORKFLOW_LOG_BYTES,
+    log_truncated: list[bool] | None = None,
 ) -> bytes:
-    """Read from async stream, tee chunks to *log_fh*, track byte count in *counter*."""
+    """Drain a stream while retaining bounded output and log evidence.
+
+    The returned value keeps the stream tail because agent harnesses place the
+    final answer at the end.  ``counter`` still records all bytes read, while
+    the optional shared log state enforces one combined budget across stdout
+    and stderr.
+    """
     if stream is None:
         return b""
     buf = bytearray()
+    total = 0
     while True:
         chunk = await stream.read(8192)
         if not chunk:
             break
+        total += len(chunk)
         buf.extend(chunk)
+        if len(buf) > capture_limit:
+            del buf[: len(buf) - capture_limit]
         if counter is not None:
             counter[0] += len(chunk)
         if log_fh is not None:
             with contextlib.suppress(OSError):
-                log_fh.write(f"[{label}] ".encode() + chunk)
+                payload = f"[{label}] ".encode() + chunk
+                if log_counter is None:
+                    log_fh.write(payload)
+                else:
+                    remaining = max(0, log_limit - log_counter[0])
+                    if remaining:
+                        written = payload[:remaining]
+                        log_fh.write(written)
+                        log_counter[0] += len(written)
+                    if len(payload) > remaining and (
+                        log_truncated is None or not log_truncated[0]
+                    ):
+                        marker = (
+                            f"\n[mtor log truncated after {log_limit} bytes; "
+                            "subprocess output continues to be drained]\n"
+                        ).encode()
+                        log_fh.write(marker)
+                        if log_truncated is not None:
+                            log_truncated[0] = True
                 log_fh.flush()
-    return bytes(buf)
+    if total <= capture_limit:
+        return bytes(buf)
+    marker = (
+        f"[mtor {label} truncated: kept last {capture_limit} of {total} bytes]\n"
+    ).encode()
+    if len(marker) >= capture_limit:
+        marker = b"[truncated]\n"
+    if len(marker) >= capture_limit:
+        return bytes(buf[-capture_limit:])
+    return marker + bytes(buf[-(capture_limit - len(marker)) :])
 
 
 async def _heartbeat_pulse(
@@ -1644,6 +1694,8 @@ async def translate(
 
         stdout_counter: list[int] = [0]  # mutable counter shared with heartbeat
         stderr_counter: list[int] = [0]
+        log_counter: list[int] = [0]
+        log_truncated: list[bool] = [False]
 
         # Open workflow-scoped log file for real-time observability
         log_fh = None
@@ -1674,10 +1726,24 @@ async def translate(
                 log_fh.flush()
 
         stdout_task = asyncio.create_task(
-            _tee_stream(proc.stdout, log_fh, "stdout", counter=stdout_counter)
+            _tee_stream(
+                proc.stdout,
+                log_fh,
+                "stdout",
+                counter=stdout_counter,
+                log_counter=log_counter,
+                log_truncated=log_truncated,
+            )
         )
         stderr_task = asyncio.create_task(
-            _tee_stream(proc.stderr, log_fh, "stderr", counter=stderr_counter)
+            _tee_stream(
+                proc.stderr,
+                log_fh,
+                "stderr",
+                counter=stderr_counter,
+                log_counter=log_counter,
+                log_truncated=log_truncated,
+            )
         )
 
         _skip_stall = mode in ("scout", "research")
@@ -1929,8 +1995,11 @@ async def translate(
                 provider=resolved_provider,
                 exit_code=rc,
                 duration_seconds=round(_time.monotonic() - _run_start, 2),
-                stdout_bytes=len(stdout_bytes),
-                stderr_bytes=len(stderr_bytes),
+                stdout_bytes=stdout_counter[0],
+                stderr_bytes=stderr_counter[0],
+                captured_stdout_bytes=len(stdout_bytes),
+                captured_stderr_bytes=len(stderr_bytes),
+                log_truncated=log_truncated[0],
             )
         except Exception as exc:
             print(f"WARNING: failed to write lifecycle event: {exc}", file=sys.stderr)
