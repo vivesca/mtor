@@ -59,6 +59,13 @@ class TestHarnessRouting:
 
         assert env["RIBOSOME_PROVIDER"] == "opencode"
 
+    def test_pi_harness_and_task_mode_route_to_ribosome(self, tmp_path):
+        """Pi receives both its harness selection and the read-only task mode."""
+        env = self._translate_and_capture_env(tmp_path, harness="pi", mode="scout")
+
+        assert env["RIBOSOME_PROVIDER"] == "pi"
+        assert env["RIBOSOME_TASK_MODE"] == "scout"
+
     def test_harness_default_falls_back_to_resolved_provider(self, tmp_path):
         """Without harness, translate() uses the resolved provider."""
         env = self._translate_and_capture_env(tmp_path, harness="")
@@ -78,10 +85,16 @@ class TestHarnessRouting:
             "[t-abc123] Route harness correctly",
         ]
 
-    def _translate_and_capture_env(self, tmp_path, *, harness: str) -> dict[str, str]:
-        return self._translate_and_capture_call_args(tmp_path, harness=harness).kwargs["env"]
+    def _translate_and_capture_env(
+        self, tmp_path, *, harness: str, mode: str = "build"
+    ) -> dict[str, str]:
+        return self._translate_and_capture_call_args(
+            tmp_path, harness=harness, mode=mode
+        ).kwargs["env"]
 
-    def _translate_and_capture_call_args(self, tmp_path, *, harness: str):
+    def _translate_and_capture_call_args(
+        self, tmp_path, *, harness: str, mode: str = "build"
+    ):
         from mtor.worker.translocase import translate
 
         rev_parse_count = 0
@@ -136,7 +149,7 @@ class TestHarnessRouting:
                 translate(
                     task="[t-abc123] Route harness correctly",
                     provider="zhipu",
-                    mode="build",
+                    mode=mode,
                     repo=str(tmp_path / "repo"),
                     harness=harness,
                 )

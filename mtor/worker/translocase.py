@@ -1623,6 +1623,7 @@ async def translate(
                 env={
                     **os.environ,
                     "RIBOSOME_PROVIDER": harness or resolved_provider,
+                    "RIBOSOME_TASK_MODE": mode,
                     "RIBOSOME_TASK_ID": workflow_id,
                     "RIBOSOME_ATTEMPT_ID": attempt_identity,
                     "HOME": str(Path.home()),

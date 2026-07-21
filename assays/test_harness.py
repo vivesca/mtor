@@ -47,6 +47,14 @@ class TestRunHarness:
         assert cmd[:2] == ["opencode", "run"]
         assert "zhipuai-coding-plan/glm-5.2" in cmd
 
+    def test_run_harness_pi_builds_ephemeral_glm52_command(self):
+        cmd = build_command("pi", "inspect the repo")
+        assert cmd[:3] == ["pi", "--provider", "zai-coding-cn"]
+        assert ["--model", "glm-5.2"] == cmd[3:5]
+        assert "--no-session" in cmd
+        assert "--mode" in cmd
+        assert "inspect the repo" in cmd
+
     @patch("mtor.harness.subprocess.run")
     def test_run_harness_result_captures_output(self, mock_run):
         """run_harness returns a HarnessResult with captured stdout/stderr."""
@@ -79,6 +87,7 @@ class TestRunHarness:
             "gemini",
             "codex",
             "opencode",
+            "pi",
             "goose",
             "droid",
         }

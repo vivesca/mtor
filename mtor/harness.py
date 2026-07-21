@@ -23,6 +23,7 @@ PROVIDER_HARNESS_MAP: dict[str, str] = {
     "gemini": "claude",
     "codex": "codex",
     "opencode": "opencode",
+    "pi": "pi",
     "goose": "goose",
     "droid": "droid",
 }
@@ -72,6 +73,23 @@ def _build_opencode_command(task: str) -> list[str]:
     ]
 
 
+def _build_pi_command(task: str) -> list[str]:
+    """Build an ephemeral Pi command for GLM-5.2 on the Z.AI China plan."""
+    return [
+        "pi",
+        "--provider",
+        "zai-coding-cn",
+        "--model",
+        "glm-5.2",
+        "--no-session",
+        "--mode",
+        "json",
+        "--approve",
+        "-p",
+        task,
+    ]
+
+
 def _build_goose_command(task: str) -> list[str]:
     """Build a ``goose`` CLI command for the task."""
     return ["goose", "run", "--name", "ribosome", "--task", task]
@@ -86,6 +104,7 @@ _COMMAND_BUILDERS: dict[str, Any] = {
     "claude": _build_claude_command,
     "codex": _build_codex_command,
     "opencode": _build_opencode_command,
+    "pi": _build_pi_command,
     "goose": _build_goose_command,
     "droid": _build_droid_command,
 }
