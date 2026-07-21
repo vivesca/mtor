@@ -52,7 +52,7 @@ class TestRunHarness:
         assert cmd[:3] == ["pi", "--provider", "zai-coding-cn"]
         assert ["--model", "glm-5.2"] == cmd[3:5]
         assert "--no-session" in cmd
-        assert "--mode" in cmd
+        assert "--mode" not in cmd
         assert "inspect the repo" in cmd
 
     @patch("mtor.harness.subprocess.run")

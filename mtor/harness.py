@@ -82,8 +82,6 @@ def _build_pi_command(task: str) -> list[str]:
         "--model",
         "glm-5.2",
         "--no-session",
-        "--mode",
-        "json",
         "--approve",
         "-p",
         task,
