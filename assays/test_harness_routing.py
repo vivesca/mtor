@@ -103,16 +103,24 @@ class TestHarnessRouting:
             nonlocal rev_parse_count
 
             if cmd[0] == "pgrep":
-                return subprocess.CompletedProcess(cmd, returncode=0, stdout="0\n", stderr="")
+                return subprocess.CompletedProcess(
+                    cmd, returncode=0, stdout="0\n", stderr=""
+                )
             if cmd[0] == "bash" and "-n" in cmd:
-                return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    cmd, returncode=0, stdout="", stderr=""
+                )
             if cmd[0] == "git":
                 subcmd = cmd[1] if len(cmd) > 1 else ""
                 if subcmd == "rev-parse":
                     rev_parse_count += 1
                     sha = "aaa111\n" if rev_parse_count == 1 else "bbb222\n"
-                    return subprocess.CompletedProcess(cmd, returncode=0, stdout=sha, stderr="")
-                return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+                    return subprocess.CompletedProcess(
+                        cmd, returncode=0, stdout=sha, stderr=""
+                    )
+                return subprocess.CompletedProcess(
+                    cmd, returncode=0, stdout="", stderr=""
+                )
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
         mock_proc = AsyncMock()
@@ -129,22 +137,38 @@ class TestHarnessRouting:
         mock_info = MagicMock()
         mock_info.workflow_id = "test-harness-routing"
 
-        with patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run), \
-             patch("mtor.worker.translocase.asyncio.create_subprocess_exec", return_value=mock_proc) as create_subprocess, \
-             patch("mtor.worker.translocase.load_health", return_value={}), \
-             patch("mtor.worker.translocase.select_provider", return_value="zhipu"), \
-             patch("mtor.worker.translocase.save_health"), \
-             patch("mtor.worker.translocase.update_health"), \
-             patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None), \
-             patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
-             patch("mtor.worker.translocase.activity.heartbeat"), \
-             patch("mtor.worker.translocase.activity.is_cancelled", return_value=False), \
-             patch("mtor.worker.translocase.create_task_trace", return_value=None), \
-             patch("mtor.worker.translocase.finalize_trace"), \
-             patch("mtor.worker.translocase._create_worktree", return_value=str(tmp_path / "worktree")), \
-             patch("mtor.worker.translocase._detect_prior_commits", return_value=[]), \
-             patch("mtor.worker.translocase._git_pull_ff_only"), \
-             patch("mtor.worker.translocase._git_snapshot", return_value={"stat": "", "numstat": "", "commits": [], "commit_count": 0, "patch": ""}):
+        with (
+            patch("mtor.worker.translocase._subprocess.run", side_effect=mock_run),
+            patch(
+                "mtor.worker.translocase.asyncio.create_subprocess_exec",
+                return_value=mock_proc,
+            ) as create_subprocess,
+            patch("mtor.worker.translocase.load_health", return_value={}),
+            patch("mtor.worker.translocase.select_provider", return_value="zhipu"),
+            patch("mtor.worker.translocase.persist_health_result", return_value={}),
+            patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None),
+            patch("mtor.worker.translocase.activity.info", return_value=mock_info),
+            patch("mtor.worker.translocase.activity.heartbeat"),
+            patch("mtor.worker.translocase.activity.is_cancelled", return_value=False),
+            patch("mtor.worker.translocase.create_task_trace", return_value=None),
+            patch("mtor.worker.translocase.finalize_trace"),
+            patch(
+                "mtor.worker.translocase._create_worktree",
+                return_value=str(tmp_path / "worktree"),
+            ),
+            patch("mtor.worker.translocase._detect_prior_commits", return_value=[]),
+            patch("mtor.worker.translocase._git_pull_ff_only"),
+            patch(
+                "mtor.worker.translocase._git_snapshot",
+                return_value={
+                    "stat": "",
+                    "numstat": "",
+                    "commits": [],
+                    "commit_count": 0,
+                    "patch": "",
+                },
+            ),
+        ):
             _run(
                 translate(
                     task="[t-abc123] Route harness correctly",

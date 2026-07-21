@@ -7,9 +7,12 @@ from rate-limit trips via a cooldown window.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import sys
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
@@ -30,7 +33,7 @@ PROVIDER_PRIORITY = ["zhipu"]
 
 # Per-provider concurrency limits (max simultaneous tasks).
 PROVIDER_LIMITS: dict[str, int] = {
-    "zhipu": 3,    # Max tier
+    "zhipu": 3,  # Max tier
 }
 
 # Active task count per provider — incremented in translate(), decremented on completion.
@@ -52,14 +55,32 @@ def load_health() -> dict[str, Any]:
         return {}
     try:
         return json.loads(HEALTH_FILE.read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        print(f"WARNING: cannot read provider health state: {exc}", file=sys.stderr)
         return {}
 
 
 def save_health(health: dict[str, Any]) -> None:
-    """Write health state to HEALTH_FILE, creating parent directories as needed."""
+    """Atomically write health state, creating parent directories as needed."""
     HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HEALTH_FILE.write_text(json.dumps(health, indent=2))
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=HEALTH_FILE.parent,
+            prefix=f".{HEALTH_FILE.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(json.dumps(health, indent=2))
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, HEALTH_FILE)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _is_available(provider: str, health: dict[str, Any]) -> bool:
@@ -154,7 +175,9 @@ def select_provider(health: dict[str, Any], override: str | None = None) -> str:
     """
     if override:
         if override in RETIRED_PROVIDERS:
-            raise ValueError(f"Provider '{override}' is retired: {RETIRED_PROVIDERS[override]}")
+            raise ValueError(
+                f"Provider '{override}' is retired: {RETIRED_PROVIDERS[override]}"
+            )
         return override
 
     _advance_expired_cooldowns(health)
@@ -163,7 +186,9 @@ def select_provider(health: dict[str, Any], override: str | None = None) -> str:
     healthy = [p for p in PROVIDER_PRIORITY if _is_available(p, health)]
 
     # Filter to providers under their concurrency limit
-    available = [p for p in healthy if _active_count.get(p, 0) < PROVIDER_LIMITS.get(p, 2)]
+    available = [
+        p for p in healthy if _active_count.get(p, 0) < PROVIDER_LIMITS.get(p, 2)
+    ]
 
     if available:
         # Pick least-loaded; break ties with round-robin index
@@ -216,6 +241,22 @@ def update_health(
     # exit 1 -> no state change
 
 
+def persist_health_result(
+    provider: str,
+    exit_code: int,
+    window_hours: float = 1.0,
+) -> dict[str, Any]:
+    """Merge one result into the latest on-disk health state under a lock."""
+    lock_file = HEALTH_FILE.with_suffix(f"{HEALTH_FILE.suffix}.lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        health = load_health()
+        update_health(provider, exit_code, health, window_hours)
+        save_health(health)
+        return health
+
+
 def parse_rate_limit_window(stderr: str) -> float:
     """Extract cooldown window in hours from stderr.
 
@@ -243,9 +284,7 @@ DEFAULT_MAX_LOAD_AVG = 4.0
 class ProviderFeedbackTracker:
     """Sliding-window tracker for provider dispatch rejection rate."""
 
-    def __init__(
-        self, window_size: int = 10, rejection_threshold: float = 0.5
-    ) -> None:
+    def __init__(self, window_size: int = 10, rejection_threshold: float = 0.5) -> None:
         self._window_size = window_size
         self._threshold = rejection_threshold
         self._outcomes: deque[bool] = deque()

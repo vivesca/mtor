@@ -124,8 +124,7 @@ class TestEarlyExitCleanCommit:
              patch("mtor.worker.translocase.asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch("mtor.worker.translocase.load_health", return_value={}), \
              patch("mtor.worker.translocase.select_provider", return_value="zhipu"), \
-             patch("mtor.worker.translocase.save_health"), \
-             patch("mtor.worker.translocase.update_health"), \
+             patch("mtor.worker.translocase.persist_health_result", return_value={}), \
              patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None), \
              patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
              patch("mtor.worker.translocase.activity.heartbeat"), \
@@ -227,8 +226,7 @@ class TestEarlyExitCleanCommit:
              patch("mtor.worker.translocase.asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch("mtor.worker.translocase.load_health", return_value={}), \
              patch("mtor.worker.translocase.select_provider", return_value="zhipu"), \
-             patch("mtor.worker.translocase.save_health"), \
-             patch("mtor.worker.translocase.update_health"), \
+             patch("mtor.worker.translocase.persist_health_result", return_value={}), \
              patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None), \
              patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
              patch("mtor.worker.translocase.activity.heartbeat"), \
@@ -322,8 +320,7 @@ class TestEarlyExitNoTestsField:
              patch("mtor.worker.translocase.asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch("mtor.worker.translocase.load_health", return_value={}), \
              patch("mtor.worker.translocase.select_provider", return_value="zhipu"), \
-             patch("mtor.worker.translocase.save_health"), \
-             patch("mtor.worker.translocase.update_health"), \
+             patch("mtor.worker.translocase.persist_health_result", return_value={}), \
              patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None), \
              patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
              patch("mtor.worker.translocase.activity.heartbeat"), \
@@ -425,8 +422,7 @@ class TestEarlyExitHeadMovedFallback:
              patch("mtor.worker.translocase.asyncio.create_subprocess_exec", return_value=mock_proc), \
              patch("mtor.worker.translocase.load_health", return_value={}), \
              patch("mtor.worker.translocase.select_provider", return_value="zhipu"), \
-             patch("mtor.worker.translocase.save_health"), \
-             patch("mtor.worker.translocase.update_health"), \
+             patch("mtor.worker.translocase.persist_health_result", return_value={}), \
              patch("mtor.worker.translocase.parse_rate_limit_window", return_value=None), \
              patch("mtor.worker.translocase.activity.info", return_value=mock_info), \
              patch("mtor.worker.translocase.activity.heartbeat"), \

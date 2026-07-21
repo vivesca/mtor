@@ -784,8 +784,9 @@ def _patch_translate_seam(tmp_path, *, select_provider_return: str):
                 "mtor.worker.translocase.select_provider",
                 return_value=select_provider_return,
             ),
-            patch("mtor.worker.translocase.save_health"),
-            patch("mtor.worker.translocase.update_health"),
+            patch(
+                "mtor.worker.translocase.persist_health_result", return_value={}
+            ),
             patch(
                 "mtor.worker.translocase.parse_rate_limit_window",
                 return_value=None,

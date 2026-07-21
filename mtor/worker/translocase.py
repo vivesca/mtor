@@ -33,9 +33,8 @@ from mtor.worker.provider import (
     _active_count,
     load_health,
     parse_rate_limit_window,
-    save_health,
+    persist_health_result,
     select_provider,
-    update_health,
 )
 from mtor.worker.stall_trace import (
     create_task_trace,
@@ -1921,8 +1920,7 @@ async def translate(
 
         # Update provider health state and persist
         window_hours = _cooldown_window_hours(stderr, suggested_wait)
-        update_health(resolved_provider, rc, health, window_hours)
-        save_health(health)
+        health = persist_health_result(resolved_provider, rc, window_hours)
 
         try:
             _log_event(

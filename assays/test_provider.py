@@ -17,6 +17,7 @@ from mtor.worker.provider import (
     PROVIDER_PRIORITY,
     load_health,
     parse_rate_limit_window,
+    persist_health_result,
     save_health,
     select_provider,
     update_health,
@@ -247,6 +248,35 @@ def test_load_health_corrupt_file_returns_empty(tmp_path, monkeypatch):
     fake_file.write_text("{ not valid json")
     result = load_health()
     assert result == {}
+
+
+def test_save_health_leaves_only_complete_target(tmp_path, monkeypatch):
+    fake_file = tmp_path / "provider_health.json"
+    monkeypatch.setattr("mtor.worker.provider.HEALTH_FILE", fake_file)
+
+    save_health({"zhipu": {"state": "closed"}})
+
+    assert json.loads(fake_file.read_text()) == {"zhipu": {"state": "closed"}}
+    assert list(tmp_path.glob(".provider_health.json.*")) == []
+
+
+def test_persist_health_result_merges_latest_state(tmp_path, monkeypatch):
+    fake_file = tmp_path / "provider_health.json"
+    monkeypatch.setattr("mtor.worker.provider.HEALTH_FILE", fake_file)
+    save_health(
+        {
+            "zhipu": {
+                "state": "open",
+                "cooldown_until": time.time() + 3600,
+                "consecutive_failures": 1,
+            }
+        }
+    )
+
+    health = persist_health_result("zhipu", 1)
+
+    assert health["zhipu"]["state"] == "open"
+    assert load_health()["zhipu"]["state"] == "open"
 
 
 def test_provider_priority_exports():
