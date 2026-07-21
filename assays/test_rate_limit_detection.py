@@ -43,7 +43,10 @@ class TestDetectRateLimitError:
     def test_quota_exceeded(self):
         from mtor.worker.translocase import _detect_rate_limit_error
 
-        assert _detect_rate_limit_error("quota exceeded for this billing period")[0] is True
+        assert (
+            _detect_rate_limit_error("quota exceeded for this billing period")[0]
+            is True
+        )
 
     def test_quota_exhausted(self):
         from mtor.worker.translocase import _detect_rate_limit_error
@@ -58,7 +61,12 @@ class TestDetectRateLimitError:
     def test_resource_exhausted(self):
         from mtor.worker.translocase import _detect_rate_limit_error
 
-        assert _detect_rate_limit_error("resource exhausted: too many concurrent requests")[0] is True
+        assert (
+            _detect_rate_limit_error(
+                "resource exhausted: too many concurrent requests"
+            )[0]
+            is True
+        )
 
     def test_resource_depleted(self):
         from mtor.worker.translocase import _detect_rate_limit_error
@@ -108,6 +116,12 @@ class TestDetectRateLimitError:
         is_rl, wait = _detect_rate_limit_error("429: retry after 60 seconds")
         assert is_rl is True
         assert wait == 60.0
+
+    def test_unrelated_bare_429_is_not_rate_limit(self):
+        from mtor.worker.translocase import _detect_rate_limit_error
+
+        for text in ("429 tests passed", "processed 429 records", "issue 429 failed"):
+            assert _detect_rate_limit_error(text) == (False, None)
 
     def test_no_wait_returns_none(self):
         from mtor.worker.translocase import _detect_rate_limit_error
@@ -301,7 +315,11 @@ class TestRetryLoopExit:
             if in_while and line.startswith("    ") and not line.startswith("        "):
                 # De-indented past the while body — loop ended
                 break
-            if in_while and line.startswith("        break") and not line.startswith("            "):
+            if (
+                in_while
+                and line.startswith("        break")
+                and not line.startswith("            ")
+            ):
                 found_break = True
                 break
         assert found_break, (

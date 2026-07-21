@@ -130,7 +130,10 @@ def _derive_branch_name(workflow_id: str, tid_str: str) -> str:
 
 # Rate-limit detection: patterns that signal 429/quota errors in provider output
 _RATE_LIMIT_PATTERNS = _re.compile(
-    r"429\b"
+    r"(?:HTTP(?:/\d(?:\.\d+)?)?\s+429\b"
+    r"|status(?:\s+code)?[=:\s]+429\b"
+    r"|error[=:\s]+429\b"
+    r"|429\s*[:\-]?\s*(?:too.?\s*many.?\s*requests|retry|rate|quota))"
     r"|rate.?\s*limit"
     r"|rate.?\s*limited"
     r"|quota.?\s*(?:exceeded|exhausted|reached)"
@@ -197,6 +200,18 @@ def _throttle_wait(attempt: int, suggested_seconds: float | None = None) -> floa
 
     jitter = wait * _THROTTLE_JITTER_FRACTION * (_random.random() * 2 - 1)
     return max(1.0, wait + jitter)
+
+
+def _cooldown_window_hours(stderr: str, suggested_seconds: float | None) -> float:
+    """Return one circuit-breaker window from the parsed provider response."""
+    if suggested_seconds is not None and suggested_seconds > 0:
+        return suggested_seconds / 3600
+    return parse_rate_limit_window(stderr)
+
+
+def _resolved_returncode(returncode: int | None) -> int:
+    """Never interpret an unreaped subprocess as a successful exit."""
+    return returncode if returncode is not None else -1
 
 
 def _is_coaching_bloat_error(rc: int, stderr: str) -> bool:
@@ -1576,7 +1591,6 @@ async def translate(
         resolved_provider = _select_attempt_provider(health, provider, _attempted)
 
         _attempted.add(resolved_provider)
-        _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
         _log_event(
             workflow_id,
             "provider_selected",
@@ -1599,6 +1613,7 @@ async def translate(
         ]
 
         _run_start = _time.monotonic()
+        _active_count[resolved_provider] = _active_count.get(resolved_provider, 0) + 1
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1814,7 +1829,7 @@ async def translate(
             with contextlib.suppress(Exception):
                 _reap_orphaned_worktree_processes(repo_root)
 
-        rc = proc.returncode or 0
+        rc = _resolved_returncode(proc.returncode)
         if main_state is not None:
             post_state = await asyncio.to_thread(_main_checkout_state, repo_root)
             head_moved = (
@@ -1904,7 +1919,7 @@ async def translate(
                 rc = EXIT_RATE_LIMITED
 
         # Update provider health state and persist
-        window_hours = parse_rate_limit_window(stderr)
+        window_hours = _cooldown_window_hours(stderr, suggested_wait)
         update_health(resolved_provider, rc, health, window_hours)
         save_health(health)
 

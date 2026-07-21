@@ -189,6 +189,13 @@ def test_parse_window_fractional():
     assert parse_rate_limit_window("cooldown window=0.5h please wait") == 0.5
 
 
+def test_explicit_retry_after_drives_cooldown_window():
+    from mtor.worker.translocase import _cooldown_window_hours
+
+    assert _cooldown_window_hours("Retry-After: 30", 30.0) == 30.0 / 3600
+    assert _cooldown_window_hours("window=2h", None) == 2.0
+
+
 # ---------------------------------------------------------------------------
 # load_health / save_health tests
 # ---------------------------------------------------------------------------
