@@ -92,9 +92,14 @@ def test_reap_worker_processes_success_uses_targeted_ssh():
     payload = {
         "recorded_pids": [123],
         "matched_pids": [123, 124],
+        "selected_pids": [123, 124],
+        "selected_pgids": [123],
         "terminated_pgids": [123],
         "killed_pgids": [],
         "remaining_pids": [],
+        "workflow_id_alive": False,
+        "ok": True,
+        "incomplete": False,
     }
     completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
     workflow_id = "workflow abc"
@@ -105,8 +110,12 @@ def test_reap_worker_processes_success_uses_targeted_ssh():
         "attempted": True,
         "ok": True,
         "verified": True,
+        "incomplete": False,
+        "workflow_id_alive": False,
         "recorded_pids": [123],
         "matched_pids": [123, 124],
+        "selected_pids": [123, 124],
+        "selected_pgids": [123],
         "terminated_pgids": [123],
         "killed_pgids": [],
         "remaining_pids": [],
@@ -137,9 +146,14 @@ def test_reap_worker_processes_reports_ghosts_as_not_ok():
     payload = {
         "recorded_pids": [123],
         "matched_pids": [123, 124],
+        "selected_pids": [123, 124],
+        "selected_pgids": [123],
         "terminated_pgids": [123],
         "killed_pgids": [123],
         "remaining_pids": [124],
+        "workflow_id_alive": True,
+        "ok": False,
+        "incomplete": True,
     }
     completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
     with patch("mtor.cli.subprocess.run", return_value=completed):
@@ -147,17 +161,20 @@ def test_reap_worker_processes_reports_ghosts_as_not_ok():
 
     assert out["ok"] is False
     assert out["verified"] is True
+    assert out["incomplete"] is True
+    assert out["workflow_id_alive"] is True
     assert out["remaining_pids"] == [124]
 
 
 def test_reap_script_kills_process_groups_from_recorded_pids():
-    """The remote script resolves pgids from the worker's subprocess_started
-    log and kills whole groups — the `timeout NNN opencode run` ghost pair
-    carries neither the workflow id nor 'claude' in its args."""
+    """Remote script inspects pid/pgid/args, kills selected groups, and does
+    not use provider-name hints or pkill -f."""
     assert "subprocess_started" in cli._REAP_SCRIPT
     assert "killpg" in cli._REAP_SCRIPT
-    assert "opencode" in cli._REAP_SCRIPT
     assert "pgid" in cli._REAP_SCRIPT
+    assert "NAME_HINTS" not in cli._REAP_SCRIPT
+    assert "pkill" not in cli._REAP_SCRIPT
+    assert "claude" not in cli._REAP_SCRIPT.lower()
 
 
 def test_reap_script_runs_and_reports_empty_for_unknown_workflow():
@@ -174,7 +191,144 @@ def test_reap_script_runs_and_reports_empty_for_unknown_workflow():
     assert result.returncode == 0, result.stderr
     parsed = json.loads(result.stdout.strip())
     assert parsed["matched_pids"] == []
+    assert parsed["selected_pids"] == []
+    assert parsed["selected_pgids"] == []
     assert parsed["remaining_pids"] == []
+    assert parsed["workflow_id_alive"] is False
+    assert parsed["ok"] is True
+
+
+JULY4_WF = "ribosome-glm52-problem-mtor-08dc82a3-6a48a7dc"
+OTHER_WF = "ribosome-other-workflow-aaaaaaaa-bbbbbbbb"
+
+
+def _july4_process_table(workflow_id=JULY4_WF, other_id=OTHER_WF):
+    """Process table shaped like the 2026-07-04 cancel false-green."""
+    return [
+        (
+            1001,
+            100,
+            f"bash /home/vivesca/germline/effectors/ribosome --provider zhipu {workflow_id}",
+        ),
+        (
+            1002,
+            100,
+            f"/bin/bash /home/vivesca/germline/effectors/ribosome {workflow_id}",
+        ),
+        (
+            2001,
+            200,
+            "timeout 7200 opencode run "
+            f"--dir /home/vivesca/code/mtor/.worktrees/{workflow_id}",
+        ),
+        (
+            2002,
+            200,
+            "opencode run "
+            f"--dir /home/vivesca/code/mtor/.worktrees/{workflow_id}",
+        ),
+        (
+            3001,
+            300,
+            "timeout 7200 opencode run "
+            f"--dir /home/vivesca/code/mtor/.worktrees/{other_id}",
+        ),
+        (
+            3002,
+            300,
+            f"opencode run --dir /home/vivesca/code/mtor/.worktrees/{other_id}",
+        ),
+        (9000, 900, f"sshd: python3 -c reap-script {workflow_id}"),
+        (9001, 900, f"python3 -c reap-script {workflow_id}"),
+    ]
+
+
+def _assert_no_claude(rows):
+    for _pid, _pgid, args in rows:
+        assert "claude" not in args.lower(), args
+
+
+def _fake_killpg(live_pgids=None):
+    calls = []
+    live = set(live_pgids or ())
+
+    def killpg(pgid, sig):
+        calls.append((pgid, sig))
+        if sig == 0 and pgid not in live:
+            raise ProcessLookupError
+
+    killpg.calls = calls
+    return killpg
+
+
+def test_reap_selects_nested_opencode_groups_without_claude():
+    """2026-07-04 shape: wrapper group + nested timeout/opencode group, no claude."""
+    rows = _july4_process_table()
+    _assert_no_claude(rows)
+    killpg = _fake_killpg()
+    result = cli._run_process_cleanup(
+        JULY4_WF,
+        scan=lambda: rows,
+        own_pids={9000, 9001},
+        killpg=killpg,
+        sleeper=lambda _seconds: None,
+    )
+    assert set(result["selected_pgids"]) == {100, 200}
+    assert set(result["selected_pids"]) == {1001, 1002, 2001, 2002}
+    assert 9000 not in result["selected_pids"]
+    assert 9001 not in result["selected_pids"]
+    targeted = {pgid for pgid, _sig in killpg.calls}
+    assert targeted == {100, 200}
+
+
+def test_reap_incomplete_when_opencode_survives_terminate():
+    """First terminate pass leaves a matching opencode process alive."""
+    initial = _july4_process_table()
+    _assert_no_claude(initial)
+    leftover = [
+        (
+            2002,
+            200,
+            "opencode run "
+            f"--dir /home/vivesca/code/mtor/.worktrees/{JULY4_WF}",
+        )
+    ]
+    scans = {"n": 0}
+
+    def scan():
+        scans["n"] += 1
+        if scans["n"] == 1:
+            return initial
+        return leftover
+
+    result = cli._run_process_cleanup(
+        JULY4_WF,
+        scan=scan,
+        own_pids={9000, 9001},
+        killpg=_fake_killpg(live_pgids={200}),
+        sleeper=lambda _seconds: None,
+    )
+    assert result["ok"] is False
+    assert result["incomplete"] is True
+    assert result["workflow_id_alive"] is True
+    assert result["remaining_pids"] == [2002]
+
+
+def test_reap_does_not_select_other_workflow_id():
+    """A different workflow id in the same table is not selected."""
+    rows = _july4_process_table()
+    _assert_no_claude(rows)
+    selected_pids, selected_pgids = cli._select_workflow_process_groups(
+        rows, JULY4_WF, own_pids={9000, 9001}
+    )
+    assert 300 not in selected_pgids
+    assert 3001 not in selected_pids
+    assert 3002 not in selected_pids
+    other_pids, other_pgids = cli._select_workflow_process_groups(
+        rows, OTHER_WF, own_pids={9000, 9001}
+    )
+    assert other_pgids == [300]
+    assert other_pids == [3001, 3002]
 
 
 def test_status_terminated_surfaces_diagnostics_fallback(tmp_path: Path):
