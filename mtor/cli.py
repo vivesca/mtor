@@ -18,9 +18,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
+import inspect
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -2384,25 +2386,11 @@ def batch_cancel(
     )
 
 
-_REAP_SCRIPT = r"""
-import json
-import os
-import signal
-import subprocess
-import sys
-import time
-
-workflow_id = sys.argv[1]
-own_pids = {os.getpid(), os.getppid()}
-NAME_HINTS = ("effectors/ribosome", "opencode", "claude")
-
-
-def scan():
-    proc = subprocess.run(
-        ["ps", "-eo", "pid,pgid,args"], capture_output=True, text=True, check=False
-    )
+def _parse_ps_rows(stdout, own_pids):
+    """Parse `ps -eo pid,pgid,args` output, dropping the cleanup helper pids."""
     rows = []
-    for line in proc.stdout.splitlines()[1:]:
+    skip = set(own_pids or ())
+    for line in stdout.splitlines()[1:]:
         parts = line.split(None, 2)
         if len(parts) < 3:
             continue
@@ -2410,105 +2398,185 @@ def scan():
             pid, pgid = int(parts[0]), int(parts[1])
         except ValueError:
             continue
-        if pid in own_pids:
+        if pid in skip:
             continue
         rows.append((pid, pgid, parts[2]))
     return rows
 
 
-# The worker logs every spawned wrapper pid (subprocess_started events); with
-# start_new_session=True that pid is also the process-group id. This finds
-# ghost children (e.g. `timeout NNN opencode run ...`) whose command line
-# carries neither the workflow id nor a recognizable harness name.
-recorded_pids = []
-log_path = os.path.expanduser("~/code/mtor/logs/" + workflow_id + ".jsonl")
-try:
-    with open(log_path) as fh:
-        for line in fh:
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if entry.get("type") == "subprocess_started" and isinstance(entry.get("pid"), int):
-                recorded_pids.append(entry["pid"])
-except OSError:
-    pass
+def _select_workflow_process_groups(rows, workflow_id, own_pids=None):
+    """Select pids/pgids whose command line contains the exact workflow id.
 
-rows = scan()
-by_pgid = {}
-for pid, pgid, args in rows:
-    by_pgid.setdefault(pgid, []).append(args)
+    No provider-name filter. The cleanup helper and its SSH wrapper are
+    excluded via *own_pids* so the scanner never selects itself.
+    """
+    skip = set(own_pids or ())
+    selected_pids = []
+    selected_pgids = set()
+    if not workflow_id:
+        return [], []
+    for pid, pgid, args in rows:
+        if pid in skip:
+            continue
+        if workflow_id in args:
+            selected_pids.append(pid)
+            selected_pgids.add(pgid)
+    return sorted(selected_pids), sorted(selected_pgids)
 
-target_pgids = set()
-# A recorded group counts only while a surviving member still looks like part
-# of a ribosome run, so a recycled pgid is never killed.
-for rec in recorded_pids:
-    members = by_pgid.get(rec, [])
-    if any(h in args.lower() for args in members for h in NAME_HINTS):
-        target_pgids.add(rec)
-# Name-based fallback: processes that mention the workflow id directly.
-for pid, pgid, args in rows:
-    if workflow_id in args and any(h in args.lower() for h in NAME_HINTS):
-        target_pgids.add(pgid)
 
-matched = sorted(pid for pid, pgid, _args in rows if pgid in target_pgids)
+def _remaining_workflow_pids(rows, workflow_id, own_pids=None):
+    """Pids still carrying *workflow_id* after the terminate/kill passes."""
+    skip = set(own_pids or ())
+    if not workflow_id:
+        return []
+    return sorted(
+        pid
+        for pid, _pgid, args in rows
+        if pid not in skip and workflow_id in args
+    )
 
-terminated = []
-for pgid in sorted(target_pgids):
+
+def _terminate_process_groups(pgids, killpg, sleeper):
+    """SIGTERM each selected group, then SIGKILL groups that are still alive."""
+    terminated = []
+    for pgid in sorted(pgids):
+        try:
+            killpg(pgid, signal.SIGTERM)
+            terminated.append(pgid)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    sleeper(0.5)
+    killed = []
+    for pgid in terminated:
+        try:
+            killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        try:
+            killpg(pgid, signal.SIGKILL)
+            killed.append(pgid)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    sleeper(0.2)
+    return terminated, killed
+
+
+def _recorded_wrapper_pids(workflow_id):
+    """Wrapper pids from the worker's subprocess_started log, if present."""
+    recorded_pids = []
+    log_path = os.path.expanduser("~/code/mtor/logs/" + workflow_id + ".jsonl")
     try:
-        os.killpg(pgid, signal.SIGTERM)
-        terminated.append(pgid)
-    except (ProcessLookupError, PermissionError, OSError):
+        with open(log_path) as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") == "subprocess_started" and isinstance(
+                    entry.get("pid"), int
+                ):
+                    recorded_pids.append(entry["pid"])
+    except OSError:
         pass
+    return recorded_pids
 
-time.sleep(0.5)
-killed = []
-for pgid in terminated:
-    try:
-        os.killpg(pgid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
-        continue
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-        killed.append(pgid)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
 
-time.sleep(0.2)
-remaining = sorted(
-    pid
-    for pid, pgid, args in scan()
-    if pgid in target_pgids
-    or (workflow_id in args and any(h in args.lower() for h in NAME_HINTS))
+def _run_process_cleanup(
+    workflow_id, scan, own_pids, killpg, sleeper, recorded_pids=None
+):
+    """Inspect a process table, terminate matching groups, rescan for leftovers.
+
+    *scan* and *killpg* are injected so assays can fake the process table
+    without spawning or signalling real processes.
+    """
+    rows = scan()
+    selected_pids, selected_pgids = _select_workflow_process_groups(
+        rows, workflow_id, own_pids
+    )
+    terminated, killed = _terminate_process_groups(selected_pgids, killpg, sleeper)
+    remaining = _remaining_workflow_pids(scan(), workflow_id, own_pids)
+    workflow_id_alive = len(remaining) > 0
+    return {
+        "recorded_pids": list(recorded_pids or []),
+        "matched_pids": selected_pids,
+        "selected_pids": selected_pids,
+        "selected_pgids": selected_pgids,
+        "terminated_pgids": terminated,
+        "killed_pgids": killed,
+        "remaining_pids": remaining,
+        "workflow_id_alive": workflow_id_alive,
+        "ok": not workflow_id_alive,
+        "incomplete": workflow_id_alive,
+    }
+
+
+_REAP_SCRIPT_MAIN = r"""
+workflow_id = sys.argv[1]
+own_pids = {os.getpid(), os.getppid()}
+
+
+def _scan():
+    proc = subprocess.run(
+        ["ps", "-eo", "pid,pgid,args"], capture_output=True, text=True, check=False
+    )
+    return _parse_ps_rows(proc.stdout, own_pids)
+
+
+recorded_pids = _recorded_wrapper_pids(workflow_id)
+payload = _run_process_cleanup(
+    workflow_id, _scan, own_pids, os.killpg, time.sleep, recorded_pids
 )
-
-print(json.dumps({
-    "recorded_pids": recorded_pids,
-    "matched_pids": matched,
-    "terminated_pgids": terminated,
-    "killed_pgids": killed,
-    "remaining_pids": remaining,
-}))
+print(json.dumps(payload))
 """
+
+
+def _compose_reap_script() -> str:
+    """Embed the local helpers in the remote python3 -c payload."""
+    return (
+        "import json\n"
+        "import os\n"
+        "import signal\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        + inspect.getsource(_parse_ps_rows)
+        + "\n"
+        + inspect.getsource(_select_workflow_process_groups)
+        + "\n"
+        + inspect.getsource(_remaining_workflow_pids)
+        + "\n"
+        + inspect.getsource(_terminate_process_groups)
+        + "\n"
+        + inspect.getsource(_recorded_wrapper_pids)
+        + "\n"
+        + inspect.getsource(_run_process_cleanup)
+        + "\n"
+        + _REAP_SCRIPT_MAIN
+    )
+
+
+_REAP_SCRIPT = _compose_reap_script()
 
 
 def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
     """Kill the workflow's worker-side process groups and verify they died.
 
-    The previous implementation matched single pids by command-line substring
-    only, so a `timeout NNN opencode run ...` pair — whose args contain
-    neither the workflow id nor "claude" — survived cancel, kept implementing
-    into the main checkout, and the empty match list read as a vacuous
-    "cleanup ok" (2026-07-04). This version resolves the recorded wrapper
-    pgids from the worker's subprocess_started log, kills whole process
-    groups, and rescans before reporting ok.
+    Selection is the exact workflow id in the command line, then the process
+    groups those pids belong to. Provider words are not part of the selector.
+    A follow-up scan that still sees the workflow id reports incomplete even
+    if Temporal already terminated the workflow (2026-07-04 false green).
     """
     empty = {
         "recorded_pids": [],
         "matched_pids": [],
+        "selected_pids": [],
+        "selected_pgids": [],
         "terminated_pgids": [],
         "killed_pgids": [],
         "remaining_pids": [],
+        "workflow_id_alive": False,
+        "incomplete": True,
     }
     if not workflow_id.strip():
         return {
@@ -2531,12 +2599,20 @@ def _reap_worker_processes(workflow_id: str) -> dict[str, Any]:
         if result.returncode == 0 and result.stdout.strip():
             parsed = json.loads(result.stdout.strip())
             remaining = parsed.get("remaining_pids", [])
+            selected_pids = parsed.get("selected_pids", parsed.get("matched_pids", []))
+            selected_pgids = parsed.get("selected_pgids", [])
+            workflow_id_alive = bool(parsed.get("workflow_id_alive", remaining))
+            ok = len(remaining) == 0 and not workflow_id_alive
             return {
                 "attempted": True,
-                "ok": len(remaining) == 0,
+                "ok": ok,
                 "verified": True,
+                "incomplete": not ok,
+                "workflow_id_alive": workflow_id_alive,
                 "recorded_pids": parsed.get("recorded_pids", []),
-                "matched_pids": parsed.get("matched_pids", []),
+                "matched_pids": selected_pids,
+                "selected_pids": selected_pids,
+                "selected_pgids": selected_pgids,
                 "terminated_pgids": parsed.get("terminated_pgids", []),
                 "killed_pgids": parsed.get("killed_pgids", []),
                 "remaining_pids": remaining,
@@ -2600,6 +2676,7 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                 "workflow_id": workflow_id,
                 "terminated": True,
                 "process_cleanup": process_cleanup,
+                "process_cleanup_incomplete": not process_cleanup.get("ok", False),
             },
             [
                 _action(f"mtor status {workflow_id}", "Verify termination status"),
@@ -2640,6 +2717,9 @@ def _terminate_workflow(workflow_id: str, cmd: str) -> None:
                     "terminated": True,
                     "note": "Workflow was already in terminal state",
                     "process_cleanup": process_cleanup,
+                    "process_cleanup_incomplete": not process_cleanup.get(
+                        "ok", False
+                    ),
                 },
                 [
                     _action(f"mtor status {workflow_id}", "Verify final status"),

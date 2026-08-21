@@ -1381,6 +1381,38 @@ class TestCancel:
         assert exit_code == 3
         assert data["ok"] is False
 
+    def test_cancel_reports_cleanup_incomplete_without_masking_temporal(self):
+        """Temporal success stays visible when process cleanup is incomplete."""
+        mock_client, _ = make_mock_client()
+        incomplete = {
+            "attempted": True,
+            "ok": False,
+            "verified": True,
+            "incomplete": True,
+            "workflow_id_alive": True,
+            "recorded_pids": [],
+            "matched_pids": [2002],
+            "selected_pids": [2002],
+            "selected_pgids": [200],
+            "terminated_pgids": [200],
+            "killed_pgids": [200],
+            "remaining_pids": [2002],
+        }
+        with (
+            _patch_client(mock_client),
+            patch("mtor.cli._reap_worker_processes", return_value=incomplete),
+        ):
+            exit_code, data = invoke(
+                ["cancel", "ribosome-glm52-problem-mtor-08dc82a3-6a48a7dc"]
+            )
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert data["result"]["terminated"] is True
+        assert data["result"]["process_cleanup_incomplete"] is True
+        assert data["result"]["process_cleanup"]["ok"] is False
+        assert data["result"]["process_cleanup"]["remaining_pids"] == [2002]
+        assert data["result"]["process_cleanup"]["workflow_id_alive"] is True
+
 
 # ---------------------------------------------------------------------------
 # Doctor tests
