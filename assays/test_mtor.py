@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mtor import cli
 from mtor.cli import app
 from mtor.backend import TemporalBackend
 
@@ -3273,3 +3274,187 @@ def test_chaperone_dossier_preserves_capability_gate_diagnostics():
     assert dossier["stderr"] == "CAPABILITY_GATE: blocked keyword"
     assert dossier["gate"] == "capability"
     assert dossier["blocked_keyword"] == "danger"
+
+
+# ---------------------------------------------------------------------------
+# rictor reap-orphan-workers
+# ---------------------------------------------------------------------------
+
+_WORKER_ARGS = (
+    "op run --env-file /home/vivesca/germline/loci/env.op -- python3 -m mtor.worker"
+)
+_OPENCODE_ARGS = (
+    "opencode run --dir /home/vivesca/code/mtor/.worktrees/ribosome-orphan-1"
+)
+_TIMEOUT_ARGS = "timeout 7200 " + _OPENCODE_ARGS
+_RIBOSOME_ARGS = (
+    "bash /home/vivesca/germline/effectors/ribosome --provider zhipu ribosome-orphan-1"
+)
+
+
+def _fake_killpg(live_pgids=None):
+    calls = []
+    live = set(live_pgids or ())
+
+    def killpg(pgid, sig):
+        calls.append((pgid, sig))
+        if sig == 0 and pgid not in live:
+            raise ProcessLookupError
+
+    killpg.calls = calls
+    return killpg
+
+
+def _orphan_reap_invoke(rows, cgroup_pids, *, force=False, post_rows=None):
+    """Invoke the command against a fake process table. Never signals real pids."""
+    scan_n = {"n": 0}
+
+    def scan(_own_pids=None):
+        scan_n["n"] += 1
+        if scan_n["n"] > 1 and post_rows is not None:
+            return post_rows
+        return rows
+
+    killpg = _fake_killpg()
+    with (
+        patch.object(cli, "_scan_orphan_worker_rows", side_effect=scan),
+        patch.object(cli, "_read_worker_cgroup_pids", return_value=cgroup_pids),
+        patch.object(cli, "_remote_killpg", side_effect=killpg),
+        patch.object(cli.time, "sleep"),
+    ):
+        args = ["rictor", "reap-orphan-workers"]
+        if force:
+            args.append("--force-reap-orphans")
+        exit_code, data = invoke(args)
+    return exit_code, data, killpg
+
+
+class TestReapOrphanWorkers:
+    def test_reap_orphan_workers_idle_service_reaps_and_reports_healthy(self):
+        """Orphan root under PID 1 with an idle service → reaped, singleton healthy."""
+        rows = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (501, 1, 501, _WORKER_ARGS),
+        ]
+        after = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+        ]
+        exit_code, data, killpg = _orphan_reap_invoke(
+            rows, cgroup_pids=[200], post_rows=after
+        )
+        assert exit_code == 0
+        result = data["result"]
+        assert data["ok"] is True
+        assert data["command"] == "mtor rictor reap-orphan-workers"
+        assert result["action"] == "terminated"
+        assert result["active_tasks"] is False
+        assert result["roots_found"][0]["pid"] == 501
+        assert result["roots_found"][0]["ppid"] == 1
+        assert result["terminated_pgids"] == [501]
+        assert {pgid for pgid, _sig in killpg.calls} == {501}
+        assert result["post_check"]["worker_process_singleton"] is True
+        assert result["post_check"]["defect"] is None
+        assert result["ok"] is True
+
+    def test_reap_orphan_workers_active_opencode_is_noop_without_force(self):
+        """Orphan plus active opencode in the service cgroup → no-op without force."""
+        rows = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (300, 200, 300, _TIMEOUT_ARGS),
+            (301, 300, 300, _OPENCODE_ARGS),
+            (302, 200, 200, _RIBOSOME_ARGS),
+            (501, 1, 501, _WORKER_ARGS),
+        ]
+        exit_code, data, killpg = _orphan_reap_invoke(
+            rows, cgroup_pids=[200, 300, 301, 302]
+        )
+        result = data["result"]
+        assert exit_code == 0
+        assert result["action"] == "noop"
+        assert result["active_tasks"] is True
+        assert result["roots_found"][0]["pid"] == 501
+        assert result["terminated_pgids"] == []
+        assert killpg.calls == []
+        assert result["ok"] is True
+
+    def test_reap_orphan_workers_force_reaps_only_orphan_not_cgroup(self):
+        """Force reaps the PID-1 orphan root and never the service cgroup tasks."""
+        rows = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (300, 200, 300, _TIMEOUT_ARGS),
+            (301, 300, 300, _OPENCODE_ARGS),
+            (302, 200, 200, _RIBOSOME_ARGS),
+            (501, 1, 501, _WORKER_ARGS),
+        ]
+        after = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (300, 200, 300, _TIMEOUT_ARGS),
+            (301, 300, 300, _OPENCODE_ARGS),
+            (302, 200, 200, _RIBOSOME_ARGS),
+        ]
+        exit_code, data, killpg = _orphan_reap_invoke(
+            rows,
+            cgroup_pids=[200, 300, 301, 302],
+            force=True,
+            post_rows=after,
+        )
+        result = data["result"]
+        targeted = {pgid for pgid, _sig in killpg.calls}
+        assert exit_code == 0
+        assert result["action"] == "forced"
+        assert result["active_tasks"] is True
+        assert result["terminated_pgids"] == [501]
+        assert targeted == {501}
+        assert 200 not in targeted
+        assert 300 not in targeted
+        assert result["post_check"]["worker_process_singleton"] is True
+        assert result["ok"] is True
+
+    def test_reap_orphan_workers_fresh_orphan_is_worker_service_defect(self):
+        """A new orphan after cleanup is a worker-service defect, not success."""
+        rows = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (501, 1, 501, _WORKER_ARGS),
+        ]
+        after = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+            (777, 1, 777, _WORKER_ARGS),
+        ]
+        exit_code, data, _killpg = _orphan_reap_invoke(
+            rows, cgroup_pids=[200], post_rows=after
+        )
+        result = data["result"]
+        assert exit_code == 0
+        assert data["ok"] is True
+        assert result["action"] == "terminated"
+        assert result["ok"] is False
+        assert result["post_check"]["fresh_orphan"] is True
+        assert result["post_check"]["fresh_orphan_pids"] == [777]
+        assert result["post_check"]["defect"] == "worker-service"
+        assert result["post_check"]["worker_process_singleton"] is False
+
+    def test_reap_orphan_workers_nothing_matching_empty_report(self):
+        """No PID-1 orphan roots → clean empty report, no signals."""
+        rows = [
+            (80, 1, 80, "systemd --user"),
+            (200, 80, 200, _WORKER_ARGS),
+        ]
+        exit_code, data, killpg = _orphan_reap_invoke(rows, cgroup_pids=[200])
+        result = data["result"]
+        assert exit_code == 0
+        assert result["roots_found"] == []
+        assert result["action"] == "noop"
+        assert result["active_tasks"] is False
+        assert result["terminated_pgids"] == []
+        assert result["killed_pgids"] == []
+        assert killpg.calls == []
+        assert result["post_check"]["worker_process_singleton"] is True
+        assert result["post_check"]["defect"] is None
+        assert result["ok"] is True

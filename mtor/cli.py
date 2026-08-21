@@ -87,6 +87,8 @@ from mtor.triage import (
 from mtor.tree import tree
 from mtor.spec import DEFAULT_SPEC_DIR, scaffold_spec, update_spec_status, validate_spec
 from mtor.infra import (
+    _host_command,
+    _parse_worker_roots,
     check_health as _check_health,
     clean as _clean,
     deploy as _deploy,
@@ -2461,6 +2463,204 @@ def _terminate_process_groups(pgids, killpg, sleeper):
     return terminated, killed
 
 
+_ORPHAN_WORKER_MARKERS = ("op run", "python3 -m mtor.worker")
+_SERVICE_TASK_MARKERS = ("ribosome", "timeout", "opencode")
+
+
+def _parse_ps_ppid_rows(stdout, own_pids=None):
+    """Parse `ps -eo pid,ppid,pgid,args` output into (pid, ppid, pgid, args)."""
+    rows = []
+    skip = set(own_pids or ())
+    for line in stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        if pid in skip:
+            continue
+        rows.append((pid, ppid, pgid, parts[3]))
+    return rows
+
+
+def _select_orphan_worker_roots(rows):
+    """Select `op run ... python3 -m mtor.worker` roots whose parent is PID 1."""
+    selected = []
+    for pid, ppid, pgid, args in rows:
+        if ppid != 1:
+            continue
+        if all(marker in args for marker in _ORPHAN_WORKER_MARKERS):
+            selected.append((pid, ppid, pgid, args))
+    return selected
+
+
+def _service_cgroup_has_active_tasks(cgroup_pids, rows):
+    """True when the service cgroup has ribosome/timeout/opencode tasks.
+
+    Unreadable cgroup state (*cgroup_pids* is None) fails closed: treat as
+    active so the default path is a no-op.
+    """
+    if cgroup_pids is None:
+        return True
+    cgroup_set = set(cgroup_pids)
+    if not cgroup_set:
+        return False
+    for pid, _ppid, _pgid, args in rows:
+        if pid not in cgroup_set:
+            continue
+        if all(marker in args for marker in _ORPHAN_WORKER_MARKERS):
+            continue
+        lowered = args.lower()
+        if any(marker in lowered for marker in _SERVICE_TASK_MARKERS):
+            return True
+    return False
+
+
+def _worker_roots_stdout(rows):
+    """Format scan rows for ``_parse_worker_roots`` (pid ppid args)."""
+    return "\n".join(f"{pid} {ppid} {args}" for pid, ppid, _pgid, args in rows)
+
+
+def _run_orphan_worker_reap(
+    scan, cgroup_pids, killpg, sleeper, force=False, post_scan=None
+):
+    """Inspect a fakeable process table and reap PID-1 orphan worker roots.
+
+    Never signals the service cgroup. Active ribosome/timeout/opencode tasks
+    force a no-op unless *force* is true. *scan*/*killpg*/*sleeper* are
+    injected so assays never spawn or signal real processes.
+    """
+    rows = scan()
+    roots = _select_orphan_worker_roots(rows)
+    active_tasks = _service_cgroup_has_active_tasks(cgroup_pids, rows)
+    cgroup_set = set(cgroup_pids or ())
+    cgroup_pgids = {
+        pgid for pid, _ppid, pgid, _args in rows if pid in cgroup_set
+    }
+    roots_found = [
+        {"pid": pid, "ppid": ppid, "pgid": pgid, "args": args[:160]}
+        for pid, ppid, pgid, args in roots
+    ]
+    original_pids = {pid for pid, _ppid, _pgid, _args in roots}
+
+    action = "noop"
+    terminated, killed = [], []
+    if roots and (not active_tasks or force):
+        pgids = []
+        seen = set()
+        for pid, _ppid, pgid, _args in roots:
+            if pid in cgroup_set or pgid <= 1 or pgid in cgroup_pgids:
+                continue
+            if pgid in seen:
+                continue
+            seen.add(pgid)
+            pgids.append(pgid)
+        terminated, killed = _terminate_process_groups(pgids, killpg, sleeper)
+        action = "forced" if force and active_tasks else "terminated"
+
+    after = (post_scan or scan)()
+    after_orphans = _select_orphan_worker_roots(after)
+    fresh_pids = [
+        pid for pid, _ppid, _pgid, _args in after_orphans if pid not in original_pids
+    ]
+    singleton_ok, singleton_detail = _parse_worker_roots(_worker_roots_stdout(after))
+    defect = "worker-service" if fresh_pids else None
+    ok = defect is None and (action == "noop" or singleton_ok)
+    return {
+        "roots_found": roots_found,
+        "active_tasks": active_tasks,
+        "cgroup_readable": cgroup_pids is not None,
+        "action": action,
+        "terminated_pgids": terminated,
+        "killed_pgids": killed,
+        "post_check": {
+            "worker_process_singleton": singleton_ok,
+            "detail": singleton_detail,
+            "fresh_orphan": bool(fresh_pids),
+            "fresh_orphan_pids": fresh_pids,
+            "defect": defect,
+        },
+        "ok": ok,
+    }
+
+
+def _scan_orphan_worker_rows(own_pids=None):
+    """Read the worker host process table (pid, ppid, pgid, args)."""
+    result = subprocess.run(
+        _host_command(WORKER_HOST, "ps -eo pid=,ppid=,pgid=,args="),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "ps failed").strip()[:200]
+        raise OSError(error)
+    return _parse_ps_ppid_rows(result.stdout, own_pids)
+
+
+def _read_worker_cgroup_pids():
+    """PIDs in the active mtor-worker.service cgroup, or None if unreadable."""
+    script = (
+        "cg=$(systemctl --user show mtor-worker.service "
+        "-p ControlGroup --value 2>/dev/null || true); "
+        'if [ -z "$cg" ] || [ "$cg" = "/" ]; then echo UNREADABLE; exit 0; fi; '
+        'path="/sys/fs/cgroup${cg}"; '
+        'if [ -f "$path/cgroup.procs" ]; then cat "$path/cgroup.procs"; '
+        'elif [ -f "$path/tasks" ]; then cat "$path/tasks"; '
+        "else echo UNREADABLE; fi"
+    )
+    try:
+        result = subprocess.run(
+            _host_command(WORKER_HOST, script),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    if "UNREADABLE" in result.stdout:
+        return None
+    pids = []
+    for line in result.stdout.splitlines():
+        token = line.strip()
+        if token.isdigit():
+            pids.append(int(token))
+    return pids
+
+
+def _remote_killpg(pgid, sig):
+    """Signal a process group on the worker host. Raises ProcessLookupError."""
+    if sig == 0:
+        remote = f"kill -0 -{int(pgid)}"
+    elif sig == signal.SIGKILL:
+        remote = f"kill -KILL -{int(pgid)}"
+    else:
+        remote = f"kill -TERM -{int(pgid)}"
+    result = subprocess.run(
+        _host_command(WORKER_HOST, remote),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise ProcessLookupError
+
+
+def _reap_orphan_workers_on_host(*, force=False):
+    """Live adapter: scan/cgroup/killpg on WORKER_HOST, then run the core reap."""
+    return _run_orphan_worker_reap(
+        scan=_scan_orphan_worker_rows,
+        cgroup_pids=_read_worker_cgroup_pids(),
+        killpg=_remote_killpg,
+        sleeper=time.sleep,
+        force=force,
+    )
+
+
 def _recorded_wrapper_pids(workflow_id):
     """Wrapper pids from the worker's subprocess_started log, if present."""
     recorded_pids = []
@@ -4737,6 +4937,54 @@ def clean(
     cmd = "mtor rictor clean"
     result = _clean(older_than_days=older_than_days)
     _ok(cmd, result.to_dict(), version=VERSION)
+
+
+@rictor_app.command(name="reap-orphan-workers")
+def rictor_reap_orphan_workers(
+    *,
+    force_reap_orphans: Annotated[
+        bool, Parameter(name=["--force-reap-orphans"])
+    ] = False,
+) -> None:
+    """Terminate PID-1 orphan mtor.worker roots; never the service cgroup."""
+    cmd = "mtor rictor reap-orphan-workers"
+    try:
+        result = _reap_orphan_workers_on_host(force=force_reap_orphans)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        sys.exit(
+            _err(
+                cmd,
+                f"Worker host unreachable: {exc}",
+                "WORKER_UNREACHABLE",
+                f"Check ssh {WORKER_HOST} and mtor-worker.service",
+                [_action("mtor rictor check", "Inspect infrastructure health")],
+            )
+        )
+    next_actions = []
+    post = result.get("post_check") or {}
+    if post.get("defect") == "worker-service":
+        next_actions.append(
+            _action("mtor tsc", "Inspect worker-service singleton defect")
+        )
+        next_actions.append(
+            _action("mtor rictor check", "Confirm worker process health")
+        )
+    elif (
+        result.get("action") == "noop"
+        and result.get("roots_found")
+        and result.get("active_tasks")
+    ):
+        next_actions.append(
+            _action(
+                "mtor rictor reap-orphan-workers --force-reap-orphans",
+                "Force-reap PID-1 orphan roots (service tasks are active)",
+            )
+        )
+    elif result.get("action") in {"terminated", "forced"}:
+        next_actions.append(
+            _action("mtor rictor check", "Verify worker singleton after reap")
+        )
+    _ok(cmd, result, next_actions, version=VERSION)
 
 
 @rictor_app.command(name="setup-search-attrs")
