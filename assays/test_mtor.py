@@ -6,6 +6,7 @@ Temporal client calls are mocked via unittest.mock.patch.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -2427,6 +2428,106 @@ class TestScoutMode:
         assert len(logs_actions) == 1, (
             f"Expected exactly 1 mtor logs action, got {len(logs_actions)}: {logs_actions}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Explain/dispatch mode parity tests
+# ---------------------------------------------------------------------------
+
+# Golden suffix bytes. Explain (_dispatch_explanation) and dispatch
+# (_dispatch_prompt) must derive byte-identical full prompts from the shared
+# helpers, so workflow_id / prompt_hash / prompt_preview / risk can never
+# drift between the plan an operator reviews and the task that runs.
+_SCOUT_SUFFIX = (
+    "\n\nThis is a READ-ONLY analysis task. Do NOT modify any files. "
+    "Report your findings as structured output. Format: list each finding with: "
+    "file path, issue, recommendation."
+)
+_RESEARCH_SUFFIX = (
+    "\n\nThis is a RESEARCH task. Search external sources (web, docs, papers) "
+    "to answer the question. Use rheotaxis, curl, or any available search tools. "
+    "Do NOT modify any files in the repository. "
+    "Format findings as:\n"
+    "## Key Findings\n- finding 1 (source: URL)\n- finding 2 (source: URL)\n"
+    "## Synthesis\nOne paragraph summary.\n"
+    "## Recommendations\n- actionable item 1\n- actionable item 2"
+)
+_RECEPTOR_SUFFIX = (
+    "\n\nThis is a RECEPTOR task for Vivesca skill files. "
+    "Only edit files allowed by the spec scope under membrane/receptors/. "
+    "Preserve frontmatter, triggers, and existing local style. "
+    "Do not edit genome.md, epigenome/marks/, or unrelated skills. "
+    "Run the verification command from the spec before committing."
+)
+
+_MODE_SUFFIXES = {
+    "build": "",
+    "experiment": "",
+    "scout": _SCOUT_SUFFIX,
+    "research": _RESEARCH_SUFFIX,
+    "receptor": _RECEPTOR_SUFFIX,
+}
+
+
+def _mode_kwargs(mode: str) -> dict:
+    """The (mode, experiment) kwargs both dispatch paths take for a mode."""
+    if mode == "experiment":
+        return {"experiment": True}
+    if mode == "build":
+        return {}
+    return {"mode": mode}
+
+
+class TestExplainDispatchModeParity:
+    """Explain and dispatch derive byte-identical prompts per mode."""
+
+    @pytest.mark.parametrize(
+        "mode", ["build", "experiment", "scout", "research", "receptor"]
+    )
+    def test_full_prompt_and_workflow_id_identical(self, monkeypatch, mode):
+        """Both paths build the same full prompt, hash, risk, and workflow id."""
+        from mtor import dispatch
+
+        prompt = f"Audit the kinase module for {mode} coverage"
+        # Freeze the clock so both paths derive the same timestamped id.
+        monkeypatch.setattr(dispatch.time, "time", lambda: 1717171717.0)
+        # Keep the plan hermetic: no Temporal visibility probe in either path.
+        monkeypatch.setattr(
+            dispatch,
+            "_worker_load_plan",
+            lambda: {"running": 0, "ok": True, "detail": "worker idle"},
+        )
+
+        plan = dispatch._dispatch_explanation(
+            prompt, skip_sha_check=True, **_mode_kwargs(mode)
+        )
+
+        mock_client, _ = make_mock_client()
+        with _patch_client(mock_client):
+            dispatch._dispatch_prompt(prompt, skip_sha_check=True, **_mode_kwargs(mode))
+
+        call_kwargs = mock_client.start_workflow.call_args.kwargs
+        dispatched_spec = call_kwargs["args"][0][0]
+        dispatched_task = dispatched_spec["task"]
+
+        # Golden suffix bytes per mode; build/experiment stay unsuffixed.
+        expected_full = prompt + _MODE_SUFFIXES[mode]
+        assert dispatched_task == expected_full
+        assert plan["prompt_preview"] == expected_full[:200]
+
+        # The explain-side prompt_hash is the sha256 of the dispatched task —
+        # byte-identical full prompts across both paths.
+        assert (
+            hashlib.sha256(dispatched_task.encode()).hexdigest()[:16]
+            == plan["prompt_hash"]
+        )
+
+        # Mode, risk, and workflow id cannot drift between plan and dispatch.
+        assert dispatched_spec["mode"] == mode
+        assert plan["search_attributes"]["mtor_mode"] == mode
+        assert dispatched_spec["risk"] == plan["risk"]
+        assert call_kwargs["id"] == plan["workflow_id"]
+        assert call_kwargs["id"].startswith("ribosome-glm52-audit-the-kinase-")
 
 
 # ---------------------------------------------------------------------------

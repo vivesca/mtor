@@ -123,6 +123,35 @@ def _resolve_default_provider(spec_mode: str) -> str:
     return ROUTE_TO_PROVIDER.get(spec_mode, "zhipu")
 
 
+def _resolve_spec_mode(mode: str | None, experiment: bool = False) -> str:
+    """Resolve the dispatch spec mode: explicit mode > experiment flag > build."""
+    if mode:
+        return mode
+    if experiment:
+        return "experiment"
+    return "build"
+
+
+def _scout_suffix() -> str:
+    return (
+        "\n\nThis is a READ-ONLY analysis task. Do NOT modify any files. "
+        "Report your findings as structured output. Format: list each finding with: "
+        "file path, issue, recommendation."
+    )
+
+
+def _research_suffix() -> str:
+    return (
+        "\n\nThis is a RESEARCH task. Search external sources (web, docs, papers) "
+        "to answer the question. Use rheotaxis, curl, or any available search tools. "
+        "Do NOT modify any files in the repository. "
+        "Format findings as:\n"
+        "## Key Findings\n- finding 1 (source: URL)\n- finding 2 (source: URL)\n"
+        "## Synthesis\nOne paragraph summary.\n"
+        "## Recommendations\n- actionable item 1\n- actionable item 2"
+    )
+
+
 def _receptor_suffix() -> str:
     return (
         "\n\nThis is a RECEPTOR task for Vivesca skill files. "
@@ -131,6 +160,17 @@ def _receptor_suffix() -> str:
         "Do not edit genome.md, epigenome/marks/, or unrelated skills. "
         "Run the verification command from the spec before committing."
     )
+
+
+def _apply_mode_suffix(prompt: str, spec_mode: str) -> str:
+    """Append the mode-specific suffix; build/experiment stay unsuffixed."""
+    if spec_mode == "scout":
+        return prompt + _scout_suffix()
+    if spec_mode == "research":
+        return prompt + _research_suffix()
+    if spec_mode == "receptor":
+        return prompt + _receptor_suffix()
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1082,33 +1122,8 @@ def _dispatch_explanation(
             prompt_for_cmd=prompt[:60],
         )
 
-    if mode:
-        spec_mode = mode
-    elif experiment:
-        spec_mode = "experiment"
-    else:
-        spec_mode = "build"
-
-    if spec_mode == "scout":
-        full_prompt = prompt + (
-            "\n\nThis is a READ-ONLY analysis task. Do NOT modify any files. "
-            "Report your findings as structured output. Format: list each finding with: "
-            "file path, issue, recommendation."
-        )
-    elif spec_mode == "research":
-        full_prompt = prompt + (
-            "\n\nThis is a RESEARCH task. Search external sources (web, docs, papers) "
-            "to answer the question. Use rheotaxis, curl, or any available search tools. "
-            "Do NOT modify any files in the repository. "
-            "Format findings as:\n"
-            "## Key Findings\n- finding 1 (source: URL)\n- finding 2 (source: URL)\n"
-            "## Synthesis\nOne paragraph summary.\n"
-            "## Recommendations\n- actionable item 1\n- actionable item 2"
-        )
-    elif spec_mode == "receptor":
-        full_prompt = prompt + _receptor_suffix()
-    else:
-        full_prompt = prompt
+    spec_mode = _resolve_spec_mode(mode, experiment)
+    full_prompt = _apply_mode_suffix(prompt, spec_mode)
 
     resolved_provider = provider or _resolve_default_provider(spec_mode)
     risk = classify_risk(full_prompt)
@@ -1319,12 +1334,7 @@ def _dispatch_prompt(
         )
 
     # Determine spec mode: explicit mode > experiment flag > build default
-    if mode:
-        spec_mode = mode
-    elif experiment:
-        spec_mode = "experiment"
-    else:
-        spec_mode = "build"
+    spec_mode = _resolve_spec_mode(mode, experiment)
 
     if provider in RETIRED_PROVIDERS:
         sys.exit(
@@ -1386,28 +1396,7 @@ def _dispatch_prompt(
             )
 
     # Mode-specific prompt suffixes
-    if spec_mode == "scout":
-        scout_suffix = (
-            "\n\nThis is a READ-ONLY analysis task. Do NOT modify any files. "
-            "Report your findings as structured output. Format: list each finding with: "
-            "file path, issue, recommendation."
-        )
-        full_prompt = prompt + scout_suffix
-    elif spec_mode == "research":
-        research_suffix = (
-            "\n\nThis is a RESEARCH task. Search external sources (web, docs, papers) "
-            "to answer the question. Use rheotaxis, curl, or any available search tools. "
-            "Do NOT modify any files in the repository. "
-            "Format findings as:\n"
-            "## Key Findings\n- finding 1 (source: URL)\n- finding 2 (source: URL)\n"
-            "## Synthesis\nOne paragraph summary.\n"
-            "## Recommendations\n- actionable item 1\n- actionable item 2"
-        )
-        full_prompt = prompt + research_suffix
-    elif spec_mode == "receptor":
-        full_prompt = prompt + _receptor_suffix()
-    else:
-        full_prompt = prompt
+    full_prompt = _apply_mode_suffix(prompt, spec_mode)
 
     client, err = _get_client()
     if err:
