@@ -203,6 +203,27 @@ def test_opencode_config_payload_rejects_old_provider_name():
     assert "zhipu-coding" in result["detail"]
 
 
+def test_opencode_config_payload_local_accepts_ask_permissions():
+    """Local interactive config may default permissions to ask instead of allow."""
+    config = _opencode_config()
+    config["permission"] = {"*": "ask", "external_directory": {"*": "ask"}}
+
+    result = _check_opencode_config_payload(config, source="local")
+
+    assert result["ok"] is True
+
+
+def test_opencode_config_payload_worker_rejects_ask_permissions():
+    """Unattended worker config must keep allow; ask fails with the diagnostic."""
+    config = _opencode_config()
+    config["permission"] = {"*": "ask", "external_directory": {"*": "ask"}}
+
+    result = _check_opencode_config_payload(config, source="worker")
+
+    assert result["ok"] is False
+    assert "permissions do not allow external_directory" in result["detail"]
+
+
 def test_opencode_config_payload_rejects_literal_secrets():
     config = _opencode_config()
     config["provider"]["zhipuai-coding-plan"]["options"]["apiKey"] = "literal-secret"

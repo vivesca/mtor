@@ -341,7 +341,12 @@ def _authorization_placeholder_ok(value: object) -> bool:
 
 
 def _check_opencode_config_payload(config: dict, *, source: str = "local") -> dict:
-    """Validate an OpenCode config payload against the BigModel coding-plan lane."""
+    """Validate an OpenCode config payload against the BigModel coding-plan lane.
+
+    Permission defaults are source-aware: the local interactive config may use
+    ``ask`` or ``allow``; unattended sources (worker, synthetic tests) must use
+    ``allow``.
+    """
     if not isinstance(config, dict):
         return {
             "name": f"opencode_config_{source}",
@@ -366,9 +371,11 @@ def _check_opencode_config_payload(config: dict, *, source: str = "local") -> di
         failures.append(f"model={config.get('model')!r}")
     if config.get("small_model") != _OPENCODE_EXPECTED_SMALL_MODEL:
         failures.append(f"small_model={config.get('small_model')!r}")
+    permitted_permission_values = {"allow", "ask"} if source == "local" else {"allow"}
     if (
-        permission.get("*") != "allow"
-        or permission.get("external_directory", {}).get("*") != "allow"
+        permission.get("*") not in permitted_permission_values
+        or permission.get("external_directory", {}).get("*")
+        not in permitted_permission_values
     ):
         failures.append("permissions do not allow external_directory")
 
