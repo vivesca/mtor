@@ -290,20 +290,20 @@ class TestFormatReportAllPass(unittest.TestCase):
             ):
                 self.assertIn("✔", line)
 
-    def test_provider_routing_displays_glm52(self):
-        """Doctor display makes the primary GLM-5.2/Zhipu route visible."""
+    def test_provider_routing_displays_glm53(self):
+        """Doctor display makes the primary GLM-5.3/Zhipu route visible."""
         checks = [
             {
                 "name": "provider_routing",
                 "ok": True,
-                "detail": "priority: zhipu(glm-5.2, limit=3)",
+                "detail": "priority: zhipu(glm-5.3, limit=3)",
             },
         ]
 
         output = format_health_display(checks)
 
         self.assertIn("provider_routing", output)
-        self.assertIn("zhipu(glm-5.2", output)
+        self.assertIn("zhipu(glm-5.3", output)
 
 
 class TestFormatReportWithFailures(unittest.TestCase):

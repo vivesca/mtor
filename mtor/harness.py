@@ -65,7 +65,7 @@ def _build_opencode_command(task: str) -> list[str]:
         "opencode",
         "run",
         "--model",
-        "zhipuai-coding-plan/glm-5.2",
+        "zhipuai-coding-plan/glm-5.3",
         "--format",
         "json",
         "--dangerously-skip-permissions",
@@ -74,13 +74,13 @@ def _build_opencode_command(task: str) -> list[str]:
 
 
 def _build_pi_command(task: str) -> list[str]:
-    """Build an ephemeral Pi command for GLM-5.2 on the Z.AI China plan."""
+    """Build an ephemeral Pi command for GLM-5.3 on the Z.AI China plan."""
     return [
         "pi",
         "--provider",
         "zai-coding-cn",
         "--model",
-        "glm-5.2",
+        "glm-5.3",
         "--no-session",
         "--approve",
         "-p",

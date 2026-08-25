@@ -36,11 +36,11 @@ _OPENCODE_CONFIG_PATH = os.path.expanduser("~/.config/opencode/opencode.json")
 _CODING_PLAN_EXPECTED_URL = "https://open.bigmodel.cn/api/anthropic"
 _OPENCODE_EXPECTED_PROVIDER = "zhipuai-coding-plan"
 _OPENCODE_EXPECTED_API = "https://open.bigmodel.cn/api/coding/paas/v4"
-_OPENCODE_EXPECTED_MODEL = "zhipuai-coding-plan/glm-5.2"
+_OPENCODE_EXPECTED_MODEL = "zhipuai-coding-plan/glm-5.3"
 _OPENCODE_EXPECTED_SMALL_MODEL = "zhipuai-coding-plan/glm-4.5-air"
 
 PROVIDER_MODELS = {
-    "zhipu": "glm-5.2",
+    "zhipu": "glm-5.3",
 }
 
 
@@ -179,7 +179,7 @@ def _probe_provider(provider: str) -> ProbeResult:
         "zhipu": "https://open.bigmodel.cn/api/anthropic/v1/messages",
     }
     models = {
-        "zhipu": "glm-5.2",
+        "zhipu": "glm-5.3",
     }
 
     endpoint = endpoints[provider]
@@ -461,7 +461,7 @@ def _check_worker_opencode_runtime() -> dict:
         "git config user.name Canary; "
         'source "$HOME/.env.bootstrap"; '
         'timeout 120 op run --env-file "$HOME/germline/loci/env.op" -- '
-        "opencode run --model zhipuai-coding-plan/glm-5.2 --format json "
+        "opencode run --model zhipuai-coding-plan/glm-5.3 --format json "
         '--dangerously-skip-permissions --dir "$PWD" '
         f"{quoted_prompt} >out.jsonl 2>err.log; "
         "run_exit=$?; "
@@ -494,7 +494,7 @@ def _check_worker_opencode_runtime() -> dict:
         result.returncode == 0 and "exit=0" in output and "probe_text=present" in output
     )
     detail = (
-        "zhipuai-coding-plan/glm-5.2 returned coding-plan-ok"
+        "zhipuai-coding-plan/glm-5.3 returned coding-plan-ok"
         if ok
         else (
             f"exit={result.returncode}; stdout={len(result.stdout)} bytes; "

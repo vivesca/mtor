@@ -173,7 +173,7 @@ def _opencode_config() -> dict:
                 }
             }
         },
-        "model": "zhipuai-coding-plan/glm-5.2",
+        "model": "zhipuai-coding-plan/glm-5.3",
         "small_model": "zhipuai-coding-plan/glm-4.5-air",
         "permission": {"*": "allow", "external_directory": {"*": "allow"}},
     }
@@ -183,7 +183,7 @@ def test_opencode_config_payload_accepts_bigmodel_coding_plan():
     result = _check_opencode_config_payload(_opencode_config(), source="test")
     assert result["ok"] is True
     assert result["provider"] == "zhipuai-coding-plan"
-    assert result["model"] == "zhipuai-coding-plan/glm-5.2"
+    assert result["model"] == "zhipuai-coding-plan/glm-5.3"
 
 
 def test_opencode_config_payload_rejects_old_provider_name():

@@ -32,25 +32,25 @@ class TestRunHarness:
         cmd = build_command("droid", "inspect the repo")
         assert cmd == ["droid", "exec", "inspect the repo"]
 
-    def test_run_harness_opencode_builds_glm52_command(self):
-        """Provider 'opencode' builds an OpenCode command on GLM-5.2."""
+    def test_run_harness_opencode_builds_glm53_command(self):
+        """Provider 'opencode' builds an OpenCode command on GLM-5.3."""
         cmd = build_command("opencode", "write a test")
         assert cmd[:2] == ["opencode", "run"]
         assert "--model" in cmd
-        assert "zhipuai-coding-plan/glm-5.2" in cmd
+        assert "zhipuai-coding-plan/glm-5.3" in cmd
         assert "--dangerously-skip-permissions" in cmd
         assert "write a test" in cmd
 
-    def test_run_harness_zhipu_uses_opencode_glm52(self):
+    def test_run_harness_zhipu_uses_opencode_glm53(self):
         """Provider 'zhipu' should not route through the Claude harness."""
         cmd = build_command("zhipu", "write a test")
         assert cmd[:2] == ["opencode", "run"]
-        assert "zhipuai-coding-plan/glm-5.2" in cmd
+        assert "zhipuai-coding-plan/glm-5.3" in cmd
 
-    def test_run_harness_pi_builds_ephemeral_glm52_command(self):
+    def test_run_harness_pi_builds_ephemeral_glm53_command(self):
         cmd = build_command("pi", "inspect the repo")
         assert cmd[:3] == ["pi", "--provider", "zai-coding-cn"]
-        assert ["--model", "glm-5.2"] == cmd[3:5]
+        assert ["--model", "glm-5.3"] == cmd[3:5]
         assert "--no-session" in cmd
         assert "--mode" not in cmd
         assert "inspect the repo" in cmd
