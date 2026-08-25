@@ -59,12 +59,12 @@ class TestProviderToModel:
     """Provider strings map to short model names."""
 
     CASES: ClassVar[dict[str, str]] = {
-        "zhipu": "glm52",
+        "zhipu": "glm53",
         "infini": "mm27",
         "volcano": "doubao",
         "gemini": "gem31",
         "codex": "gpt54",
-        "opencode": "glm52o",
+        "opencode": "glm53o",
         "goose": "glm51g",
         "droid": "glm5",
     }

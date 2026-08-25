@@ -2527,7 +2527,7 @@ class TestExplainDispatchModeParity:
         assert plan["search_attributes"]["mtor_mode"] == mode
         assert dispatched_spec["risk"] == plan["risk"]
         assert call_kwargs["id"] == plan["workflow_id"]
-        assert call_kwargs["id"].startswith("ribosome-glm52-audit-the-kinase-")
+        assert call_kwargs["id"].startswith("ribosome-glm53-audit-the-kinase-")
 
 
 # ---------------------------------------------------------------------------
