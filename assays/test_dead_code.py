@@ -19,7 +19,7 @@ ALLOWLIST = {
     "review", "verdict", "archive", "init", "rptor", "rptor_done",
     "ragulator", "rapa", "derapa", "deptor", "dedeptor", "autophagy",
     "dispatch_all", "batch_cancel", "spec_new", "spec_validate",
-    "rictor_deploy", "setup_search_attrs",
+    "rictor_deploy", "rictor_reap_orphan_workers", "setup_search_attrs",
     # watch/control helpers called by operators or future controllers
     "prioritize_specs", "circadian_dispatch_rate", "check_ganglion_load",
     "feedback_dispatch_blocked",
