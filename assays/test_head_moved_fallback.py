@@ -10,16 +10,8 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_head_moved_fallback.py -v
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 from unittest.mock import patch
-
-import pytest
-
-integration = pytest.mark.skipif(
-    not os.environ.get("MTOR_INTEGRATION"),
-    reason="integration: drives real git init/worktree, needs git identity config absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
-)
 
 
 def _run(coro):
@@ -85,17 +77,35 @@ class TestChaperoneHeadMovedFallback:
 class TestWorktreeRetry:
     """_create_worktree retries on git lock contention."""
 
-    @integration
+    def _init_repo(self, tmp_path):
+        """Create a repo with a local (repo-scoped) git identity and one commit."""
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "mtor-test"],
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "config",
+                "user.email",
+                "mtor-test@example.invalid",
+            ],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            capture_output=True, cwd=str(tmp_path),
+        )
+
     def test_succeeds_on_second_attempt(self, tmp_path):
         """Worktree creation should retry and succeed after transient failure."""
         from mtor.worker.translocase import _create_worktree
 
         # Set up a real git repo
-        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
-        subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            capture_output=True, cwd=str(tmp_path),
-        )
+        self._init_repo(tmp_path)
 
         call_count = 0
         original_run = subprocess.run

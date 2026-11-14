@@ -5,12 +5,9 @@ Runs via: cd ~/code/mtor && uv run pytest assays/test_reconcile.py -x
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,28 +19,39 @@ from mtor.reconcile import (
     reconcile_workflow_specs,
 )
 
-integration = pytest.mark.skipif(
-    not os.environ.get("MTOR_INTEGRATION"),
-    reason="integration: check_code_exists resolves against ~/code/mtor, absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
-)
+
+def _write_repo_file(repo_root: Path, rel_path: str, content: str) -> None:
+    """Write a file inside a synthetic repo rooted at ``repo_root``."""
+    target = repo_root / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
 
 
 class TestReconcileCheckCodeExists:
     """check_code_exists correctly detects existing files and functions."""
 
-    @integration
-    def test_file_exists_returns_true(self):
-        """Existing file → returns True."""
-        assert check_code_exists("mtor/reconcile.py") is True
+    def test_file_exists_returns_true(self, tmp_path: Path):
+        """Existing file inside the injected repo root → returns True."""
+        _write_repo_file(tmp_path, "mtor/reconcile.py", "def check_code_exists():\n    return True\n")
+
+        assert check_code_exists("mtor/reconcile.py", repo_root=tmp_path) is True
 
     def test_file_missing_returns_false(self):
         """Missing file → returns False."""
         assert check_code_exists("mtor/nonexistent_file.py") is False
 
-    @integration
-    def test_function_exists_in_file_returns_true(self):
-        """Existing function in file → returns True."""
-        assert check_code_exists("mtor/reconcile.py:check_code_exists") is True
+    def test_function_exists_in_file_returns_true(self, tmp_path: Path):
+        """Existing function in file inside the injected repo root → returns True."""
+        _write_repo_file(
+            tmp_path,
+            "mtor/reconcile.py",
+            "def check_code_exists(file_or_function, repo_root=None):\n    return True\n",
+        )
+
+        assert (
+            check_code_exists("mtor/reconcile.py:check_code_exists", repo_root=tmp_path)
+            is True
+        )
 
     def test_function_missing_in_file_returns_false(self):
         """Missing function in existing file → returns False."""
@@ -331,9 +339,14 @@ workflow_id: wf-12345
         assert "status: done" in matched.read_text()
         assert "status: dispatched" in unmatched.read_text()
 
-    @integration
     def test_done_with_existing_code_no_warning(self, tmp_path: Path):
-        """done + files exist → correct, no warning."""
+        """done + files exist inside the injected repo root → correct, no warning."""
+        _write_repo_file(
+            tmp_path,
+            "mtor/reconcile.py",
+            "def check_code_exists(file_or_function, repo_root=None):\n    return True\n",
+        )
+        _write_repo_file(tmp_path, "mtor/cli.py", "app = None\n")
         spec_path = tmp_path / "test-done-code-exists.md"
         spec_path.write_text("""---
 name: test-done-code-exists
@@ -351,7 +364,7 @@ status: done
             "body": spec_path.read_text(),
         }
 
-        result = reconcile_spec(spec_dict, dry_run=True)
+        result = reconcile_spec(spec_dict, dry_run=True, repo_root=tmp_path)
         assert result["changed"] is False
         assert result["warning"] is None
 

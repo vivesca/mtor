@@ -8,12 +8,9 @@ discarded response body, so 402 Coding-plan-expired was indistinguishable from
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 from io import BytesIO
 from unittest.mock import patch
-
-import pytest
 
 from mtor.doctor import (
     ProbeResult,
@@ -21,11 +18,6 @@ from mtor.doctor import (
     _check_opencode_config_payload,
     _classify_response_error,
     _probe_provider,
-)
-
-integration = pytest.mark.skipif(
-    not os.environ.get("MTOR_INTEGRATION"),
-    reason="integration: asserts against the real ~/code/mtor lockfile state. Set MTOR_INTEGRATION=1 to run.",
 )
 
 
@@ -128,10 +120,29 @@ def test_probe_dataclass_has_classification_default():
 # --- Coding-plan lane check ------------------------------------------------
 
 
-@integration
-def test_coding_plan_lane_pass_with_real_lockfile():
-    """coding_plan_lane check should pass with the real lockfile."""
-    result = _check_coding_plan_lane()
+def _coding_plan_config() -> dict:
+    """Lockfile payload that passes the coding-plan lane check."""
+    return {
+        "_schema": 2,
+        "providers": {
+            "zhipu": {
+                "key_env": "ZHIPU_API_KEY",
+                "base_url": "https://open.bigmodel.cn/api/anthropic",
+                "models": {
+                    "opus": "glm-4.6",
+                    "sonnet": "glm-4.6",
+                    "haiku": "glm-4.5-air",
+                },
+            }
+        },
+    }
+
+
+def test_coding_plan_lane_pass_with_injected_lockfile(tmp_path):
+    """coding_plan_lane check passes against a lockfile built in tmp_path."""
+    config_file = tmp_path / "lock.json"
+    config_file.write_text(json.dumps(_coding_plan_config()))
+    result = _check_coding_plan_lane(str(config_file))
     assert result["ok"] is True
     assert result["budget_lane"] == "zhipu-coding-plan"
     assert result["base_url"] == "https://open.bigmodel.cn/api/anthropic"
