@@ -20,6 +20,10 @@ ACCEPTED_VERDICTS = {"accepted", "approved", "approved_with_flags", "early_exit_
 # the local home so existing files are not falsely reported missing.
 _REMOTE_HOME_ROOTS = ("/home/vivesca", "/root")
 
+# Repo root that spec "Files to edit" entries resolve against when the caller
+# does not supply one. Kept as a module constant so seams can fall back to it.
+_DEFAULT_REPO_ROOT = Path.home() / "code" / "mtor"
+
 
 def _candidate_paths(path_part: str, repo_root: Path) -> list[Path]:
     """Resolve a spec file entry to candidate filesystem paths to probe.
@@ -51,7 +55,7 @@ def _candidate_paths(path_part: str, repo_root: Path) -> list[Path]:
 
 
 def check_code_exists(
-    file_or_function: str, repo_root: Path = Path.home() / "code" / "mtor"
+    file_or_function: str, repo_root: Path = _DEFAULT_REPO_ROOT
 ) -> bool:
     """Check if a function or file exists in the codebase.
 
@@ -152,6 +156,7 @@ def reconcile_spec(
     dry_run: bool = False,
     client: Any | None = None,
     workflow_description: Any | None = None,
+    repo_root: Path | None = None,
 ) -> dict[str, Any]:
     """Reconcile a single spec's status against Temporal and git.
 
@@ -165,6 +170,7 @@ def reconcile_spec(
 
     2. If status == "done":
        - if spec lists files/functions in "Files to edit": check if code exists
+         (resolved against ``repo_root`` when given, else the default repo)
        - if none found: warn "status=done but code not found"
 
     3. If status == "ready" and depends_on is set:
@@ -290,7 +296,7 @@ def reconcile_spec(
         # Check each entry
         missing = []
         for entry in file_entries:
-            if not check_code_exists(entry):
+            if not check_code_exists(entry, repo_root=repo_root or _DEFAULT_REPO_ROOT):
                 missing.append(entry)
 
         if missing:

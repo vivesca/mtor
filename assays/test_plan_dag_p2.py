@@ -4,21 +4,13 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import sys
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from mtor.backend import TemporalBackend
 from mtor.cli import app
 from mtor.rptor import topological_sort
-
-integration = pytest.mark.skipif(
-    not os.environ.get("MTOR_INTEGRATION"),
-    reason="integration: dispatch-all reads specs whose repo: paths resolve to ~/code/mtor, absent on a clean runner. Set MTOR_INTEGRATION=1 to run.",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +40,22 @@ def _write_spec(tmp_path, name, frontmatter, body=""):
     )
 
 
+def _hermetic_repo(tmp_path, monkeypatch):
+    """Redirect Path.home() at tmp_path and build the repo skeleton inside it.
+
+    dispatch_all validates spec ``tests.run`` paths against
+    ``Path.home() / "code" / "mtor"``; pointing HOME at tmp_path keeps that
+    resolution hermetic on a runner without ~/code/mtor. Path.home() reads
+    HOME at call time, so setenv is sufficient.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    repo_assays = tmp_path / "code" / "mtor" / "assays"
+    repo_assays.mkdir(parents=True, exist_ok=True)
+    (repo_assays / "test_plan_dag_p2.py").write_text(
+        "# synthetic test file for spec validation\n", encoding="utf-8"
+    )
+
+
 _CLIENT_PATCH_TARGETS = [
     "mtor.cli._get_client",
     "mtor.dispatch._get_client",
@@ -64,7 +72,7 @@ def _make_mock_client():
 
     async def _empty_list(query=None):
         return
-        yield  # make this an async generator  # noqa: unreachable
+        yield  # make this an async generator
 
     client.list_workflows = _empty_list
     return client, handle
@@ -137,9 +145,9 @@ class TestTopologicalSort:
 
 
 class TestDispatchAllTopologicalOrder:
-    @integration
-    def test_test_dispatch_all_topological_order(self, tmp_path):
+    def test_test_dispatch_all_topological_order(self, tmp_path, monkeypatch):
         """dispatch-all --dry-run returns specs in topological (dependency) order."""
+        _hermetic_repo(tmp_path, monkeypatch)
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
         _write_spec(tmp_path, "b", "status: done\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
         _write_spec(tmp_path, "d", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
@@ -156,9 +164,9 @@ class TestDispatchAllTopologicalOrder:
         # Both dispatchable, no inter-dispatchable deps → alphabetical: c, e
         assert names == ["c", "e"]
 
-    @integration
-    def test_test_dispatch_all_dry_run(self, tmp_path):
+    def test_test_dispatch_all_dry_run(self, tmp_path, monkeypatch):
         """dispatch-all --dry-run lists specs without connecting to Temporal."""
+        _hermetic_repo(tmp_path, monkeypatch)
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
         _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build b.")
 
@@ -173,9 +181,9 @@ class TestDispatchAllTopologicalOrder:
 
 
 class TestSearchAttributeSetOnDispatch:
-    @integration
-    def test_test_search_attribute_set_on_dispatch(self, tmp_path):
+    def test_test_search_attribute_set_on_dispatch(self, tmp_path, monkeypatch):
         """dispatch-all passes provider to each dispatched workflow spec."""
+        _hermetic_repo(tmp_path, monkeypatch)
         _write_spec(tmp_path, "a", "status: done\ntests:\n  run: pytest assays/test_plan_dag_p2.py")
         _write_spec(tmp_path, "b", "status: ready\ndepends_on:\n  - a\ntests:\n  run: pytest assays/test_plan_dag_p2.py", body="Build b.")
 

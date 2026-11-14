@@ -15,11 +15,6 @@ from mtor.doctor import (
     format_health_display,
 )
 
-integration = pytest.mark.skipif(
-    not os.environ.get("MTOR_INTEGRATION"),
-    reason="integration: doctor() runs real env checks (lockfile/billing over ~/code/mtor) that leak past mocks on a clean runner. Set MTOR_INTEGRATION=1 to run.",
-)
-
 
 class TestCheckTemporalReachableSuccess(unittest.TestCase):
     """Test successful Temporal connection check."""
